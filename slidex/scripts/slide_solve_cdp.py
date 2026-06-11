@@ -111,7 +111,7 @@ async def _run(
             "error": str(e),
         }
     finally:
-        await solver._close_cdp_only()
+        await solver.close()
 
 
 if __name__ == "__main__":

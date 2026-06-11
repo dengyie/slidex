@@ -119,7 +119,11 @@ class SliderImageMatcher:
 
 
 # 便捷函数
-find_gap = SliderImageMatcher.find_gap_position
+def find_gap(background, puzzle_piece, offset_correction=-35):
+    """向后兼容：只返回 gap_x"""
+    gap_x, _ = SliderImageMatcher.find_gap_position(background, puzzle_piece, offset_correction)
+    return gap_x
+
 find_gap_from_bytes = SliderImageMatcher.find_gap_from_bytes
 find_gap_with_confidence = SliderImageMatcher.find_gap_with_confidence
 

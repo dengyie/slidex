@@ -225,4 +225,82 @@ class TestBrowserDataDir:
         with tempfile.TemporaryDirectory() as td:
             cfg = SlidexConfig(browser_data_dir=td)
             s = SliderSolver(cookie_id="bduser", config=cfg)
-            assert s.profile_dir.exists()
+            # profile_dir is not created in __init__ anymore (deferred to _init_browser)
+            assert not s.profile_dir.exists()
+            # but the path is set correctly
+            assert "slider_bduser" in str(s.profile_dir)
+
+
+# ════════════════════════════════════════════════════════════
+# Selectors configuration
+# ════════════════════════════════════════════════════════════
+
+from slidex.solver import DEFAULT_SELECTORS
+
+
+class TestSelectors:
+    def test_default_selectors_has_all_keys(self):
+        required = {
+            "slider_btn", "slider_track", "bg_img", "piece_img",
+            "track_width", "slider_alt", "result_url_pattern", "success_code",
+        }
+        assert required == set(DEFAULT_SELECTORS.keys())
+
+    def test_slider_alt_is_tuple(self):
+        assert isinstance(DEFAULT_SELECTORS["slider_alt"], tuple)
+
+    def test_result_url_pattern_is_tuple(self):
+        assert isinstance(DEFAULT_SELECTORS["result_url_pattern"], tuple)
+
+    def test_constructor_merges_with_defaults(self):
+        s = SliderSolver(selectors={"slider_btn": ".my-btn", "success_code": 1})
+        assert s.selectors["slider_btn"] == ".my-btn"
+        assert s.selectors["success_code"] == 1
+        assert s.selectors["slider_track"] == DEFAULT_SELECTORS["slider_track"]
+
+    def test_none_selectors_uses_defaults(self):
+        s = SliderSolver(selectors=None)
+        assert s.selectors == DEFAULT_SELECTORS
+
+    def test_empty_selectors_uses_defaults(self):
+        s = SliderSolver(selectors={})
+        assert s.selectors == DEFAULT_SELECTORS
+
+
+# ════════════════════════════════════════════════════════════
+# CDP mode
+# ════════════════════════════════════════════════════════════
+
+class TestCDPMode:
+    def test_is_cdp_mode_defaults_false(self):
+        s = SliderSolver()
+        assert s._is_cdp_mode is False
+
+    def test_solve_on_existing_page_method_exists(self):
+        import inspect
+        assert hasattr(SliderSolver, "solve_on_existing_page")
+        sig = inspect.signature(SliderSolver.solve_on_existing_page)
+        assert "cdp_endpoint" in sig.parameters
+        assert "page_url" in sig.parameters
+
+    def test_close_method_exists(self):
+        import inspect
+        assert hasattr(SliderSolver, "close")
+        method = getattr(SliderSolver, "close")
+        assert inspect.iscoroutinefunction(method)
+
+    def test_fallback_or_fail_skips_remote_in_cdp_mode(self):
+        s = SliderSolver()
+        s._is_cdp_mode = True
+        result = asyncio.run(s._fallback_or_fail("https://example.com"))
+        assert result == (False, None)
+
+
+# ════════════════════════════════════════════════════════════
+# CLI entry point
+# ════════════════════════════════════════════════════════════
+
+class TestCLI:
+    def test_import_cli(self):
+        from slidex.scripts.slide_solve_cdp import main
+        assert callable(main)

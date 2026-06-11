@@ -242,6 +242,9 @@ class SliderSolver:
         return await self._fallback_or_fail(verify_url)
 
     async def _fallback_or_fail(self, verify_url):
+        if self._is_cdp_mode:
+            logger.warning(f"[{self.pure_user_id}] CDP mode: skipping remote fallback")
+            return False, None
         if self.trajectory_mode in ("auto", "recorded"):
             try:
                 result = await self._fallback_to_remote(verify_url)
@@ -579,6 +582,7 @@ class SliderSolver:
 
         await self.page.add_init_script(STEALTH_INIT_SCRIPT)
         self.page.on("response", self._on_response)
+        self.page.on("close", lambda: logger.warning(f"[{self.pure_user_id}] page closed (external browser)!"))
 
         try:
             self._cdp = await self.context.new_cdp_session(self.page)
@@ -820,6 +824,13 @@ class SliderSolver:
     # ════════════════════════════════════════════════════════════
     #  清理
     # ════════════════════════════════════════════════════════════
+    async def close(self):
+        """公共清理入口 — 根据模式选择正确的清理路径"""
+        if self._is_cdp_mode:
+            await self._close_cdp_only()
+        else:
+            await self._close()
+
     async def _close(self):
         for obj in [self.context]:
             if obj:
