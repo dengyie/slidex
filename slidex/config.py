@@ -52,18 +52,25 @@ class SlidexConfig:
         return self.calibration_dir or self._default_dir("calibration")
 
     @classmethod
+    def _safe_int(cls, value: str, default: int) -> int:
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return default
+
+    @classmethod
     def from_env(cls) -> "SlidexConfig":
         return cls(
-            max_concurrent=int(os.environ.get("SLIDEX_MAX_CONCURRENT", "3")),
-            wait_timeout=int(os.environ.get("SLIDEX_WAIT_TIMEOUT", "60")),
+            max_concurrent=cls._safe_int(os.environ.get("SLIDEX_MAX_CONCURRENT", "3"), 3),
+            wait_timeout=cls._safe_int(os.environ.get("SLIDEX_WAIT_TIMEOUT", "60"), 60),
             trajectory_pool_enabled=os.environ.get("SLIDEX_TRAJ_POOL_ENABLED", "1") == "1",
-            trajectory_pool_max_per_cookie=int(os.environ.get("SLIDEX_TRAJ_POOL_MAX", "50")),
-            trajectory_pool_min_pool_size=int(os.environ.get("SLIDEX_TRAJ_POOL_MIN", "5")),
+            trajectory_pool_max_per_cookie=cls._safe_int(os.environ.get("SLIDEX_TRAJ_POOL_MAX", "50"), 50),
+            trajectory_pool_min_pool_size=cls._safe_int(os.environ.get("SLIDEX_TRAJ_POOL_MIN", "5"), 5),
             trajectory_pool_rotation_strategy=os.environ.get("SLIDEX_TRAJ_POOL_STRATEGY", "lru"),
             trajectory_pool_base_dir=os.environ.get("SLIDEX_TRAJ_POOL_DIR") or None,
             remote_captcha_enabled=os.environ.get("SLIDEX_REMOTE_ENABLED", "1") == "1",
-            remote_captcha_timeout=int(os.environ.get("SLIDEX_REMOTE_TIMEOUT", "180")),
-            remote_captcha_poll_interval=int(os.environ.get("SLIDEX_REMOTE_POLL", "2")),
+            remote_captcha_timeout=cls._safe_int(os.environ.get("SLIDEX_REMOTE_TIMEOUT", "180"), 180),
+            remote_captcha_poll_interval=cls._safe_int(os.environ.get("SLIDEX_REMOTE_POLL", "2"), 2),
             browser_data_dir=os.environ.get("SLIDEX_BROWSER_DATA_DIR") or None,
             debug_screenshot_dir=os.environ.get("SLIDEX_DEBUG_SCREENSHOT_DIR") or None,
             calibration_dir=os.environ.get("SLIDEX_CALIBRATION_DIR") or None,

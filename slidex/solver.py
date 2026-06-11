@@ -198,12 +198,11 @@ class SliderSolver:
     # ════════════════════════════════════════════════════════════
     async def _fallback_to_remote(self, verify_url) -> Tuple[bool, Optional[dict]]:
         try:
-            from slidex.remote import CaptchaRemoteController
+            from slidex.remote import captcha_controller
         except ImportError:
             logger.warning(f"[{self.pure_user_id}] captcha_remote_control not available")
             return False, None
 
-        _remote_ctrl = CaptchaRemoteController()
         session_id = f"slider_fallback_{self.pure_user_id}_{int(time.time())}"
         logger.info(f"[{self.pure_user_id}] starting remote fallback session: {session_id}")
 
@@ -217,7 +216,7 @@ class SliderSolver:
                 return False, None
 
         try:
-            await _remote_ctrl.create_session(session_id, self.page)
+            await captcha_controller.create_session(session_id, self.page)
         except Exception as e:
             logger.error(f"[{self.pure_user_id}] create remote session failed: {e}")
             return False, None
@@ -244,12 +243,12 @@ class SliderSolver:
 
         while time.time() < deadline:
             try:
-                completed = await _remote_ctrl.check_completion(session_id)
+                completed = await captcha_controller.check_completion(session_id)
                 if completed:
                     logger.success(f"[{self.pure_user_id}] remote solve completed!")
                     cookies = await self._get_cookies()
                     try:
-                        recording = _remote_ctrl.finish_recording(session_id)
+                        recording = captcha_controller.finish_recording(session_id)
                         if recording and recording.get("points"):
                             self._trajectory_pool.save_trajectory(
                                 recording["points"], self.pure_user_id,
@@ -258,7 +257,7 @@ class SliderSolver:
                             logger.info(f"[{self.pure_user_id}] trajectory recorded from remote solve")
                     except Exception as e:
                         logger.warning(f"[{self.pure_user_id}] trajectory record failed: {e}")
-                    await _remote_ctrl.close_session(session_id)
+                    await captcha_controller.close_session(session_id)
                     return True, cookies
                 await asyncio.sleep(poll_interval)
             except Exception as e:
@@ -267,7 +266,7 @@ class SliderSolver:
 
         logger.warning(f"[{self.pure_user_id}] remote fallback timed out after {timeout}s")
         try:
-            await _remote_ctrl.close_session(session_id)
+            await captcha_controller.close_session(session_id)
         except Exception:
             pass
         return False, None

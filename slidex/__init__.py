@@ -4,7 +4,7 @@ from slidex._stealth_patch import STEALTH_LAUNCH_ARGS, STEALTH_INIT_SCRIPT
 from slidex._trajectory import generate_trajectory, trajectory_to_points
 from slidex._trajectory_pool import SliderTrajectoryPool
 from slidex._image_match import SliderImageMatcher, find_gap, find_gap_from_bytes
-from slidex.remote import CaptchaRemoteController
+from slidex.remote import CaptchaRemoteController, captcha_controller
 
 __all__ = [
     "SlidexConfig",
@@ -18,4 +18,5 @@ __all__ = [
     "find_gap",
     "find_gap_from_bytes",
     "CaptchaRemoteController",
+    "captcha_controller",
 ]

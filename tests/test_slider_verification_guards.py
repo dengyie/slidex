@@ -216,7 +216,7 @@ class TestSliderVerificationGuards:
         slider = self._make_slider(page)
 
         assert slider.check_page_changed()
-    @mock.patch("utils.xianyu_slider_stealth.time.sleep", return_value=None)
+    @mock.patch("slidex.stealth.time.sleep", return_value=None)
     def test_check_verification_success_fast_rejects_punish_after_container_missing(self, _mock_sleep):
         page = _FakePage(
             title="闲鱼",
@@ -240,7 +240,7 @@ class TestSliderVerificationGuards:
         assert not result
         assert slider.last_verification_feedback.get("status") == "hard_block"
         assert slider.last_verification_feedback.get("source") == "punish_captcha"
-    @mock.patch("utils.xianyu_slider_stealth.time.sleep", return_value=None)
+    @mock.patch("slidex.stealth.time.sleep", return_value=None)
     def test_wait_for_context_login_does_not_finish_while_verification_page_still_visible_and_cookies_incomplete(self, _mock_sleep):
         page = _FakePage(title="扫码验证", url="https://www.taobao.com/")
         verify_frame = _FakeVerificationFrame(
@@ -311,7 +311,7 @@ class TestSliderVerificationGuards:
 
         assert result is None
         assert "服务端Session仍未就绪" in slider.last_login_error
-    @mock.patch("utils.xianyu_slider_stealth.time.sleep", return_value=None)
+    @mock.patch("slidex.stealth.time.sleep", return_value=None)
     def test_find_slider_elements_reactivates_recoverable_punish_shell(self, _mock_sleep):
         page = _RecoverablePunishPage()
         slider = self._make_slider(page)
@@ -323,7 +323,7 @@ class TestSliderVerificationGuards:
         assert slider_button is not None
         assert slider_track is not None
         assert slider.last_verification_feedback.get("status") != "hard_block"
-    @mock.patch("utils.xianyu_slider_stealth.time.sleep", return_value=None)
+    @mock.patch("slidex.stealth.time.sleep", return_value=None)
     def test_solve_slider_recovers_recoverable_punish_shell_before_hard_block(self, _mock_sleep):
         page = _RecoverablePunishPage()
         slider = self._make_slider(page)
@@ -371,7 +371,7 @@ class TestSliderVerificationGuards:
         assert not result
         assert page.activated
         assert slider.last_verification_feedback.get("source") == "keyword"
-    @mock.patch("utils.xianyu_slider_stealth.time.sleep")
+    @mock.patch("slidex.stealth.time.sleep")
     def test_find_slider_elements_waits_for_punish_slider_dom_before_hard_block(self, mock_sleep):
         page = _DelayedPunishSliderPage()
         mock_sleep.side_effect = lambda *_args, **_kwargs: page.advance()
@@ -383,7 +383,7 @@ class TestSliderVerificationGuards:
         assert slider_button is not None
         assert slider_track is not None
         assert slider.last_verification_feedback.get("status") != "hard_block"
-    @mock.patch("utils.xianyu_slider_stealth.time.sleep")
+    @mock.patch("slidex.stealth.time.sleep")
     def test_solve_slider_waits_for_punish_slider_dom_before_hard_block(self, mock_sleep):
         page = _DelayedPunishSliderPage()
         mock_sleep.side_effect = lambda *_args, **_kwargs: page.advance()
@@ -431,7 +431,7 @@ class TestSliderVerificationGuards:
 
         assert not result
         assert slider.last_verification_feedback.get("source") == "keyword"
-    @mock.patch("utils.xianyu_slider_stealth.time.sleep", return_value=None)
+    @mock.patch("slidex.stealth.time.sleep", return_value=None)
     def test_is_hard_block_page_allows_recoverable_punish_shell(self, _mock_sleep):
         page = _RecoverablePunishPage()
         slider = self._make_slider(page)
@@ -440,7 +440,7 @@ class TestSliderVerificationGuards:
 
         assert not result
         assert page.activated
-    @mock.patch("utils.xianyu_slider_stealth.time.sleep")
+    @mock.patch("slidex.stealth.time.sleep")
     def test_is_hard_block_page_waits_for_delayed_punish_slider_dom(self, mock_sleep):
         page = _DelayedPunishSliderPage()
         mock_sleep.side_effect = lambda *_args, **_kwargs: page.advance()
@@ -475,7 +475,7 @@ class TestSliderVerificationGuards:
             history = slider._get_learning_history_with_fallback(reference_distance=258.0)
 
         user_ids = {record.get("user_id") for record in history}
-        assert user_ids, {"current_token_refresh_sample" == "keepalive_sample"}
+        assert user_ids == {"current_token_refresh_sample", "keepalive_sample"}
     def test_save_success_record_persists_trigger_scene_and_server_wait(self):
         slider = self._make_slider(_FakePage())
         slider.profile_id = "win_chrome_147_1600x900"
@@ -904,10 +904,10 @@ class TestSliderVerificationGuards:
         removed_paths = []
         profile_dir = os.path.join(os.getcwd(), "browser_data", "user_local_dead_lock")
 
-        with mock.patch("utils.xianyu_slider_stealth.os.path.islink", return_value=True), \
-             mock.patch("utils.xianyu_slider_stealth.os.readlink", return_value="local-host-4321"), \
-             mock.patch("utils.xianyu_slider_stealth.os.path.lexists", return_value=True), \
-             mock.patch("utils.xianyu_slider_stealth.os.unlink", side_effect=lambda path: removed_paths.append(path)):
+        with mock.patch("slidex.stealth.os.path.islink", return_value=True), \
+             mock.patch("slidex.stealth.os.readlink", return_value="local-host-4321"), \
+             mock.patch("slidex.stealth.os.path.lexists", return_value=True), \
+             mock.patch("slidex.stealth.os.unlink", side_effect=lambda path: removed_paths.append(path)):
             cleaned = slider._try_cleanup_stale_chromium_singleton_lock(profile_dir)
 
         assert cleaned
@@ -924,10 +924,10 @@ class TestSliderVerificationGuards:
         removed_paths = []
         profile_dir = os.path.join(os.getcwd(), "browser_data", "user_container_rollover_lock")
 
-        with mock.patch("utils.xianyu_slider_stealth.os.path.islink", return_value=True), \
-             mock.patch("utils.xianyu_slider_stealth.os.readlink", return_value="2d33e833c324-911"), \
-             mock.patch("utils.xianyu_slider_stealth.os.path.lexists", return_value=True), \
-             mock.patch("utils.xianyu_slider_stealth.os.unlink", side_effect=lambda path: removed_paths.append(path)):
+        with mock.patch("slidex.stealth.os.path.islink", return_value=True), \
+             mock.patch("slidex.stealth.os.readlink", return_value="2d33e833c324-911"), \
+             mock.patch("slidex.stealth.os.path.lexists", return_value=True), \
+             mock.patch("slidex.stealth.os.unlink", side_effect=lambda path: removed_paths.append(path)):
             cleaned = slider._try_cleanup_stale_chromium_singleton_lock(profile_dir)
 
         assert cleaned
@@ -944,10 +944,10 @@ class TestSliderVerificationGuards:
         removed_paths = []
         profile_dir = os.path.join(os.getcwd(), "browser_data", "user_foreign_host_lock")
 
-        with mock.patch("utils.xianyu_slider_stealth.os.path.islink", return_value=True), \
-             mock.patch("utils.xianyu_slider_stealth.os.readlink", return_value="remote-host-4321"), \
-             mock.patch("utils.xianyu_slider_stealth.os.path.lexists", return_value=True), \
-             mock.patch("utils.xianyu_slider_stealth.os.unlink", side_effect=lambda path: removed_paths.append(path)):
+        with mock.patch("slidex.stealth.os.path.islink", return_value=True), \
+             mock.patch("slidex.stealth.os.readlink", return_value="remote-host-4321"), \
+             mock.patch("slidex.stealth.os.path.lexists", return_value=True), \
+             mock.patch("slidex.stealth.os.unlink", side_effect=lambda path: removed_paths.append(path)):
             cleaned = slider._try_cleanup_stale_chromium_singleton_lock(profile_dir)
 
         assert not cleaned

@@ -358,3 +358,7 @@ class CaptchaRemoteController:
             except Exception as e:
                 logger.error(f"自动刷新截图失败: {e}")
                 await asyncio.sleep(1)
+
+
+# 全局单例 — solver.py 和 api.py 共享
+captcha_controller = CaptchaRemoteController()

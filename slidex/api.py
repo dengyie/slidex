@@ -11,10 +11,9 @@ import asyncio
 import os
 from loguru import logger
 
-from slidex.remote import CaptchaRemoteController
+from slidex.remote import captcha_controller
 from slidex._trajectory_pool import SliderTrajectoryPool
 
-captcha_controller = CaptchaRemoteController()
 trajectory_pool = SliderTrajectoryPool()
 
 # 创建路由器
