@@ -10,7 +10,9 @@
   <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License">
 </p>
 
-> **[中文](README.md)**
+<p align="center">
+  <a href="README.md">中文</a> | <strong>English</strong>
+</p>
 
 Slidex is a generic slider CAPTCHA solver library. It supports connecting to an existing browser (CDP mode) or launching its own, with built-in image recognition, trajectory simulation, anti-detection, and remote human fallback. Suitable for batch account verification and automation flows that encounter slider CAPTCHAs.
 

@@ -10,7 +10,9 @@
   <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License">
 </p>
 
-> **[English](README_EN.md)**
+<p align="center">
+  <strong>中文</strong> | <a href="README_EN.md">English</a>
+</p>
 
 Slidex 是一个通用的滑块验证码自动求解库。支持连接已有浏览器（CDP 模式）或独立启动浏览器，内置图像识别、轨迹模拟、反检测和远程人工兜底。适用于批量账号验证、自动化流程中遇到滑块验证码的场景。
 
