@@ -39,3 +39,5 @@ Cli-Proxy-API-Management-Center/
 
 # Claude
 .claude/
+trajectory_history/
+.venv/
