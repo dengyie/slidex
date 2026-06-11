@@ -1,8 +1,8 @@
 # Slidex
 
 <p align="center">
-  <strong>通用滑块验证码求解库</strong><br>
-  <em>Generic Slider CAPTCHA Solver</em>
+  <strong>Generic Slider CAPTCHA Solver</strong><br>
+  <em>通用滑块验证码求解库</em>
 </p>
 
 <p align="center">
@@ -10,19 +10,19 @@
   <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License">
 </p>
 
-> **[English](README_EN.md)**
+> **[中文](README.md)**
 
-Slidex 是一个通用的滑块验证码自动求解库。支持连接已有浏览器（CDP 模式）或独立启动浏览器，内置图像识别、轨迹模拟、反检测和远程人工兜底。适用于批量账号验证、自动化流程中遇到滑块验证码的场景。
+Slidex is a generic slider CAPTCHA solver library. It supports connecting to an existing browser (CDP mode) or launching its own, with built-in image recognition, trajectory simulation, anti-detection, and remote human fallback. Suitable for batch account verification and automation flows that encounter slider CAPTCHAs.
 
-## 安装
+## Installation
 
 ```bash
 pip install -e .
 playwright install chromium
-pip install -e ".[remote]"   # 可选：远程控制 API
+pip install -e ".[remote]"   # optional: remote control API
 ```
 
-## 快速开始
+## Quick Start
 
 ```python
 from slidex import SlidexConfig, SliderSolver
@@ -37,20 +37,20 @@ solver = SliderSolver(
 success, cookies = await solver.solve("https://...verification_url...")
 ```
 
-## 技术概览
+## Technical Overview
 
-- **图像识别**：OpenCV Canny 边缘检测 + 模板匹配定位缺口，JS 计算交叉验证
-- **轨迹模拟**：4 阶段物理模型（慢启动→加速→中速→微调），支持真人轨迹录制回放
-- **反检测**：Chromium 启动参数 + JS 注入隐藏自动化特征
-- **可配置选择器**：通过 `selectors={}` 参数适配不同验证码供应商（Aliyun、GeeTest、Shumei 等）
+- **Image recognition**: OpenCV Canny edge detection + template matching, cross-validated with JS calculation
+- **Trajectory simulation**: 4-phase physics model (slow start → accelerate → medium → fine-tune), with recorded trajectory replay
+- **Anti-detection**: Chromium launch args + JS injection to hide automation fingerprints
+- **Configurable selectors**: Adapt to different CAPTCHA providers (Aliyun, GeeTest, Shumei, etc.) via `selectors={}`
 
 ---
 
-## 接入指南
+## Integration Guide
 
-### 1. CDP 模式（推荐，连接已有浏览器）
+### 1. CDP Mode (Recommended — connect to existing browser)
 
-适用于已有 Playwright/浏览器会话的场景（如 TypeScript 项目）。不启动新浏览器，通过 CDP 协议连接：
+For scenarios with an existing Playwright/browser session (e.g. TypeScript projects). No new browser is launched:
 
 ```python
 from slidex import SliderSolver
@@ -58,7 +58,7 @@ from slidex import SliderSolver
 solver = SliderSolver(
     cookie_id="user_123",
     trajectory_mode="auto",
-    selectors={  # 可选：覆盖默认选择器
+    selectors={  # optional: override default selectors
         "slider_btn": ".geetest_slider_button",
         "slider_track": ".geetest_slider_track",
     },
@@ -66,13 +66,13 @@ solver = SliderSolver(
 
 success, cookies = await solver.solve_on_existing_page(
     cdp_endpoint="ws://localhost:9222/devtools/browser/xxx",
-    page_url="https://...",  # 可选：先导航到此 URL
+    page_url="https://...",  # optional: navigate to this URL first
 )
 
 await solver.close()
 ```
 
-### 2. CLI 调用（适合 TypeScript/Node 子进程调用）
+### 2. CLI (for TypeScript/Node subprocess calls)
 
 ```bash
 python -m slidex.scripts.slide_solve_cdp \
@@ -81,13 +81,13 @@ python -m slidex.scripts.slide_solve_cdp \
   --selectors '{"slider_btn": ".geetest_slider_button"}'
 ```
 
-输出 JSON：
+Output JSON:
 
 ```json
 {"success": true, "cookies": {...}, "elapsed_ms": 3200.5, "error": null}
 ```
 
-### 3. TypeScript 集成示例
+### 3. TypeScript Integration
 
 ```typescript
 import { execSync } from 'child_process';
@@ -108,9 +108,9 @@ if (result.success) {
 }
 ```
 
-### 4. 自定义选择器
+### 4. Custom Selectors
 
-默认适配 Aliyun NoCaptcha。其他供应商需要传入对应选择器：
+Default selectors are for Aliyun NoCaptcha. For other providers:
 
 ```python
 solver = SliderSolver(
@@ -125,19 +125,19 @@ solver = SliderSolver(
 )
 ```
 
-完整配置项见源码 `slidex/solver.py` 中的 `DEFAULT_SELECTORS`。
+See `DEFAULT_SELECTORS` in `slidex/solver.py` for all available keys.
 
-### 5. 远程人工兜底
+### 5. Remote Human Fallback
 
-自动求解失败时，可通过 WebSocket 将验证码推送给人工操作：
+When auto-solve fails, push the CAPTCHA to a human operator via WebSocket:
 
 ```bash
 pip install -e ".[remote]"
 uvicorn slidex.api:router --port 8000
-# 打开 http://localhost:8000/api/captcha/control
+# Open http://localhost:8000/api/captcha/control
 ```
 
-### 6. 回调接口
+### 6. Callbacks
 
 ```python
 config = SlidexConfig(
@@ -146,15 +146,15 @@ config = SlidexConfig(
 )
 ```
 
-### 7. 环境变量配置
+### 7. Environment Variables
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `SLIDEX_MAX_CONCURRENT` | `3` | 最大并发数 |
-| `SLIDEX_BROWSER_DATA_DIR` | `~/.slidex/browser_data` | 浏览器数据路径 |
-| `SLIDEX_TRAJ_POOL_DIR` | `~/.slidex/trajectories` | 轨迹存储路径 |
-| `SLIDEX_REMOTE_ENABLED` | `1` | 启用远程人工兜底 |
-| `SLIDEX_REMOTE_TIMEOUT` | `180` | 远程兜底超时（秒） |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SLIDEX_MAX_CONCURRENT` | `3` | Max concurrent sliders |
+| `SLIDEX_BROWSER_DATA_DIR` | `~/.slidex/browser_data` | Browser data path |
+| `SLIDEX_TRAJ_POOL_DIR` | `~/.slidex/trajectories` | Trajectory storage path |
+| `SLIDEX_REMOTE_ENABLED` | `1` | Enable remote human fallback |
+| `SLIDEX_REMOTE_TIMEOUT` | `180` | Remote fallback timeout (seconds) |
 
 ---
 
