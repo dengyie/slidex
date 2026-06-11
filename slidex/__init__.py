@@ -1,5 +1,5 @@
 from slidex.config import SlidexConfig
-from slidex.solver import SliderSolver
+from slidex.solver import SliderSolver, DEFAULT_SELECTORS
 from slidex._stealth_patch import STEALTH_LAUNCH_ARGS, STEALTH_INIT_SCRIPT
 from slidex._trajectory import generate_trajectory, trajectory_to_points
 from slidex._trajectory_pool import SliderTrajectoryPool
@@ -10,6 +10,7 @@ from slidex._concurrency import SliderConcurrencyManager, concurrency_manager
 __all__ = [
     "SlidexConfig",
     "SliderSolver",
+    "DEFAULT_SELECTORS",
     "STEALTH_LAUNCH_ARGS",
     "STEALTH_INIT_SCRIPT",
     "generate_trajectory",

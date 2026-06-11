@@ -11,6 +11,21 @@ from slidex._trajectory_pool import SliderTrajectoryPool
 from slidex.config import SlidexConfig
 
 
+# ════════════════════════════════════════════════════════════
+#  默认选择器配置（Aliyun NoCaptcha）
+# ════════════════════════════════════════════════════════════
+DEFAULT_SELECTORS = {
+    "slider_btn": "#nc_1_n1z",
+    "slider_track": "#nc_1_n1t",
+    "bg_img": "#nc_1_n1t img, .nc_scale img, img[id*=bg]",
+    "piece_img": ".nc_iconfont, #nc_1_n1z img, img[id*=slide]",
+    "track_width": ".nc_scale, [class*=track]",
+    "slider_alt": (".nc_iconfont", ".btn_slide", ".sm-btn", "#nc_1_n1z"),
+    "result_url_pattern": ("/slide?", "/_____tmd_____/slide"),
+    "success_code": 0,
+}
+
+
 # === Chromium process singleton: PID tracking + kill-before-launch ===
 import threading
 
@@ -80,14 +95,20 @@ def _find_chromium_pid_by_user_data_dir(user_data_dir):
 
 
 class SliderSolver:
-    SLIDER_BTN = "#nc_1_n1z"
-    SLIDER_TRACK = "#nc_1_n1t"
+    """滑块求解器
+
+    支持两种运行模式:
+      - solve(): 启动自己的浏览器
+      - solve_on_existing_page(): 连接已有浏览器（CDP 模式）
+    """
+
     MAX_RETRIES = 3
 
     def __init__(self, cookie_id="default", cookies_str="", headless=True, proxy=None,
                  trajectory_mode: str = "auto",
                  config: Optional[SlidexConfig] = None,
-                 notification_callback: Optional[Callable] = None):
+                 notification_callback: Optional[Callable] = None,
+                 selectors: Optional[Dict] = None):
         self.cookie_id = cookie_id
         raw_id = cookie_id.split("_")[0] if "_" in cookie_id else cookie_id
         sanitized = "".join(c for c in raw_id if c.isalnum() or c in "-_.")
@@ -101,13 +122,15 @@ class SliderSolver:
         self._current_recorded_trajectory = None
         self._config = config or SlidexConfig()
         self._notification_callback = notification_callback
+        self._is_cdp_mode = False
+        self.selectors = {**DEFAULT_SELECTORS, **(selectors or {})}
 
         traj_dir = self._config.get_trajectory_dir()
         self._trajectory_pool = SliderTrajectoryPool(base_dir=traj_dir)
 
         profile_root = Path(self._config.get_browser_data_dir())
         self.profile_dir = profile_root / f"slider_{self.pure_user_id}"
-        self.profile_dir.mkdir(parents=True, exist_ok=True)
+        # profile_dir creation deferred to _init_browser (not needed in CDP mode)
         self._playwright = None
         self.context = None
         self.page = None
@@ -120,69 +143,103 @@ class SliderSolver:
     #  主求解入口
     # ════════════════════════════════════════════════════════════
     async def solve(self, verify_url):
+        """启动自己的浏览器求解"""
         self.last_fallback_used = None
+        self._is_cdp_mode = False
         logger.info(f"[{self.pure_user_id}] solving (mode={self.trajectory_mode})...")
         try:
             await self._init_browser()
             await self._load_page(verify_url)
-            if not await self._wait_slider():
-                logger.warning(f"[{self.pure_user_id}] slider not found on page")
-                await self._save_debug_screenshot("slider_not_found")
-                return await self._fallback_or_fail(verify_url)
-
-            distance = await self._calc_distance_multi_source()
-            if distance is None or distance <= 0:
-                logger.warning(f"[{self.pure_user_id}] cannot determine distance")
-                return await self._fallback_or_fail(verify_url)
-
-            # ── Phase A: 录制轨迹模式 ──
-            if self.trajectory_mode in ("auto", "recorded"):
-                recorded = self._trajectory_pool.load_best_trajectory(
-                    self.pure_user_id, distance)
-                if recorded and recorded.get("points"):
-                    logger.info(f"[{self.pure_user_id}] using recorded trajectory "
-                                f"(dist={recorded['distance']:.0f}px, {len(recorded['points'])} points)")
-                    for attempt in range(1, self.MAX_RETRIES + 1):
-                        await self._do_slide(distance, attempt, recorded_trajectory=recorded)
-                        code = await self._wait_result(6.0)
-                        logger.info(f"[{self.pure_user_id}] recorded replay attempt {attempt}: code={code}")
-                        if code == 0:
-                            cookies = await self._get_cookies()
-                            logger.success(f"[{self.pure_user_id}] pass! (recorded, attempt={attempt})")
-                            return True, cookies
-                        if attempt < self.MAX_RETRIES:
-                            await asyncio.sleep(2 + random.uniform(1, 2))
-                            if not await self._wait_slider(10.0):
-                                break
-                            distance = await self._calc_distance_multi_source() or distance
-                    logger.warning(f"[{self.pure_user_id}] recorded replays exhausted")
-                    if self.trajectory_mode == "recorded":
-                        return await self._fallback_or_fail(verify_url)
-
-            # ── Phase B: 数学模型生成的轨迹 ──
-            logger.info(f"[{self.pure_user_id}] trying generated trajectories...")
-            for attempt in range(1, self.MAX_RETRIES + 1):
-                await self._do_slide(distance, attempt)
-                code = await self._wait_result(6.0)
-                logger.info(f"[{self.pure_user_id}] generated attempt {attempt}: code={code}")
-                if code == 0:
-                    cookies = await self._get_cookies()
-                    logger.success(f"[{self.pure_user_id}] pass! (generated, attempt={attempt})")
-                    return True, cookies
-                if attempt < self.MAX_RETRIES:
-                    await asyncio.sleep(2 + random.uniform(1, 2))
-                    if not await self._wait_slider(10.0):
-                        break
-                    distance = await self._calc_distance_multi_source() or distance
-
-            logger.warning(f"[{self.pure_user_id}] all auto retries exhausted")
-            return await self._fallback_or_fail(verify_url)
-
+            return await self._run_solve_loop(verify_url)
         except Exception as e:
             logger.error(f"[{self.pure_user_id}] error: {e}")
             return await self._fallback_or_fail(verify_url)
         finally:
             await self._close()
+
+    async def solve_on_existing_page(
+        self,
+        cdp_endpoint: str,
+        page_url: str = "",
+    ) -> Tuple[bool, Optional[dict]]:
+        """连接已有浏览器求解（CDP 模式）
+
+        Args:
+            cdp_endpoint: CDP WebSocket 地址，如 ws://localhost:9222/devtools/browser/xxx
+            page_url: 如果提供，先导航到此 URL
+
+        Returns:
+            (success, cookies)
+        """
+        self.last_fallback_used = None
+        self._is_cdp_mode = True
+        logger.info(f"[{self.pure_user_id}] solving on existing page "
+                    f"(cdp={cdp_endpoint[:60]}, mode={self.trajectory_mode})...")
+        try:
+            await self._connect_existing_browser(cdp_endpoint, page_url)
+            return await self._run_solve_loop(page_url)
+        except Exception as e:
+            logger.error(f"[{self.pure_user_id}] CDP solve error: {e}")
+            return False, None
+        finally:
+            await self._close_cdp_only()
+
+    async def _run_solve_loop(self, verify_url: str):
+        """核心求解循环 — 录制回放 + 数学生成 + 重试"""
+        if not await self._wait_slider():
+            logger.warning(f"[{self.pure_user_id}] slider not found on page")
+            await self._save_debug_screenshot("slider_not_found")
+            return await self._fallback_or_fail(verify_url)
+
+        distance = await self._calc_distance_multi_source()
+        if distance is None or distance <= 0:
+            logger.warning(f"[{self.pure_user_id}] cannot determine distance")
+            return await self._fallback_or_fail(verify_url)
+
+        success_code = self.selectors["success_code"]
+
+        # ── Phase A: 录制轨迹模式 ──
+        if self.trajectory_mode in ("auto", "recorded"):
+            recorded = self._trajectory_pool.load_best_trajectory(
+                self.pure_user_id, distance)
+            if recorded and recorded.get("points"):
+                logger.info(f"[{self.pure_user_id}] using recorded trajectory "
+                            f"(dist={recorded['distance']:.0f}px, {len(recorded['points'])} points)")
+                for attempt in range(1, self.MAX_RETRIES + 1):
+                    await self._do_slide(distance, attempt, recorded_trajectory=recorded)
+                    code = await self._wait_result(6.0)
+                    logger.info(f"[{self.pure_user_id}] recorded replay attempt {attempt}: code={code}")
+                    if code == success_code:
+                        cookies = await self._get_cookies()
+                        logger.success(f"[{self.pure_user_id}] pass! (recorded, attempt={attempt})")
+                        return True, cookies
+                    if attempt < self.MAX_RETRIES:
+                        await asyncio.sleep(2 + random.uniform(1, 2))
+                        if not await self._wait_slider(10.0):
+                            break
+                        distance = await self._calc_distance_multi_source() or distance
+                logger.warning(f"[{self.pure_user_id}] recorded replays exhausted")
+                if self.trajectory_mode == "recorded":
+                    return await self._fallback_or_fail(verify_url)
+
+        # ── Phase B: 数学模型生成的轨迹 ──
+        logger.info(f"[{self.pure_user_id}] trying generated trajectories...")
+        for attempt in range(1, self.MAX_RETRIES + 1):
+            await self._do_slide(distance, attempt)
+            code = await self._wait_result(6.0)
+            logger.info(f"[{self.pure_user_id}] generated attempt {attempt}: code={code}")
+            if code == success_code:
+                cookies = await self._get_cookies()
+                logger.success(f"[{self.pure_user_id}] pass! (generated, attempt={attempt})")
+                return True, cookies
+            if attempt < self.MAX_RETRIES:
+                await asyncio.sleep(2 + random.uniform(1, 2))
+                if not await self._wait_slider(10.0):
+                    break
+                distance = await self._calc_distance_multi_source() or distance
+
+        logger.warning(f"[{self.pure_user_id}] all auto retries exhausted")
+        return await self._fallback_or_fail(verify_url)
 
     async def _fallback_or_fail(self, verify_url):
         if self.trajectory_mode in ("auto", "recorded"):
@@ -208,6 +265,9 @@ class SliderSolver:
         logger.info(f"[{self.pure_user_id}] starting remote fallback session: {session_id}")
 
         if not self.page:
+            if self._is_cdp_mode:
+                logger.warning(f"[{self.pure_user_id}] CDP mode: cannot fallback without a page")
+                return False, None
             try:
                 await self._init_browser()
                 await self._load_page(verify_url)
@@ -299,10 +359,10 @@ class SliderSolver:
 
         try:
             track_w = await self.page.evaluate(
-                """() => {
-                    const el = document.querySelector(".nc_scale, [class*=track]");
+                """(sel) => {
+                    const el = document.querySelector(sel);
                     return el ? el.offsetWidth : 0;
-                }""")
+                }""", self.selectors["track_width"])
             if track_w and track_w > 0:
                 estimated = track_w * 0.85
                 logger.warning(f"[{self.pure_user_id}] estimated distance from track: {estimated:.0f}px")
@@ -316,8 +376,8 @@ class SliderSolver:
         logger.debug(f"[{self.pure_user_id}] calculating distance via image match...")
         await asyncio.sleep(0.5)
         try:
-            bg = await self.page.query_selector("#nc_1_n1t img, .nc_scale img, img[id*=bg]")
-            piece = await self.page.query_selector(".nc_iconfont, #nc_1_n1z img, img[id*=slide]")
+            bg = await self.page.query_selector(self.selectors["bg_img"])
+            piece = await self.page.query_selector(self.selectors["piece_img"])
             if not bg or not piece:
                 logger.debug(f"[{self.pure_user_id}] image selectors not found bg={bool(bg)} piece={bool(piece)}")
                 return None
@@ -335,9 +395,9 @@ class SliderSolver:
 
     async def _calc_distance_js(self):
         try:
-            d = await self.page.evaluate("""() => {
-                const b = document.querySelector("#nc_1_n1z");
-                const t = document.querySelector("#nc_1_n1t");
+            d = await self.page.evaluate("""(selectors) => {
+                const b = document.querySelector(selectors.slider_btn);
+                const t = document.querySelector(selectors.slider_track);
                 if (!b || !t) return {js_dist: 0};
                 const bw = b.getBoundingClientRect();
                 const tw = t.getBoundingClientRect();
@@ -346,7 +406,10 @@ class SliderSolver:
                     track_width: tw.width,
                     btn_width: bw.width,
                 };
-            }""")
+            }""", {
+                "slider_btn": self.selectors["slider_btn"],
+                "slider_track": self.selectors["slider_track"],
+            })
             if isinstance(d, dict):
                 dist = float(d.get("js_dist", 0))
                 if dist > 0:
@@ -462,6 +525,7 @@ class SliderSolver:
     # ════════════════════════════════════════════════════════════
     async def _init_browser(self):
         await _ensure_previous_chromium_closed()
+        self.profile_dir.mkdir(parents=True, exist_ok=True)
 
         pw = await async_playwright().start()
         self._playwright = pw
@@ -498,6 +562,35 @@ class SliderSolver:
             self._cdp = None
             logger.warning(f"[{self.pure_user_id}] CDP session failed")
 
+    async def _connect_existing_browser(self, cdp_endpoint: str, page_url: str = ""):
+        """连接已有浏览器（CDP 模式）— 不启动新浏览器"""
+        pw = await async_playwright().start()
+        self._playwright = pw
+
+        browser = await pw.chromium.connect_over_cdp(cdp_endpoint)
+        if not browser.contexts:
+            raise RuntimeError(f"No contexts found on CDP endpoint: {cdp_endpoint}")
+        self.context = browser.contexts[0]
+
+        if self.context.pages:
+            self.page = self.context.pages[0]
+        else:
+            self.page = await self.context.new_page()
+
+        await self.page.add_init_script(STEALTH_INIT_SCRIPT)
+        self.page.on("response", self._on_response)
+
+        try:
+            self._cdp = await self.context.new_cdp_session(self.page)
+            logger.debug(f"[{self.pure_user_id}] CDP session ready (existing browser)")
+        except Exception:
+            self._cdp = None
+            logger.warning(f"[{self.pure_user_id}] CDP session failed (existing browser)")
+
+        if page_url:
+            await self.page.goto(page_url, wait_until="networkidle", timeout=45000)
+            await asyncio.sleep(3)
+
     async def _inject_cookies(self):
         if not self.cookies_str:
             return
@@ -515,16 +608,14 @@ class SliderSolver:
         await self.page.goto(url, wait_until="networkidle", timeout=45000)
         await asyncio.sleep(3)
         try:
-            info = await self.page.evaluate("""() => ({
+            info = await self.page.evaluate("""(sel) => ({
                 title: document.title,
                 body_len: document.body ? document.body.innerHTML.length : 0,
-                nocaptcha_div: !!document.querySelector("#nocaptcha"),
-                nc_1_n1z: !!document.querySelector("#nc_1_n1z"),
-                punish: !!document.querySelector("punish-component"),
+                slider_btn_visible: !!document.querySelector(sel),
                 all_divs: document.querySelectorAll("div").length,
                 all_imgs: document.querySelectorAll("img").length,
                 scripts: document.querySelectorAll("script").length,
-            })""")
+            })""", self.selectors["slider_btn"])
             logger.info(f"[{self.pure_user_id}] page state: {info}")
         except Exception:
             pass
@@ -532,10 +623,10 @@ class SliderSolver:
     async def _wait_slider(self, timeout=15.0):
         logger.debug(f"[{self.pure_user_id}] waiting for slider (timeout={timeout}s)")
         try:
-            await self.page.wait_for_selector(self.SLIDER_BTN, state="visible", timeout=timeout * 1000)
+            await self.page.wait_for_selector(self.selectors["slider_btn"], state="visible", timeout=timeout * 1000)
             return True
         except Exception:
-            for alt in [".nc_iconfont", ".btn_slide", ".sm-btn", "#nc_1_n1z"]:
+            for alt in self.selectors["slider_alt"]:
                 try:
                     await self.page.wait_for_selector(alt, state="visible", timeout=3000)
                     logger.info(f"[{self.pure_user_id}] found slider via: {alt}")
@@ -550,7 +641,7 @@ class SliderSolver:
     async def _do_slide(self, distance, attempt, recorded_trajectory=None):
         btn = None
         try:
-            btn = await self.page.query_selector(self.SLIDER_BTN)
+            btn = await self.page.query_selector(self.selectors["slider_btn"])
         except Exception:
             pass
         if not btn:
@@ -685,7 +776,8 @@ class SliderSolver:
     # ════════════════════════════════════════════════════════════
     async def _on_response(self, response):
         url = response.url
-        if "/slide?" in url or "/_____tmd_____/slide" in url:
+        patterns = self.selectors["result_url_pattern"]
+        if any(pat in url for pat in patterns):
             try:
                 body = await response.body()
                 text = body.decode("utf-8", errors="ignore")
@@ -742,6 +834,19 @@ class SliderSolver:
                 pass
         self._cleanup_profiles()
 
+    async def _close_cdp_only(self):
+        """CDP 模式清理 — 不关闭外部浏览器，只断开连接"""
+        if self._cdp:
+            try:
+                await self._cdp.detach()
+            except Exception:
+                pass
+        if self._playwright:
+            try:
+                await self._playwright.stop()
+            except Exception:
+                pass
+
     def _cleanup_profiles(self):
         try:
             parent = self.profile_dir.parent
@@ -759,4 +864,4 @@ class SliderSolver:
             pass
 
 
-__all__ = ["SliderSolver"]
+__all__ = ["SliderSolver", "DEFAULT_SELECTORS"]
