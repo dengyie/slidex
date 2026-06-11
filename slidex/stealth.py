@@ -1202,8 +1202,7 @@ class XianyuSliderStealth:
                         error_message='检测到滑块验证，正在自动处理',
                     )
                 except Exception:
-                    pass
-            if log_id:
+                    logger.debug(f"【{self.pure_user_id}】on_risk_log callback failed", exc_info=True)
                 logger.info(f"【{self.pure_user_id}】已记录密码登录滑块风控日志: {log_id}")
                 return {
                     'log_id': log_id,
@@ -1267,7 +1266,7 @@ class XianyuSliderStealth:
                     duration_ms=duration_ms,
                 )
             except Exception:
-                    pass
+                logger.debug(f"【{self.pure_user_id}】on_risk_log_update callback failed", exc_info=True)
 
     def _get_slider_failure_message(self, default_message: str) -> str:
         feedback = self.last_verification_feedback or {}
@@ -10096,38 +10095,38 @@ class XianyuSliderStealth:
                                         'qr_verify': 'qr_verify',
                                         'face_verify': 'face_verify',
                                         'unknown': 'unknown'
-                                    }
-                                    event_type_names = {
-                                        'password_error': '账号密码错误',
-                                        'sms_verify': '短信验证',
-                                        'qr_verify': '二维码验证',
-                                        'face_verify': '人脸验证',
-                                        'unknown': '身份验证'
-                                    }
-                                    db_event_type = event_type_map.get(verification_type, 'unknown')
-                                    event_name = event_type_names.get(verification_type, '身份验证')
-                                    if self._slidex_config and self._slidex_config.on_risk_log:
-                                        try:
-                                            self._slidex_config.on_risk_log(
-                                                cookie_id=self.pure_user_id,
-                                                event_type=db_event_type,
-                                                session_id=getattr(self, 'risk_session_id', None),
-                                                trigger_scene=getattr(self, 'risk_trigger_scene', None) or 'password_login',
-                                                result_code=f"{verification_type}_detected",
-                                                event_description=f"检测到{event_name}",
-                                                event_meta=self._build_risk_event_meta(
-                                            verification_url=frame_url,
-                                            extra={
-                                                'verification_type': verification_type,
-                                                'account_id': self.pure_user_id,
-                                            }
-                                        ),
-                                        processing_status='processing' if verification_type != 'password_error' else 'failed',
-                                        error_message='检测到需要人工完成的身份验证' if verification_type != 'password_error' else '账号密码错误'
-                                    )
-                                        except Exception:
-                                            pass
-                                    logger.info(f"【{self.pure_user_id}】已记录风控日志: {db_event_type}")
+                                }
+                                event_type_names = {
+                                    'password_error': '账号密码错误',
+                                    'sms_verify': '短信验证',
+                                    'qr_verify': '二维码验证',
+                                    'face_verify': '人脸验证',
+                                    'unknown': '身份验证'
+                                }
+                                db_event_type = event_type_map.get(verification_type, 'unknown')
+                                event_name = event_type_names.get(verification_type, '身份验证')
+                                if self._slidex_config and self._slidex_config.on_risk_log:
+                                    try:
+                                        self._slidex_config.on_risk_log(
+                                            cookie_id=self.pure_user_id,
+                                            event_type=db_event_type,
+                                            session_id=getattr(self, 'risk_session_id', None),
+                                            trigger_scene=getattr(self, 'risk_trigger_scene', None) or 'password_login',
+                                            result_code=f"{verification_type}_detected",
+                                            event_description=f"检测到{event_name}",
+                                            event_meta=self._build_risk_event_meta(
+                                        verification_url=frame_url,
+                                        extra={
+                                            'verification_type': verification_type,
+                                            'account_id': self.pure_user_id,
+                                        }
+                                    ),
+                                    processing_status='processing' if verification_type != 'password_error' else 'failed',
+                                    error_message='检测到需要人工完成的身份验证' if verification_type != 'password_error' else '账号密码错误'
+                                )
+                                    except Exception:
+                                        logger.debug(f"【{self.pure_user_id}】on_risk_log callback failed", exc_info=True)
+                                logger.info(f"【{self.pure_user_id}】已记录风控日志: {db_event_type}")
 
                                 # 如果是账密错误，抛出异常让调用者处理
                                 if verification_type == 'password_error':

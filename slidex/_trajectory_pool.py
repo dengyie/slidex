@@ -64,13 +64,6 @@ class SliderTrajectoryPool:
         logger.info(f"[TrajectoryPool] saved {fname} for {cookie_id} (dist={distance:.0f}px, ok={success})")
         return fname
 
-    @classmethod
-    def from_remote_recording(cls, points: List[List[float]], cookie_id: str,
-                               distance: float, verify_url: str = "") -> Optional[str]:
-        """快捷保存远程人工录制轨迹"""
-        pool = cls()
-        return pool.save_trajectory(points, cookie_id, distance, True, verify_url)
-
     # ── 加载 ──────────────────────────────────────────────────
     def _load_all(self, cookie_id: str) -> List[dict]:
         cdir = self._cookie_dir(cookie_id)
