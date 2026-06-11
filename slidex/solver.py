@@ -12,14 +12,12 @@ from slidex.config import SlidexConfig
 
 
 # === Chromium process singleton: PID tracking + kill-before-launch ===
+import threading
+
 _last_chromium_pid = None
-_pid_lock = None
+_pid_lock = threading.Lock()
 
 def _get_pid_lock():
-    global _pid_lock
-    if _pid_lock is None:
-        import threading
-        _pid_lock = threading.Lock()
     return _pid_lock
 
 

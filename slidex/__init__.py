@@ -5,6 +5,7 @@ from slidex._trajectory import generate_trajectory, trajectory_to_points
 from slidex._trajectory_pool import SliderTrajectoryPool
 from slidex._image_match import SliderImageMatcher, find_gap, find_gap_from_bytes
 from slidex.remote import CaptchaRemoteController, captcha_controller
+from slidex._concurrency import SliderConcurrencyManager, concurrency_manager
 
 __all__ = [
     "SlidexConfig",
@@ -19,4 +20,6 @@ __all__ = [
     "find_gap_from_bytes",
     "CaptchaRemoteController",
     "captcha_controller",
+    "SliderConcurrencyManager",
+    "concurrency_manager",
 ]
