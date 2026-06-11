@@ -90,7 +90,9 @@ class SliderSolver:
                  notification_callback: Optional[Callable] = None):
         self.cookie_id = cookie_id
         raw_id = cookie_id.split("_")[0] if "_" in cookie_id else cookie_id
-        self.pure_user_id = "".join(c for c in raw_id if c.isalnum() or c in "-_.:") or "default"
+        sanitized = "".join(c for c in raw_id if c.isalnum() or c in "-_.")
+        sanitized = sanitized.strip(".").replace("..", ".")
+        self.pure_user_id = sanitized or "default"
         self.cookies_str = str(cookies_str or "").strip()
         self.headless = headless
         self.proxy = dict(proxy or {})

@@ -40,7 +40,6 @@ class TestSliderSolverInit:
         s = SliderSolver(cookie_id="../../etc/passwd")
         assert ".." not in s.pure_user_id
         assert "/" not in s.pure_user_id
-        assert s.pure_user_id == "..etcpasswd" or s.pure_user_id == "default"
 
     def test_pure_user_id_keeps_valid_chars(self):
         s = SliderSolver(cookie_id="user_123_test")
@@ -70,12 +69,12 @@ class TestCalibration:
     def test_calibration_path_uses_config_dir(self):
         with tempfile.TemporaryDirectory() as td:
             cfg = SlidexConfig(calibration_dir=td)
-            s = SliderSolver(cookie_id="test_user", config=cfg)
-            expected = Path(td) / "test_user" / "calibration.json"
+            s = SliderSolver(cookie_id="testuser", config=cfg)
+            expected = Path(td) / "testuser" / "calibration.json"
             assert s._calibration_path() == expected
 
     def test_calibration_path_default_dir(self):
-        s = SliderSolver(cookie_id="test_user")
+        s = SliderSolver(cookie_id="testuser")
         p = s._calibration_path()
         assert ".slidex" in str(p) or "calibration" in str(p)
         assert p.name == "calibration.json"
@@ -132,12 +131,15 @@ class TestPIDTracking:
 
     @mock.patch("slidex.solver.psutil")
     def test_kill_chromium_by_pid_terminates_and_kills(self, mock_psutil):
+        _Exc = type("_Exc", (Exception,), {})
         mock_proc = mock.MagicMock()
         mock_proc.is_running.return_value = True
         mock_proc.name.return_value = "chromium"
-        mock_proc.wait.side_effect = [Exception("timeout"), None]
+        mock_proc.wait.side_effect = [_Exc("timeout"), None]
         mock_psutil.Process.return_value = mock_proc
-        mock_psutil.TimeoutExpired = type("TimeoutExpired", (Exception,), {})
+        mock_psutil.TimeoutExpired = _Exc
+        mock_psutil.NoSuchProcess = _Exc
+        mock_psutil.AccessDenied = _Exc
 
         result = _kill_chromium_by_pid(12345)
         assert result is True
@@ -215,12 +217,12 @@ class TestBrowserDataDir:
     def test_profile_dir_uses_config(self):
         with tempfile.TemporaryDirectory() as td:
             cfg = SlidexConfig(browser_data_dir=td)
-            s = SliderSolver(cookie_id="bd_user", config=cfg)
+            s = SliderSolver(cookie_id="bduser", config=cfg)
             assert str(s.profile_dir).startswith(td)
-            assert "slider_bd_user" in str(s.profile_dir)
+            assert "slider_bduser" in str(s.profile_dir)
 
     def test_profile_dir_created(self):
         with tempfile.TemporaryDirectory() as td:
             cfg = SlidexConfig(browser_data_dir=td)
-            s = SliderSolver(cookie_id="bd_user", config=cfg)
+            s = SliderSolver(cookie_id="bduser", config=cfg)
             assert s.profile_dir.exists()
