@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "slidex"
-version = "0.1.0"
-description = "Standalone slider captcha solver — async/sync, recorded trajectories, remote human fallback"
+version = "0.2.0"
+description = "通用滑块验证码求解库 | Generic Slider CAPTCHA Solver — CDP mode, configurable selectors, trajectory simulation"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [{name = "Slidex Authors"}]
