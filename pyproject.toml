@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slidex"
+version = "0.1.0"
+description = "Standalone slider captcha solver — async/sync, recorded trajectories, remote human fallback"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "Slidex Authors"}]
+keywords = ["captcha", "slider", "nocaptcha", "playwright", "opencv", "automation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+dependencies = [
+    "loguru>=0.7.0",
+    "opencv-python-headless>=4.8.0",
+    "numpy>=1.24.0",
+    "playwright>=1.45.0",
+]
+
+[project.optional-dependencies]
+remote = [
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.29.0",
+    "pydantic>=2.7.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-timeout>=2.0",
+    "pytest-mock>=3.12",
+]
+all = [
+    "slidex[remote,dev]",
+]
+
+[tool.setuptools.packages.find]
+include = ["slidex*", "demo*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-v --tb=short"

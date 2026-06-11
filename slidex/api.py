@@ -1,0 +1,302 @@
+"""
+刮刮乐远程控制 API 路由
+提供 WebSocket 和 HTTP 接口用于远程操作滑块验证
+"""
+
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.responses import HTMLResponse, FileResponse
+from pydantic import BaseModel
+from typing import Optional, List
+import asyncio
+import os
+from loguru import logger
+
+from slidex.remote import CaptchaRemoteController
+from slidex._trajectory_pool import SliderTrajectoryPool
+
+captcha_controller = CaptchaRemoteController()
+trajectory_pool = SliderTrajectoryPool()
+
+# 创建路由器
+router = APIRouter(prefix="/api/captcha", tags=["captcha"])
+
+
+class MouseEvent(BaseModel):
+    """鼠标事件模型"""
+    session_id: str
+    event_type: str  # down, move, up
+    x: int
+    y: int
+
+
+class TrajectorySubmitRequest(BaseModel):
+    """轨迹提交请求模型"""
+    session_id: str
+    cookie_id: str
+    points: List[List[float]]  # [[x, y, delay_ms], ...]
+    distance: float
+    verify_url: str = ""
+
+
+class SessionCheckRequest(BaseModel):
+    """会话检查请求"""
+    session_id: str
+
+
+# =============================================================================
+# WebSocket 端点 - 实时通信
+# =============================================================================
+
+@router.websocket("/ws/{session_id}")
+async def websocket_endpoint(websocket: WebSocket, session_id: str):
+    await websocket.accept()
+    logger.info(f"WebSocket 连接建立: {session_id}")
+
+    captcha_controller.websocket_connections[session_id] = websocket
+
+    try:
+        if session_id in captcha_controller.active_sessions:
+            session_data = captcha_controller.active_sessions[session_id]
+            await websocket.send_json({
+                'type': 'session_info',
+                'screenshot': session_data['screenshot'],
+                'captcha_info': session_data['captcha_info'],
+                'viewport': session_data['viewport']
+            })
+        else:
+            await websocket.send_json({
+                'type': 'error',
+                'message': '会话不存在'
+            })
+            await websocket.close()
+            return
+
+        while True:
+            data = await websocket.receive_json()
+            msg_type = data.get('type')
+
+            if msg_type == 'mouse_event':
+                event_type = data.get('event_type')
+                x = data.get('x')
+                y = data.get('y')
+
+                success = await captcha_controller.handle_mouse_event(
+                    session_id, event_type, x, y
+                )
+
+                if success:
+                    if event_type == 'up':
+                        await asyncio.sleep(1.0)
+                        completed = await captcha_controller.check_completion(session_id)
+
+                        if completed:
+                            await asyncio.sleep(0.5)
+                            completed = await captcha_controller.check_completion(session_id)
+
+                        if completed:
+                            await websocket.send_json({
+                                'type': 'completed',
+                                'message': '验证成功！'
+                            })
+                            logger.success(f"验证完成: {session_id}")
+                            break
+                        else:
+                            screenshot = await captcha_controller.update_screenshot(session_id)
+                            if screenshot:
+                                await websocket.send_json({
+                                    'type': 'screenshot_update',
+                                    'screenshot': screenshot
+                                })
+                    else:
+                        if event_type in ['down', 'move']:
+                            screenshot = await captcha_controller.update_screenshot(session_id, quality=30)
+                            if screenshot:
+                                await websocket.send_json({
+                                    'type': 'screenshot_update',
+                                    'screenshot': screenshot
+                                })
+
+            elif msg_type == 'check_completion':
+                completed = await captcha_controller.check_completion(session_id)
+                await websocket.send_json({
+                    'type': 'completion_status',
+                    'completed': completed
+                })
+
+                if completed:
+                    break
+
+            elif msg_type == 'ping':
+                await websocket.send_json({'type': 'pong'})
+
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket 连接断开: {session_id}")
+
+    except Exception as e:
+        logger.error(f"WebSocket 错误: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
+    finally:
+        if session_id in captcha_controller.websocket_connections:
+            del captcha_controller.websocket_connections[session_id]
+        logger.info(f"WebSocket 会话结束: {session_id}")
+
+
+# =============================================================================
+# HTTP 端点 - REST API
+# =============================================================================
+
+@router.get("/sessions")
+async def get_active_sessions():
+    sessions = []
+    for session_id, data in captcha_controller.active_sessions.items():
+        sessions.append({
+            'session_id': session_id,
+            'completed': data.get('completed', False),
+            'has_websocket': session_id in captcha_controller.websocket_connections
+        })
+
+    return {
+        'count': len(sessions),
+        'sessions': sessions
+    }
+
+
+@router.get("/session/{session_id}")
+async def get_session_info(session_id: str):
+    if session_id not in captcha_controller.active_sessions:
+        raise HTTPException(status_code=404, detail="会话不存在")
+
+    session_data = captcha_controller.active_sessions[session_id]
+
+    return {
+        'session_id': session_id,
+        'screenshot': session_data['screenshot'],
+        'captcha_info': session_data['captcha_info'],
+        'viewport': session_data['viewport'],
+        'completed': session_data.get('completed', False)
+    }
+
+
+@router.get("/screenshot/{session_id}")
+async def get_screenshot(session_id: str):
+    screenshot = await captcha_controller.update_screenshot(session_id)
+
+    if not screenshot:
+        raise HTTPException(status_code=404, detail="无法获取截图")
+
+    return {'screenshot': screenshot}
+
+
+@router.post("/mouse_event")
+async def handle_mouse_event(event: MouseEvent):
+    success = await captcha_controller.handle_mouse_event(
+        event.session_id,
+        event.event_type,
+        event.x,
+        event.y
+    )
+
+    if not success:
+        raise HTTPException(status_code=400, detail="处理失败")
+
+    completed = await captcha_controller.check_completion(event.session_id)
+
+    return {
+        'success': True,
+        'completed': completed
+    }
+
+
+@router.post("/check_completion")
+async def check_completion(request: SessionCheckRequest):
+    completed = await captcha_controller.check_completion(request.session_id)
+
+    return {
+        'session_id': request.session_id,
+        'completed': completed
+    }
+
+
+@router.post("/trajectory")
+async def submit_trajectory(request: TrajectorySubmitRequest):
+    try:
+        if not request.points or len(request.points) < 3:
+            raise HTTPException(status_code=400, detail="too few points")
+        trajectory_pool.save_trajectory(request.points, request.cookie_id, request.distance, True, request.verify_url or "")
+        logger.success(f"trajectory saved: cookie={request.cookie_id}")
+        return {"success": True, "message": "saved", "cookie_id": request.cookie_id}
+    except Exception as e:
+        logger.error(f"trajectory save failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/session/{session_id}")
+async def close_session(session_id: str):
+    await captcha_controller.close_session(session_id)
+    return {'success': True}
+
+
+# =============================================================================
+# 前端页面
+# =============================================================================
+
+_HTML_FILE = os.path.join(os.path.dirname(__file__), "_html", "captcha_control.html")
+
+
+@router.get("/status/{session_id}")
+async def get_captcha_status(session_id: str):
+    try:
+        is_completed = captcha_controller.is_completed(session_id)
+        session_exists = captcha_controller.session_exists(session_id)
+
+        return {
+            "success": True,
+            "completed": is_completed,
+            "session_exists": session_exists,
+            "session_id": session_id
+        }
+    except Exception as e:
+        logger.error(f"获取验证状态失败: {e}")
+        return {
+            "success": False,
+            "completed": False,
+            "session_exists": False,
+            "session_id": session_id,
+            "error": str(e)
+        }
+
+
+@router.get("/control", response_class=HTMLResponse)
+async def captcha_control_page():
+    if os.path.exists(_HTML_FILE):
+        return FileResponse(_HTML_FILE, media_type="text/html")
+    else:
+        return HTMLResponse(content="""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>验证码控制面板</title>
+        </head>
+        <body>
+            <h1>验证码控制面板</h1>
+            <p>前端页面文件 captcha_control.html 不存在</p>
+            <p>请查看文档了解如何创建前端页面</p>
+        </body>
+        </html>
+        """)
+
+
+@router.get("/control/{session_id}", response_class=HTMLResponse)
+async def captcha_control_page_with_session(session_id: str):
+    if os.path.exists(_HTML_FILE):
+        with open(_HTML_FILE, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+            html_content = html_content.replace(
+                '</body>',
+                f'<script>window.INITIAL_SESSION_ID = "{session_id}";</script></body>'
+            )
+            return HTMLResponse(content=html_content)
+    else:
+        raise HTTPException(status_code=404, detail="前端页面不存在")

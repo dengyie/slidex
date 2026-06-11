@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Environment
+.env
+.env.local
+
+# Slidex runtime data
+browser_data/
+trajectories/
+calibration/
+debug_screenshots/
+logs/
+
+# Playwright
+.playwright-browsers/
+
+# CLAIProxyAPI — separate project
+CLIProxyAPI/
+Cli-Proxy-API-Management-Center/
+
+# Claude
+.claude/
