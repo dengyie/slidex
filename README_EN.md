@@ -14,7 +14,14 @@
   <a href="README.md">中文</a> | <strong>English</strong>
 </p>
 
-Slidex is a generic slider CAPTCHA solver library. It supports connecting to an existing browser (CDP mode) or launching its own, with built-in image recognition, trajectory simulation, anti-detection, and remote human fallback. Suitable for batch account verification and automation flows that encounter slider CAPTCHAs.
+Slidex is a professional slider CAPTCHA solver library. It supports multi-provider auto-detection, CDP mode integration, image recognition, trajectory simulation, and anti-detection. Suitable for batch account verification and automation flows.
+
+**Features**:
+- 🎯 **Multi-provider support** — Built-in Aliyun NoCaptcha, GeeTest adapters with auto-detection
+- 🔌 **Plugin-based extension** — Implement custom providers in 10 minutes
+- 🌐 **CDP mode** — Connect to existing browser, ideal for TypeScript/Node integration
+- 🧠 **Intelligent solving** — OpenCV + physics trajectory + recorded replay
+- 🛡️ **Anti-detection** — Stealth args + JS injection
 
 ## Installation
 
@@ -26,61 +33,124 @@ pip install -e ".[remote]"   # optional: remote control API
 
 ## Quick Start
 
+### Auto-detection (Recommended)
+
 ```python
-from slidex import SlidexConfig, SliderSolver
+from slidex import SliderSolver
 
-solver = SliderSolver(
-    cookie_id="my_user",
-    cookies_str="your_cookie_string",
-    headless=True,
-    config=SlidexConfig(),
-)
-
+solver = SliderSolver(cookie_id="my_user", provider="auto")
 success, cookies = await solver.solve("https://...verification_url...")
+```
+
+### Manual Provider Selection
+
+```python
+# Aliyun NoCaptcha
+solver = SliderSolver(provider="aliyun-nocaptcha")
+
+# GeeTest
+solver = SliderSolver(provider="geetest")
 ```
 
 ## Technical Overview
 
-- **Image recognition**: OpenCV Canny edge detection + template matching, cross-validated with JS calculation
-- **Trajectory simulation**: 4-phase physics model (slow start → accelerate → medium → fine-tune), with recorded trajectory replay
-- **Anti-detection**: Chromium launch args + JS injection to hide automation fingerprints
-- **Configurable selectors**: Adapt to different CAPTCHA providers (Aliyun, GeeTest, Shumei, etc.) via `selectors={}`
+- **Provider abstraction**: Unified interface for different vendors, built-in Aliyun & GeeTest, plugin-extensible
+- **Image recognition**: OpenCV Canny + template matching + JS DOM cross-validation
+- **Trajectory**: 4-phase physics model + recorded human trajectory replay
+- **Anti-detection**: Chromium stealth args + JS injection
+
+---
+
+## Supported Providers
+
+| Provider | Name | Status |
+|----------|------|--------|
+| Aliyun NoCaptcha | `aliyun-nocaptcha` | ✅ Built-in |
+| GeeTest v3/v4 | `geetest` | ✅ Built-in |
+| Shumei | `shumei` | 📝 TODO |
+| Dingxiang | `dingxiang` | 📝 TODO |
+| Custom | Your provider | 🔌 [10-min guide](docs/PROVIDER_GUIDE.md) |
 
 ---
 
 ## Integration Guide
 
-### 1. CDP Mode (Recommended — connect to existing browser)
+### 1. Auto-detection (Recommended)
 
-For scenarios with an existing Playwright/browser session (e.g. TypeScript projects). No new browser is launched:
+Slidex automatically detects the CAPTCHA provider:
 
 ```python
 from slidex import SliderSolver
 
-solver = SliderSolver(
-    cookie_id="user_123",
-    trajectory_mode="auto",
-    selectors={  # optional: override default selectors
-        "slider_btn": ".geetest_slider_button",
-        "slider_track": ".geetest_slider_track",
-    },
-)
+solver = SliderSolver(cookie_id="user_123", provider="auto")
+success, cookies = await solver.solve("https://...")
+```
+
+### 2. Manual Provider
+
+When you know which provider the site uses:
+
+```python
+solver = SliderSolver(provider="geetest")
+solver = SliderSolver(provider="aliyun-nocaptcha")
+```
+
+### 3. CDP Mode (Connect to Existing Browser)
+
+For existing Playwright/browser sessions (e.g. TypeScript projects):
+
+```python
+from slidex import SliderSolver
+
+solver = SliderSolver(cookie_id="user_123", provider="auto")
 
 success, cookies = await solver.solve_on_existing_page(
     cdp_endpoint="ws://localhost:9222/devtools/browser/xxx",
-    page_url="https://...",  # optional: navigate to this URL first
+    page_url="https://...",
 )
 
 await solver.close()
 ```
 
-### 2. CLI (for TypeScript/Node subprocess calls)
+### 4. Custom Provider
+
+Implement a new provider adapter in 10 minutes:
+
+```python
+from slidex import CaptchaProvider, SliderSolver
+
+class MyProvider(CaptchaProvider):
+    name = "my-custom"
+    
+    async def detect(self, page):
+        return await page.query_selector(".my-captcha") is not None
+    
+    async def locate_elements(self, page):
+        # Locate elements...
+    
+    async def extract_images(self, page, elements):
+        # Extract images...
+    
+    async def perform_slide(self, page, elements, gap_x, trajectory):
+        # Perform slide...
+    
+    def validate_response(self, response):
+        # Validate result...
+
+# Register and use
+SliderSolver.register_provider("my-custom", MyProvider)
+solver = SliderSolver(provider="my-custom")
+```
+
+See [Provider Guide](docs/PROVIDER_GUIDE.md) for details.
+
+### 5. CLI (for TypeScript/Node subprocess)
 
 ```bash
 python -m slidex.scripts.slide_solve_cdp \
   --cdp-endpoint ws://localhost:9222/devtools/browser/xxx \
   --page-url "https://..." \
-  --selectors '{"slider_btn": ".geetest_slider_button"}'
+  --provider auto
 ```
 
 Output JSON:
@@ -89,7 +159,7 @@ Output JSON:
 {"success": true, "cookies": {...}, "elapsed_ms": 3200.5, "error": null}
 ```
 
-### 3. TypeScript Integration
+### 6. TypeScript Integration
 
 ```typescript
 import { execSync } from 'child_process';
@@ -99,10 +169,7 @@ const result = JSON.parse(
   execSync(`python -m slidex.scripts.slide_solve_cdp \
     --cdp-endpoint ${cdpEndpoint} \
     --page-url "${pageUrl}" \
-    --selectors '${JSON.stringify({
-      slider_btn: ".geetest_slider_button",
-      slider_track: ".geetest_slider_track",
-    })}'`).toString()
+    --provider auto`).toString()
 );
 
 if (result.success) {
@@ -110,9 +177,9 @@ if (result.success) {
 }
 ```
 
-### 4. Custom Selectors
+### 7. Legacy Mode (Custom Selectors)
 
-Default selectors are for Aliyun NoCaptcha. For other providers:
+Backward compatible: manually configure selectors without using providers:
 
 ```python
 solver = SliderSolver(
@@ -127,11 +194,11 @@ solver = SliderSolver(
 )
 ```
 
-See `DEFAULT_SELECTORS` in `slidex/solver.py` for all available keys.
+See `DEFAULT_SELECTORS` in `slidex/solver.py` for all options.
 
-### 5. Remote Human Fallback
+### 8. Remote Human Fallback
 
-When auto-solve fails, push the CAPTCHA to a human operator via WebSocket:
+When auto-solve fails, push to human operator via WebSocket:
 
 ```bash
 pip install -e ".[remote]"
@@ -139,7 +206,7 @@ uvicorn slidex.api:router --port 8000
 # Open http://localhost:8000/api/captcha/control
 ```
 
-### 6. Callbacks
+### 9. Callbacks
 
 ```python
 config = SlidexConfig(
@@ -148,7 +215,7 @@ config = SlidexConfig(
 )
 ```
 
-### 7. Environment Variables
+### 10. Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|

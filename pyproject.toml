@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "slidex"
-version = "0.2.0"
-description = "通用滑块验证码求解库 | Generic Slider CAPTCHA Solver — CDP mode, configurable selectors, trajectory simulation"
+version = "0.3.0"
+description = "专业滑块验证码求解库 | Professional Slider CAPTCHA Solver — Multi-provider auto-detection, CDP mode, plugin-extensible"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [{name = "Slidex Authors"}]

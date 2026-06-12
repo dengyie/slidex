@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.3.0] - 2026-06-13
+
+### Added - Provider 系统重构 🎯
+
+**核心架构**
+- `CaptchaProvider` 抽象基类 — 统一接口适配不同验证码供应商
+- `ProviderRegistry` 注册表 — 管理 provider 生命周期和自动检测
+- `ProviderElements` / `SolveResult` 数据类 — 标准化接口
+- `ProviderSolverMixin` — 无侵入式集成到现有 SliderSolver
+
+**内置 Provider**
+- `AliyunNoCaptchaProvider` — 阿里云 NoCaptcha 适配器（从 legacy 迁移）
+- `GeeTestProvider` — 极验 GeeTest v3/v4 适配器（canvas 提取 + 版本检测）
+
+**新 API**
+- `SliderSolver(provider="auto")` — 自动检测验证码供应商
+- `SliderSolver(provider="geetest")` — 手动指定供应商
+- `SliderSolver.register_provider()` — 注册自定义 provider
+- `SliderSolver.list_providers()` — 列出已注册 provider
+
+**扩展性**
+- 插件式架构：10 分钟实现新 provider，无需修改核心代码
+- 检测优先级机制：`detection_priority` 参数控制自动检测顺序
+- Provider 元数据支持：`metadata` 字段存储供应商特定信息
+
+### Changed
+- SliderSolver 继承 `ProviderSolverMixin`，支持 `provider=` 参数
+- `_run_solve_loop()` 拆分为 provider 模式 + legacy 模式双路径
+- Legacy 模式（`selectors=`）保持完全向后兼容
+
+### Documentation
+- 新增 `docs/ARCHITECTURE.md` — Provider 架构设计文档
+- 新增 `docs/PROVIDER_GUIDE.md` — Provider 开发指南（8 步实现 + 调试技巧）
+- README 更新：Provider 快速开始、供应商支持表、自定义 Provider 示例
+- 新增 `tests/test_providers.py` — Provider 系统测试（10 个测试用例）
+
+### Migration Guide
+向后兼容，无需修改现有代码。推荐迁移路径：
+
+```python
+# 旧写法（仍然支持）
+solver = SliderSolver(selectors={"slider_btn": ".btn"})
+
+# 新写法（推荐）
+solver = SliderSolver(provider="auto")  # 自动检测
+solver = SliderSolver(provider="geetest")  # 手动指定
+```
+
 ## [0.2.0] - 2026-06-12
 
 ### Added

@@ -9,6 +9,7 @@ from slidex._trajectory import generate_trajectory, trajectory_to_points
 from slidex._image_match import SliderImageMatcher
 from slidex._trajectory_pool import SliderTrajectoryPool
 from slidex.config import SlidexConfig
+from slidex._provider_mixin import ProviderSolverMixin
 
 
 # ════════════════════════════════════════════════════════════
@@ -94,12 +95,16 @@ def _find_chromium_pid_by_user_data_dir(user_data_dir):
     return None
 
 
-class SliderSolver:
+class SliderSolver(ProviderSolverMixin):
     """滑块求解器
 
-    支持两种运行模式:
+    支持三种运行模式:
       - solve(): 启动自己的浏览器
       - solve_on_existing_page(): 连接已有浏览器（CDP 模式）
+      - provider mode: 通过 provider="auto" 或 provider="geetest" 使用 Provider 适配器
+
+    向后兼容:
+      - selectors={...}: legacy 模式，使用硬编码选择器求解
     """
 
     MAX_RETRIES = 3
@@ -108,7 +113,11 @@ class SliderSolver:
                  trajectory_mode: str = "auto",
                  config: Optional[SlidexConfig] = None,
                  notification_callback: Optional[Callable] = None,
-                 selectors: Optional[Dict] = None):
+                 selectors: Optional[Dict] = None,
+                 provider: Optional[str] = None):
+        # Initialize provider mixin first (handles provider logic)
+        super().__init__(provider=provider)
+
         self.cookie_id = cookie_id
         raw_id = cookie_id.split("_")[0] if "_" in cookie_id else cookie_id
         sanitized = "".join(c for c in raw_id if c.isalnum() or c in "-_.")
@@ -185,7 +194,24 @@ class SliderSolver:
             await self._close_cdp_only()
 
     async def _run_solve_loop(self, verify_url: str):
-        """核心求解循环 — 录制回放 + 数学生成 + 重试"""
+        """核心求解循环 — Provider 模式 或 Legacy 模式"""
+
+        # ── Provider 模式：尝试自动检测并使用 provider ──
+        if self._use_provider_mode:
+            if await self._detect_and_init_provider(self.page):
+                logger.info(f"[{self.pure_user_id}] using provider mode: {self._provider.name}")
+                success, cookies = await self._solve_with_provider(self.page)
+                if success:
+                    return True, cookies
+                logger.warning(f"[{self.pure_user_id}] provider mode failed, falling back to legacy")
+            else:
+                logger.warning(f"[{self.pure_user_id}] provider detection failed, using legacy mode")
+
+        # ── Legacy 模式：硬编码选择器 + 录制轨迹 ──
+        return await self._run_legacy_solve_loop(verify_url)
+
+    async def _run_legacy_solve_loop(self, verify_url: str):
+        """Legacy 求解循环 — 录制回放 + 数学生成 + 重试"""
         if not await self._wait_slider():
             logger.warning(f"[{self.pure_user_id}] slider not found on page")
             await self._save_debug_screenshot("slider_not_found")

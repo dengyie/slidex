@@ -6,6 +6,8 @@ from slidex._trajectory_pool import SliderTrajectoryPool
 from slidex._image_match import SliderImageMatcher, find_gap, find_gap_from_bytes
 from slidex.remote import CaptchaRemoteController, captcha_controller
 from slidex._concurrency import SliderConcurrencyManager, concurrency_manager
+from slidex.providers import CaptchaProvider, ProviderRegistry, ProviderElements, SolveResult
+from slidex.providers.builtin import AliyunNoCaptchaProvider, GeeTestProvider
 
 __all__ = [
     "SlidexConfig",
@@ -23,4 +25,10 @@ __all__ = [
     "captcha_controller",
     "SliderConcurrencyManager",
     "concurrency_manager",
+    "CaptchaProvider",
+    "ProviderRegistry",
+    "ProviderElements",
+    "SolveResult",
+    "AliyunNoCaptchaProvider",
+    "GeeTestProvider",
 ]
