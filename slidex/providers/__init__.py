@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Type
 from playwright.async_api import Page, ElementHandle, Response
 from loguru import logger
+import threading
 
 
 @dataclass
@@ -15,7 +16,7 @@ class ProviderElements:
     bg_img: Optional[ElementHandle]
     piece_img: Optional[ElementHandle]
     track_width_px: int
-    metadata: Dict = None  # 供 provider 存储额外信息
+    metadata: Optional[Dict] = None  # 供 provider 存储额外信息
 
     def __post_init__(self):
         if self.metadata is None:
@@ -131,7 +132,8 @@ class ProviderRegistry:
     """Provider 注册表"""
 
     _providers: Dict[str, Type[CaptchaProvider]] = {}
-    _detection_order: List[str] = []  # 自动检测顺序
+    _detection_order: List[Tuple[int, str]] = []  # 自动检测顺序：(priority, name)
+    _lock = threading.Lock()
 
     @classmethod
     def register(
@@ -148,10 +150,11 @@ class ProviderRegistry:
             provider_class: Provider 类
             detection_priority: 检测优先级（越小越优先）
         """
-        cls._providers[name] = provider_class
-        cls._detection_order.append((detection_priority, name))
-        cls._detection_order.sort()
-        logger.info(f"Registered provider: {name} (priority={detection_priority})")
+        with cls._lock:
+            cls._providers[name] = provider_class
+            cls._detection_order.append((detection_priority, name))
+            cls._detection_order.sort()
+            logger.info(f"Registered provider: {name} (priority={detection_priority})")
 
     @classmethod
     def get(cls, name: str) -> CaptchaProvider:

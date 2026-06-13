@@ -9,6 +9,7 @@ from slidex.providers import ProviderRegistry, CaptchaProvider
 from slidex.providers.builtin import *  # auto-register built-in providers
 from slidex._image_match import SliderImageMatcher
 from slidex._trajectory import generate_trajectory, trajectory_to_points
+from slidex._trajectory_pool import SliderTrajectoryPool
 
 
 class ProviderSolverMixin:
@@ -72,13 +73,20 @@ class ProviderSolverMixin:
 
             logger.info(f"[{self.pure_user_id}] gap detected at x={gap_x}px, confidence={confidence:.2f}")
 
-            # 4. 生成轨迹
-            # TODO: 集成 trajectory_pool（录制轨迹优先）
-            trajectory = generate_trajectory(
-                distance=gap_x,
-                duration_ms=1500 + int(gap_x * 2),
-            )
-            points = trajectory_to_points(trajectory)
+            # 4. 生成轨迹（优先使用录制轨迹）
+            trajectory_pool = SliderTrajectoryPool(self.config.traj_pool_dir)
+            recorded_traj = trajectory_pool.get_random_trajectory()
+
+            if recorded_traj:
+                logger.debug(f"[{self.pure_user_id}] using recorded trajectory")
+                points = trajectory_to_points(recorded_traj)
+            else:
+                logger.debug(f"[{self.pure_user_id}] generating synthetic trajectory")
+                trajectory = generate_trajectory(
+                    distance=gap_x,
+                    duration_ms=1500 + int(gap_x * 2),
+                )
+                points = trajectory_to_points(trajectory)
 
             # 5. 执行滑动
             await self._provider.perform_slide(page, elements, gap_x, points)
@@ -98,9 +106,9 @@ class ProviderSolverMixin:
             return False, None
 
     @classmethod
-    def register_provider(cls, name: str, provider_class, priority: int = 100):
+    def register_provider(cls, name: str, provider_class, detection_priority: int = 100):
         """注册自定义 provider"""
-        ProviderRegistry.register(name, provider_class, priority)
+        ProviderRegistry.register(name, provider_class, detection_priority)
 
     @classmethod
     def list_providers(cls):

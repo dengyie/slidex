@@ -1,6 +1,7 @@
 """Aliyun NoCaptcha Provider"""
 
 import base64
+import json
 from typing import List, Optional, Tuple
 from playwright.async_api import Page, Response
 from loguru import logger
@@ -162,7 +163,7 @@ class AliyunNoCaptchaProvider(CaptchaProvider):
         try:
             body = response.body()
             text = body.decode("utf-8", errors="ignore")
-            data = eval(text)  # Aliyun 返回类似 {"success": true, "code": 0}
+            data = json.loads(text)
 
             if isinstance(data, dict):
                 # 成功条件
