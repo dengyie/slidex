@@ -10,13 +10,13 @@ from unittest import mock
 import pytest
 
 from slidex.config import SlidexConfig
-from slidex.solver import (
-    SliderSolver,
-    _get_pid_lock,
-    _kill_chromium_by_pid,
-    _find_chromium_pid_by_user_data_dir,
-    _ensure_previous_chromium_closed,
-    _record_chromium_pid,
+from slidex.solver import SliderSolver
+from slidex._chromium_lifecycle import (
+    get_pid_lock,
+    kill_chromium_by_pid,
+    find_chromium_pid_by_user_data_dir,
+    ensure_previous_chromium_closed,
+    record_chromium_pid,
 )
 
 
@@ -104,33 +104,33 @@ class TestCalibration:
 # ════════════════════════════════════════════════════════════
 
 class TestPIDTracking:
-    def test_get_pid_lock_returns_same_instance(self):
-        lock1 = _get_pid_lock()
-        lock2 = _get_pid_lock()
+    def testget_pid_lock_returns_same_instance(self):
+        lock1 = get_pid_lock()
+        lock2 = get_pid_lock()
         assert lock1 is lock2
 
-    @mock.patch("slidex.solver.psutil")
-    def test_kill_chromium_by_pid_not_running(self, mock_psutil):
+    @mock.patch("slidex._chromium_lifecycle.psutil")
+    def testkill_chromium_by_pid_not_running(self, mock_psutil):
         mock_proc = mock.MagicMock()
         mock_proc.is_running.return_value = False
         mock_psutil.Process.return_value = mock_proc
 
-        result = _kill_chromium_by_pid(12345)
+        result = kill_chromium_by_pid(12345)
         assert result is False
         mock_proc.terminate.assert_not_called()
 
-    @mock.patch("slidex.solver.psutil")
-    def test_kill_chromium_by_pid_wrong_process_name(self, mock_psutil):
+    @mock.patch("slidex._chromium_lifecycle.psutil")
+    def testkill_chromium_by_pid_wrong_process_name(self, mock_psutil):
         mock_proc = mock.MagicMock()
         mock_proc.is_running.return_value = True
         mock_proc.name.return_value = "python"
         mock_psutil.Process.return_value = mock_proc
 
-        result = _kill_chromium_by_pid(12345)
+        result = kill_chromium_by_pid(12345)
         assert result is False
 
-    @mock.patch("slidex.solver.psutil")
-    def test_kill_chromium_by_pid_terminates_and_kills(self, mock_psutil):
+    @mock.patch("slidex._chromium_lifecycle.psutil")
+    def testkill_chromium_by_pid_terminates_and_kills(self, mock_psutil):
         _Exc = type("_Exc", (Exception,), {})
         mock_proc = mock.MagicMock()
         mock_proc.is_running.return_value = True
@@ -141,21 +141,21 @@ class TestPIDTracking:
         mock_psutil.NoSuchProcess = _Exc
         mock_psutil.AccessDenied = _Exc
 
-        result = _kill_chromium_by_pid(12345)
+        result = kill_chromium_by_pid(12345)
         assert result is True
         mock_proc.terminate.assert_called_once()
         mock_proc.kill.assert_called_once()
 
-    @mock.patch("slidex.solver.psutil")
+    @mock.patch("slidex._chromium_lifecycle.psutil")
     def test_kill_chromium_no_such_process(self, mock_psutil):
         mock_psutil.Process.side_effect = mock_psutil.NoSuchProcess("gone")
         mock_psutil.NoSuchProcess = type("NoSuchProcess", (Exception,), {})
         mock_psutil.AccessDenied = type("AccessDenied", (Exception,), {})
 
-        result = _kill_chromium_by_pid(12345)
+        result = kill_chromium_by_pid(12345)
         assert result is False
 
-    @mock.patch("slidex.solver.psutil")
+    @mock.patch("slidex._chromium_lifecycle.psutil")
     def test_find_chromium_by_user_data_dir(self, mock_psutil):
         mock_proc = mock.MagicMock()
         mock_proc.info = {
@@ -165,10 +165,10 @@ class TestPIDTracking:
         }
         mock_psutil.process_iter.return_value = [mock_proc]
 
-        pid = _find_chromium_pid_by_user_data_dir("/tmp/profile_abc")
+        pid = find_chromium_pid_by_user_data_dir("/tmp/profile_abc")
         assert pid == 9999
 
-    @mock.patch("slidex.solver.psutil")
+    @mock.patch("slidex._chromium_lifecycle.psutil")
     def test_find_chromium_not_found(self, mock_psutil):
         mock_proc = mock.MagicMock()
         mock_proc.info = {
@@ -178,18 +178,18 @@ class TestPIDTracking:
         }
         mock_psutil.process_iter.return_value = [mock_proc]
 
-        pid = _find_chromium_pid_by_user_data_dir("/tmp/nonexistent")
+        pid = find_chromium_pid_by_user_data_dir("/tmp/nonexistent")
         assert pid is None
 
-    @mock.patch("slidex.solver._kill_chromium_by_pid")
-    def test_ensure_previous_chromium_closed_calls_kill(self, mock_kill):
-        _record_chromium_pid(42)
-        asyncio.run(_ensure_previous_chromium_closed())
+    @mock.patch("slidex._chromium_lifecycle.kill_chromium_by_pid")
+    def testensure_previous_chromium_closed_calls_kill(self, mock_kill):
+        record_chromium_pid(42)
+        asyncio.run(ensure_previous_chromium_closed())
         mock_kill.assert_called_once_with(42)
 
-    @mock.patch("slidex.solver._kill_chromium_by_pid")
-    def test_ensure_previous_chromium_closed_no_pid(self, mock_kill):
-        asyncio.run(_ensure_previous_chromium_closed())
+    @mock.patch("slidex._chromium_lifecycle.kill_chromium_by_pid")
+    def testensure_previous_chromium_closed_no_pid(self, mock_kill):
+        asyncio.run(ensure_previous_chromium_closed())
         mock_kill.assert_not_called()
 
 

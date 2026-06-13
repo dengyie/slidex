@@ -181,7 +181,34 @@ async def extract_images(
     return bg_bytes, piece_bytes
 ```
 
-### 第 5 步：实现 perform_slide()
+### 第 5 步：自定义图像匹配（可选）
+
+如果需要使用自定义图像匹配算法（如深度学习模型、OCR），可覆盖 `find_gap()` 方法：
+
+```python
+async def find_gap(
+    self,
+    bg_bytes: bytes,
+    piece_bytes: bytes
+) -> Tuple[Optional[int], float]:
+    """
+    自定义图像匹配算法
+    
+    默认：OpenCV Canny 边缘检测 + 模板匹配
+    可覆盖以使用：ML 模型、OCR、其他算法
+    
+    Returns:
+        (gap_x, confidence) — 缺口位置（像素），置信度 0-1
+    """
+    # 使用自定义算法
+    gap_x = await self.ml_model.predict(bg_bytes, piece_bytes)
+    confidence = 0.95
+    return gap_x, confidence
+```
+
+**默认行为**: 调用 `SliderImageMatcher.find_gap_position(bg_bytes, piece_bytes)` 使用 OpenCV。
+
+### 第 6 步：实现 perform_slide()
 
 执行滑动操作。
 
@@ -311,13 +338,86 @@ from slidex import SliderSolver
 SliderSolver.register_provider(
     "my-custom",
     MyCustomProvider,
-    priority=50,  # 数字越小，自动检测优先级越高
+    detection_priority=50,  # 数字越小，自动检测优先级越高
 )
 
 # 使用
 solver = SliderSolver(provider="my-custom")
 success, cookies = await solver.solve("https://...")
 ```
+
+---
+
+## 生命周期钩子（可选）
+
+Provider 提供两个生命周期钩子用于初始化和清理：
+
+### `on_init(page)` — 初始化钩子
+
+在 provider 被检测并选中后调用一次。用于：
+- 预热机器学习模型
+- 缓存检测结果
+- 建立连接
+
+```python
+class MyProvider(CaptchaProvider):
+    async def on_init(self, page: Page):
+        """Provider 初始化"""
+        # 预热模型
+        self.model = load_ml_model()
+        logger.info(f"{self.name} model loaded")
+```
+
+### `on_cleanup()` — 清理钩子
+
+在 `solver.close()` 时调用。用于：
+- 关闭连接
+- 保存状态
+- 释放资源
+
+```python
+class MyProvider(CaptchaProvider):
+    async def on_cleanup(self):
+        """Provider 清理"""
+        if hasattr(self, 'model'):
+            self.model.close()
+        logger.info(f"{self.name} cleaned up")
+```
+
+**默认行为**: 两个钩子的默认实现都是无操作（pass），子类可按需覆盖。
+
+---
+
+## Provider Registry 注意事项
+
+### 单例行为
+
+`ProviderRegistry` 是进程级全局单例。所有 `SliderSolver` 实例共享同一注册表：
+
+```python
+# 进程 A 中
+SliderSolver.register_provider("custom", MyProvider)
+
+# 进程 B 中（同一 Python 进程）
+solver = SliderSolver(provider="custom")  # 可以访问进程 A 注册的 provider
+```
+
+**适用场景**：
+- 单租户应用（大多数场景）
+- Worker 进程各自独立
+- 插件式架构（所有用户共享同一组 provider）
+
+**不适用场景**：
+- 多租户 SaaS（租户 A 不应看到租户 B 的自定义 provider）
+- 需要运行时动态隔离
+
+**未来扩展**：如需租户隔离，可传入自定义 registry 实例：
+```python
+my_registry = ProviderRegistry()
+solver = SliderSolver(provider_registry=my_registry)  # 未来特性（当前未实现）
+```
+
+**线程安全**：`ProviderRegistry.register()` 使用 `threading.Lock()` 保护并发注册，可安全在多线程环境中调用。
 
 ---
 

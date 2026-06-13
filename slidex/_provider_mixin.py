@@ -49,6 +49,8 @@ class ProviderSolverMixin:
                 logger.error(f"[{self.pure_user_id}] {e}")
                 return False
 
+        # 调用 provider 初始化钩子
+        await self._provider.on_init(page)
         return True
 
     async def _solve_with_provider(self, page: Page) -> Tuple[bool, Optional[Dict]]:
@@ -59,14 +61,15 @@ class ProviderSolverMixin:
         try:
             # 1. 定位元素
             elements = await self._provider.locate_elements(page)
-            logger.debug(f"[{self.pure_user_id}] elements located, track_width={elements.track_width_px}px")
+            metadata_str = f", metadata={elements.metadata}" if elements.metadata else ""
+            logger.debug(f"[{self.pure_user_id}] elements located, track_width={elements.track_width_px}px{metadata_str}")
 
             # 2. 提取图像
             bg_bytes, piece_bytes = await self._provider.extract_images(page, elements)
             logger.debug(f"[{self.pure_user_id}] images extracted, bg={len(bg_bytes)} bytes, piece={len(piece_bytes)} bytes")
 
             # 3. 图像匹配
-            gap_x, confidence = SliderImageMatcher.find_gap_position(bg_bytes, piece_bytes)
+            gap_x, confidence = await self._provider.find_gap(bg_bytes, piece_bytes)
             if gap_x is None:
                 logger.warning(f"[{self.pure_user_id}] gap not found")
                 return False, None
@@ -74,8 +77,12 @@ class ProviderSolverMixin:
             logger.info(f"[{self.pure_user_id}] gap detected at x={gap_x}px, confidence={confidence:.2f}")
 
             # 4. 生成轨迹（优先使用录制轨迹）
-            trajectory_pool = SliderTrajectoryPool(self.config.traj_pool_dir)
-            recorded_traj = trajectory_pool.get_random_trajectory()
+            try:
+                trajectory_pool = SliderTrajectoryPool(self.config.traj_pool_dir)
+                recorded_traj = trajectory_pool.get_random_trajectory()
+            except Exception as e:
+                logger.warning(f"[{self.pure_user_id}] trajectory pool error: {e}, using synthetic")
+                recorded_traj = None
 
             if recorded_traj:
                 logger.debug(f"[{self.pure_user_id}] using recorded trajectory")

@@ -10,6 +10,11 @@ from slidex._image_match import SliderImageMatcher
 from slidex._trajectory_pool import SliderTrajectoryPool
 from slidex.config import SlidexConfig
 from slidex._provider_mixin import ProviderSolverMixin
+from slidex._chromium_lifecycle import (
+    ensure_previous_chromium_closed,
+    record_chromium_pid,
+    find_chromium_pid_by_user_data_dir,
+)
 
 
 # ════════════════════════════════════════════════════════════
@@ -26,73 +31,6 @@ DEFAULT_SELECTORS = {
     "success_code": 0,
 }
 
-
-# === Chromium process singleton: PID tracking + kill-before-launch ===
-import threading
-
-_last_chromium_pid = None
-_pid_lock = threading.Lock()
-
-def _get_pid_lock():
-    return _pid_lock
-
-
-def _kill_chromium_by_pid(pid):
-    try:
-        proc = psutil.Process(pid)
-        if not proc.is_running():
-            return False
-        name = (proc.name() or "").lower()
-        if "chromium" not in name and "chrome" not in name:
-            return False
-        logger.info(f"[slider] Killing previous Chromium PID={pid}")
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except psutil.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=3)
-        logger.info(f"[slider] Previous Chromium PID={pid} killed")
-        return True
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        return False
-    except Exception as e:
-        logger.warning(f"[slider] Kill Chromium PID={pid} failed: {e}")
-        return False
-
-
-def _record_chromium_pid(pid):
-    global _last_chromium_pid
-    with _get_pid_lock():
-        _last_chromium_pid = pid
-    logger.info(f"[slider] Recorded Chromium PID={pid}")
-
-
-async def _ensure_previous_chromium_closed():
-    global _last_chromium_pid
-    with _get_pid_lock():
-        pid = _last_chromium_pid
-        _last_chromium_pid = None
-    if pid is not None:
-        _kill_chromium_by_pid(pid)
-
-
-def _find_chromium_pid_by_user_data_dir(user_data_dir):
-    try:
-        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
-            try:
-                pname = (proc.info.get("name") or "").lower()
-                if "chromium" not in pname and "chrome" not in pname:
-                    continue
-                cmdline = proc.info.get("cmdline") or []
-                for arg in cmdline:
-                    if arg and user_data_dir in arg:
-                        return proc.info["pid"]
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
-    except Exception:
-        pass
-    return None
 
 
 class SliderSolver(ProviderSolverMixin):
@@ -553,7 +491,7 @@ class SliderSolver(ProviderSolverMixin):
     #  浏览器初始化与页面加载
     # ════════════════════════════════════════════════════════════
     async def _init_browser(self):
-        await _ensure_previous_chromium_closed()
+        await ensure_previous_chromium_closed()
         self.profile_dir.mkdir(parents=True, exist_ok=True)
 
         pw = await async_playwright().start()
@@ -572,9 +510,9 @@ class SliderSolver(ProviderSolverMixin):
             **kwargs,
         )
         self.page = await self.context.new_page()
-        _pid = _find_chromium_pid_by_user_data_dir(str(self.profile_dir))
-        if _pid:
-            _record_chromium_pid(_pid)
+        pid = find_chromium_pid_by_user_data_dir(str(self.profile_dir))
+        if pid:
+            record_chromium_pid(pid)
 
         await self.page.add_init_script(STEALTH_INIT_SCRIPT)
         await self._inject_cookies()
@@ -852,6 +790,13 @@ class SliderSolver(ProviderSolverMixin):
     # ════════════════════════════════════════════════════════════
     async def close(self):
         """公共清理入口 — 根据模式选择正确的清理路径"""
+        # 调用 provider 清理钩子
+        if self._provider:
+            try:
+                await self._provider.on_cleanup()
+            except Exception as e:
+                logger.debug(f"[{self.pure_user_id}] provider cleanup error: {e}")
+
         if self._is_cdp_mode:
             await self._close_cdp_only()
         else:

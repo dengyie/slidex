@@ -41,6 +41,33 @@ class CaptchaProvider(ABC):
 
     def __init__(self):
         self._last_response: Optional[Response] = None
+        self._result: Optional[bool] = None
+
+    async def on_init(self, page: Page) -> None:
+        """
+        Provider 初始化钩子（在检测成功后调用一次）
+
+        子类可覆盖此方法执行初始化操作：
+        - 预热模型
+        - 缓存检测结果
+        - 建立连接
+
+        默认实现：无操作
+        """
+        pass
+
+    async def on_cleanup(self) -> None:
+        """
+        Provider 清理钩子（在 solver 关闭时调用）
+
+        子类可覆盖此方法执行清理操作：
+        - 关闭连接
+        - 保存状态
+        - 释放资源
+
+        默认实现：无操作
+        """
+        pass
 
     @abstractmethod
     async def detect(self, page: Page) -> bool:
@@ -82,6 +109,30 @@ class CaptchaProvider(ABC):
         """
         pass
 
+    async def find_gap(
+        self,
+        bg_bytes: bytes,
+        piece_bytes: bytes
+    ) -> Tuple[Optional[int], float]:
+        """
+        从图像中查找缺口位置（可覆盖此方法实现自定义算法）
+
+        默认实现：OpenCV Canny 边缘检测 + 模板匹配
+        子类可覆盖以使用：
+        - 深度学习模型
+        - OCR 识别
+        - 其他图像处理算法
+
+        Args:
+            bg_bytes: 背景图字节（PNG/JPEG）
+            piece_bytes: 拼图块字节（PNG/JPEG）
+
+        Returns:
+            (gap_x, confidence) — 缺口位置（像素），匹配置信度 0-1
+        """
+        from slidex._image_match import SliderImageMatcher
+        return SliderImageMatcher.find_gap_position(bg_bytes, piece_bytes)
+
     @abstractmethod
     async def perform_slide(
         self,
@@ -117,14 +168,35 @@ class CaptchaProvider(ABC):
         timeout_ms: int = 5000,
     ) -> SolveResult:
         """
-        等待验证结果（子类可覆盖此方法实现自定义等待逻辑）
+        等待验证结果（默认实现：轮询 self._result）
 
-        默认实现：等待 validate_response 返回 True/False
+        子类只需在 perform_slide() 中注册响应监听器，
+        通过 validate_response() 设置 self._result = True/False。
+        如需自定义等待逻辑，可覆盖此方法。
+
+        Args:
+            page: Playwright page 对象
+            timeout_ms: 超时时间（毫秒）
+
+        Returns:
+            SolveResult 包含 success, cookies, error
         """
+        import asyncio
+
+        start = asyncio.get_event_loop().time()
+        while asyncio.get_event_loop().time() - start < timeout_ms / 1000:
+            if self._result is not None:
+                cookies = await page.context.cookies()
+                return SolveResult(
+                    success=self._result,
+                    cookies={c["name"]: c["value"] for c in cookies},
+                )
+            await asyncio.sleep(0.1)
+
         return SolveResult(
             success=False,
             cookies=None,
-            error="get_result not implemented",
+            error=f"{self.name}: timeout waiting for result",
         )
 
 

@@ -8,6 +8,13 @@ from slidex.remote import CaptchaRemoteController, captcha_controller
 from slidex._concurrency import SliderConcurrencyManager, concurrency_manager
 from slidex.providers import CaptchaProvider, ProviderRegistry, ProviderElements, SolveResult
 from slidex.providers.builtin import AliyunNoCaptchaProvider, GeeTestProvider
+from slidex._chromium_lifecycle import (
+    get_pid_lock,
+    kill_chromium_by_pid,
+    record_chromium_pid,
+    ensure_previous_chromium_closed,
+    find_chromium_pid_by_user_data_dir,
+)
 
 __all__ = [
     "SlidexConfig",
@@ -31,4 +38,10 @@ __all__ = [
     "SolveResult",
     "AliyunNoCaptchaProvider",
     "GeeTestProvider",
+    # Chromium lifecycle (for tests)
+    "get_pid_lock",
+    "kill_chromium_by_pid",
+    "record_chromium_pid",
+    "ensure_previous_chromium_closed",
+    "find_chromium_pid_by_user_data_dir",
 ]

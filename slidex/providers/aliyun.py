@@ -177,25 +177,5 @@ class AliyunNoCaptchaProvider(CaptchaProvider):
 
         return None
 
-    async def get_result(self, page: Page, timeout_ms: int = 5000) -> SolveResult:
-        """等待结果"""
-        import asyncio
-
-        start = asyncio.get_event_loop().time()
-        while asyncio.get_event_loop().time() - start < timeout_ms / 1000:
-            if self._result is not None:
-                cookies = await page.context.cookies()
-                return SolveResult(
-                    success=self._result,
-                    cookies={c["name"]: c["value"] for c in cookies},
-                )
-            await asyncio.sleep(0.1)
-
-        return SolveResult(
-            success=False,
-            cookies=None,
-            error="Timeout waiting for result",
-        )
-
 
 __all__ = ["AliyunNoCaptchaProvider"]

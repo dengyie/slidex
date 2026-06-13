@@ -20,7 +20,11 @@ class SliderTrajectoryPool:
         if base_dir is None:
             base_dir = os.path.join(os.path.expanduser("~"), ".slidex", "trajectories")
         self.base_dir = Path(base_dir)
-        self.base_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.base_dir.mkdir(parents=True, exist_ok=True)
+        except (OSError, PermissionError) as e:
+            logger.warning(f"Cannot create trajectory pool dir {self.base_dir}: {e}")
+            # Pool will return None for all get/load calls, solver falls back to generated
         self.max_per_cookie = 50
         self.min_pool_size = 5
         self.rotation_strategy = "lru"
@@ -29,7 +33,10 @@ class SliderTrajectoryPool:
     # ── cookie 子目录 ──────────────────────────────────────────
     def _cookie_dir(self, cookie_id: str) -> Path:
         d = self.base_dir / cookie_id
-        d.mkdir(parents=True, exist_ok=True)
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except (OSError, PermissionError) as e:
+            logger.debug(f"Cannot create cookie trajectory dir: {e}")
         return d
 
     # ── 保存 ──────────────────────────────────────────────────
@@ -113,6 +120,15 @@ class SliderTrajectoryPool:
         r = random.choice(records)
         self._touch_last_used(cookie_id, r["_file"])
         return r
+
+    def get_random_trajectory(self) -> Optional[dict]:
+        """
+        获取随机轨迹（用于 provider 模式）
+
+        这是 load_random_trajectory() 的便捷别名，使用 "default" 作为 cookie_id。
+        Provider 模式下不需要区分不同用户的轨迹池。
+        """
+        return self.load_random_trajectory("default")
 
     # ── 轮转 ──────────────────────────────────────────────────
     def _last_used_path(self, cookie_id: str) -> Path:
