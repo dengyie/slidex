@@ -50,7 +50,12 @@ class ProviderSolverMixin:
                 return False
 
         # 调用 provider 初始化钩子
-        await self._provider.on_init(page)
+        try:
+            await self._provider.on_init(page)
+        except Exception as e:
+            logger.warning(f"[{self.pure_user_id}] provider on_init failed: {e}, falling back to legacy")
+            self._provider = None  # 清空 provider，回退到 legacy
+            return False  # 初始化失败，回退到 legacy 模式
         return True
 
     async def _solve_with_provider(self, page: Page) -> Tuple[bool, Optional[Dict]]:
@@ -69,7 +74,12 @@ class ProviderSolverMixin:
             logger.debug(f"[{self.pure_user_id}] images extracted, bg={len(bg_bytes)} bytes, piece={len(piece_bytes)} bytes")
 
             # 3. 图像匹配
-            gap_x, confidence = await self._provider.find_gap(bg_bytes, piece_bytes)
+            try:
+                gap_x, confidence = await self._provider.find_gap(bg_bytes, piece_bytes)
+            except Exception as e:
+                logger.error(f"[{self.pure_user_id}] find_gap error: {e}")
+                return False, None
+
             if gap_x is None:
                 logger.warning(f"[{self.pure_user_id}] gap not found")
                 return False, None

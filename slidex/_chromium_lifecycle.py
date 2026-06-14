@@ -28,9 +28,14 @@ def kill_chromium_by_pid(pid):
         proc = psutil.Process(pid)
         if not proc.is_running():
             return False
+
+        # 严格匹配 Chromium 进程名
         name = (proc.name() or "").lower()
-        if "chromium" not in name and "chrome" not in name:
+        CHROMIUM_NAMES = {"chromium", "chrome", "chromium-browser", "google-chrome"}
+        if name not in CHROMIUM_NAMES:
+            logger.debug(f"[slider] PID={pid} name={name} is not a Chromium process")
             return False
+
         logger.info(f"[slider] Killing previous Chromium PID={pid}")
         proc.terminate()
         try:
@@ -70,9 +75,14 @@ async def ensure_previous_chromium_closed():
     global _last_chromium_pid
     with get_pid_lock():
         pid = _last_chromium_pid
-        _last_chromium_pid = None
+
     if pid is not None:
-        kill_chromium_by_pid(pid)
+        success = kill_chromium_by_pid(pid)
+        if success:
+            with get_pid_lock():
+                # 只在是同一个 PID 时清空（防止被其他线程覆盖）
+                if _last_chromium_pid == pid:
+                    _last_chromium_pid = None
 
 
 def find_chromium_pid_by_user_data_dir(user_data_dir):
@@ -85,16 +95,25 @@ def find_chromium_pid_by_user_data_dir(user_data_dir):
     Returns:
         Process ID if found, None otherwise
     """
+    import os
+
     try:
+        normalized_target = os.path.normpath(str(user_data_dir))
+
         for proc in psutil.process_iter(["pid", "name", "cmdline"]):
             try:
                 pname = (proc.info.get("name") or "").lower()
-                if "chromium" not in pname and "chrome" not in pname:
+                CHROMIUM_NAMES = {"chromium", "chrome", "chromium-browser", "google-chrome"}
+                if pname not in CHROMIUM_NAMES:
                     continue
+
                 cmdline = proc.info.get("cmdline") or []
                 for arg in cmdline:
-                    if arg and user_data_dir in arg:
-                        return proc.info["pid"]
+                    if arg and "--user-data-dir=" in arg:
+                        # 提取路径并规范化
+                        arg_path = arg.split("--user-data-dir=", 1)[1]
+                        if os.path.normpath(arg_path) == normalized_target:
+                            return proc.info["pid"]
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
     except Exception:
