@@ -66,10 +66,14 @@ class SliderTrajectoryPool:
             "points": [[round(float(p[0]), 2), round(float(p[1]), 2), round(float(p[2]), 1)]
                        for p in points],
         }
-        with open(fpath, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        logger.info(f"[TrajectoryPool] saved {fname} for {cookie_id} (dist={distance:.0f}px, ok={success})")
-        return fname
+        try:
+            with open(fpath, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            logger.info(f"[TrajectoryPool] saved {fname} for {cookie_id} (dist={distance:.0f}px, ok={success})")
+            return fname
+        except (OSError, IOError, PermissionError) as e:
+            logger.debug(f"[TrajectoryPool] cannot save trajectory: {e}")
+            return None
 
     # ── 加载 ──────────────────────────────────────────────────
     def _load_all(self, cookie_id: str) -> List[dict]:

@@ -91,7 +91,7 @@ class ProviderSolverMixin:
                 logger.debug(f"[{self.pure_user_id}] generating synthetic trajectory")
                 trajectory = generate_trajectory(
                     distance=gap_x,
-                    duration_ms=1500 + int(gap_x * 2),
+                    attempt=1,
                 )
                 points = trajectory_to_points(trajectory)
 
