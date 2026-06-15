@@ -96,14 +96,17 @@ class ProviderSolverMixin:
 
             if recorded_traj:
                 logger.debug(f"[{self.pure_user_id}] using recorded trajectory")
-                points = trajectory_to_points(recorded_traj)
+                # 录制的轨迹已经是绝对坐标，包含 (x, y, timestamp)
+                points = recorded_traj["points"]
             else:
                 logger.debug(f"[{self.pure_user_id}] generating synthetic trajectory")
                 trajectory = generate_trajectory(
                     distance=gap_x,
                     attempt=1,
                 )
-                points = trajectory_to_points(trajectory)
+                # 生成的轨迹是相对坐标，需要转换为绝对坐标
+                # 但 provider 模式下不知道起始坐标，直接使用相对坐标 (0, 0 起点)
+                points = trajectory_to_points(trajectory, start_x=0, start_y=0)
 
             # 5. 执行滑动
             await self._provider.perform_slide(page, elements, gap_x, points)
