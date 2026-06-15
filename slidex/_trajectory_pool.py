@@ -53,7 +53,13 @@ class SliderTrajectoryPool:
                 except Exception:
                     pass
 
-        idx = len(existing) + 1
+        remaining = sorted(cdir.glob("trajectory_*.json"))
+        idx = 1
+        for fp in remaining:
+            try:
+                idx = max(idx, int(fp.stem.split("_")[-1]) + 1)
+            except ValueError:
+                continue
         fname = f"trajectory_{idx:03d}.json"
         fpath = cdir / fname
         data = {

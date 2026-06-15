@@ -51,4 +51,5 @@ include = ["slidex*", "demo*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+norecursedirs = ["manual"]
 addopts = "-v --tb=short"
