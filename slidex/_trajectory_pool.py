@@ -31,8 +31,18 @@ class SliderTrajectoryPool:
         self.recorded_only_mode = False
 
     # ── cookie 子目录 ──────────────────────────────────────────
+    @staticmethod
+    def _sanitize_cookie_id(cookie_id: str) -> str:
+        safe = "".join(c for c in str(cookie_id or "") if c.isalnum() or c in "-_.")
+        safe = safe.strip(".").replace("..", ".")
+        return safe or "default"
+
     def _cookie_dir(self, cookie_id: str) -> Path:
-        d = self.base_dir / cookie_id
+        base = self.base_dir.resolve()
+        safe_cookie_id = self._sanitize_cookie_id(cookie_id)
+        d = (base / safe_cookie_id).resolve()
+        if not d.is_relative_to(base):
+            raise ValueError("cookie_id escapes trajectory pool directory")
         try:
             d.mkdir(parents=True, exist_ok=True)
         except (OSError, PermissionError) as e:
@@ -44,6 +54,7 @@ class SliderTrajectoryPool:
                         distance: float, success: bool, verify_url: str = "",
                         duration_ms: float = 0) -> Optional[str]:
         """持久化一条轨迹，返回文件名，超出上限时淘汰最旧的"""
+        cookie_id = self._sanitize_cookie_id(cookie_id)
         cdir = self._cookie_dir(cookie_id)
         existing = sorted(cdir.glob("trajectory_*.json"))
         if len(existing) >= self.max_per_cookie:

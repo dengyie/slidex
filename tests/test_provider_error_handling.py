@@ -12,7 +12,13 @@ def cleanup_test_providers():
     """每个测试后清理测试用 provider"""
     yield
     # 清理测试 provider
-    test_providers = ["failing-init", "failing-gap", "crashing-detect", "cleanup-tracking"]
+    test_providers = [
+        "failing-init",
+        "failing-gap",
+        "crashing-detect",
+        "cleanup-tracking",
+        "slide-failure-cleanup",
+    ]
     for name in test_providers:
         if name in ProviderRegistry._providers:
             del ProviderRegistry._providers[name]
@@ -198,4 +204,52 @@ class TestProviderErrorHandling:
         await solver.close()
 
         # on_cleanup 应该被调用
+        assert cleanup_called is True
+
+    @pytest.mark.asyncio
+    async def test_cleanup_after_result_runs_when_slide_fails(self):
+        """perform_slide() 抛出异常时也应该清理 provider 临时资源"""
+        cleanup_called = False
+
+        class SlideFailureCleanupProvider(CaptchaProvider):
+            name = "slide-failure-cleanup"
+
+            async def detect(self, page):
+                return True
+
+            async def locate_elements(self, page):
+                return ProviderElements(
+                    slider_btn=AsyncMock(),
+                    slider_track=AsyncMock(),
+                    bg_img=None,
+                    piece_img=None,
+                    track_width_px=300,
+                )
+
+            async def extract_images(self, page, elements):
+                return b"fake_bg", b"fake_piece"
+
+            async def find_gap(self, bg_bytes: bytes, piece_bytes: bytes) -> Tuple[Optional[int], float]:
+                return 120, 0.95
+
+            async def perform_slide(self, page, elements, gap_x, trajectory):
+                raise RuntimeError("Simulated slide failure")
+
+            async def cleanup_after_result(self, page):
+                nonlocal cleanup_called
+                cleanup_called = True
+
+            async def validate_response(self, response):
+                return None
+
+        SliderSolver.register_provider("slide-failure-cleanup", SlideFailureCleanupProvider)
+
+        solver = SliderSolver(provider="slide-failure-cleanup")
+        page = AsyncMock()
+
+        await solver._detect_and_init_provider(page)
+        success, cookies = await solver._solve_with_provider(page)
+
+        assert success is False
+        assert cookies is None
         assert cleanup_called is True

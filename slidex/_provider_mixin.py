@@ -1,13 +1,11 @@
 """Provider-aware SliderSolver integration layer"""
 
-import asyncio
 from typing import Optional, Tuple, Dict
 from loguru import logger
 from playwright.async_api import Page
 
 from slidex.providers import ProviderRegistry, CaptchaProvider
 from slidex.providers.builtin import *  # auto-register built-in providers
-from slidex._image_match import SliderImageMatcher
 from slidex._trajectory import generate_trajectory, trajectory_to_points
 from slidex._trajectory_pool import SliderTrajectoryPool
 
@@ -88,7 +86,8 @@ class ProviderSolverMixin:
 
             # 4. 生成轨迹（优先使用录制轨迹）
             try:
-                trajectory_pool = SliderTrajectoryPool(self.config.traj_pool_dir)
+                trajectory_dir = self._config.get_trajectory_dir()
+                trajectory_pool = SliderTrajectoryPool(trajectory_dir)
                 recorded_traj = trajectory_pool.get_random_trajectory()
             except Exception as e:
                 logger.warning(f"[{self.pure_user_id}] trajectory pool error: {e}, using synthetic")
@@ -108,12 +107,15 @@ class ProviderSolverMixin:
                 # 但 provider 模式下不知道起始坐标，直接使用相对坐标 (0, 0 起点)
                 points = trajectory_to_points(trajectory, start_x=0, start_y=0)
 
-            # 5. 执行滑动
-            await self._provider.perform_slide(page, elements, gap_x, points)
-            logger.debug(f"[{self.pure_user_id}] slide performed")
+            try:
+                # 5. 执行滑动
+                await self._provider.perform_slide(page, elements, gap_x, points)
+                logger.debug(f"[{self.pure_user_id}] slide performed")
 
-            # 6. 等待结果
-            result = await self._provider.get_result(page, timeout_ms=5000)
+                # 6. 等待结果
+                result = await self._provider.get_result(page, timeout_ms=5000)
+            finally:
+                await self._provider.cleanup_after_result(page)
             if result.success:
                 logger.success(f"[{self.pure_user_id}] provider solve success!")
             else:

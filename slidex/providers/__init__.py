@@ -131,7 +131,7 @@ class CaptchaProvider(ABC):
             (gap_x, confidence) — 缺口位置（像素），匹配置信度 0-1
         """
         from slidex._image_match import SliderImageMatcher
-        return SliderImageMatcher.find_gap_position(bg_bytes, piece_bytes)
+        return SliderImageMatcher.find_gap_with_confidence(bg_bytes, piece_bytes)
 
     @abstractmethod
     async def perform_slide(
@@ -151,7 +151,7 @@ class CaptchaProvider(ABC):
         pass
 
     @abstractmethod
-    def validate_response(self, response: Response) -> Optional[bool]:
+    async def validate_response(self, response: Response) -> Optional[bool]:
         """
         从网络响应判断验证结果。
 
@@ -198,6 +198,10 @@ class CaptchaProvider(ABC):
             cookies=None,
             error=f"{self.name}: timeout waiting for result",
         )
+
+    async def cleanup_after_result(self, page: Page) -> None:
+        """Optional hook for providers to detach temporary listeners after result waiting."""
+        pass
 
 
 class ProviderRegistry:

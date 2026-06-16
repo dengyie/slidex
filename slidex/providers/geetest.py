@@ -1,6 +1,7 @@
 """GeeTest (极验) Provider"""
 
 import json
+import asyncio
 from typing import List, Optional, Tuple
 from playwright.async_api import Page, Response
 from loguru import logger
@@ -18,6 +19,7 @@ class GeeTestProvider(CaptchaProvider):
         super().__init__()
         self._result: Optional[bool] = None
         self._version: Optional[str] = None  # "v3" or "v4"
+        self._response_handler = None
 
     async def detect(self, page: Page) -> bool:
         """检测是否是 GeeTest"""
@@ -122,36 +124,41 @@ class GeeTestProvider(CaptchaProvider):
         """执行滑动"""
         self._result = None
 
-        async def response_handler(response: Response):
-            result = self.validate_response(response)
-            if result is not None:
-                self._result = result
+        def response_handler(response: Response):
+            async def _handle():
+                result = await self.validate_response(response)
+                if result is not None:
+                    self._result = result
 
+            asyncio.create_task(_handle())
+
+        self._response_handler = response_handler
         page.on("response", response_handler)
 
-        try:
-            btn_box = await elements.slider_btn.bounding_box()
-            if not btn_box:
-                raise RuntimeError("Cannot get slider button bounding box")
+        btn_box = await elements.slider_btn.bounding_box()
+        if not btn_box:
+            raise RuntimeError("Cannot get slider button bounding box")
 
-            start_x = btn_box["x"] + btn_box["width"] / 2
-            start_y = btn_box["y"] + btn_box["height"] / 2
+        start_x = btn_box["x"] + btn_box["width"] / 2
+        start_y = btn_box["y"] + btn_box["height"] / 2
 
-            await page.mouse.move(start_x, start_y)
-            await page.mouse.down()
-            await page.wait_for_timeout(100)
+        await page.mouse.move(start_x, start_y)
+        await page.mouse.down()
+        await page.wait_for_timeout(100)
 
-            for x, y, ts_ms in trajectory:
-                await page.mouse.move(start_x + x, start_y + y)
-                await page.wait_for_timeout(15)
+        for x, y, ts_ms in trajectory:
+            await page.mouse.move(start_x + x, start_y + y)
+            await page.wait_for_timeout(15)
 
-            await page.wait_for_timeout(100)
-            await page.mouse.up()
+        await page.wait_for_timeout(100)
+        await page.mouse.up()
 
-        finally:
-            page.remove_listener("response", response_handler)
+    async def cleanup_after_result(self, page: Page) -> None:
+        if self._response_handler:
+            page.remove_listener("response", self._response_handler)
+            self._response_handler = None
 
-    def validate_response(self, response: Response) -> Optional[bool]:
+    async def validate_response(self, response: Response) -> Optional[bool]:
         """验证响应"""
         url = response.url
 
@@ -161,7 +168,7 @@ class GeeTestProvider(CaptchaProvider):
             return None
 
         try:
-            body = response.body()
+            body = await response.body()
             text = body.decode("utf-8", errors="ignore")
             data = json.loads(text)
 

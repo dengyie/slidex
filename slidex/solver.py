@@ -244,7 +244,9 @@ class SliderSolver(ProviderSolverMixin):
                 return False, None
 
         try:
-            await captcha_controller.create_session(session_id, self.page)
+            session_info = await captcha_controller.create_session(
+                session_id, self.page, cookie_id=self.pure_user_id
+            )
         except Exception as e:
             logger.error(f"[{self.pure_user_id}] create remote session failed: {e}")
             return False, None
@@ -253,10 +255,12 @@ class SliderSolver(ProviderSolverMixin):
         if self._notification_callback:
             try:
                 import asyncio as _asyncio
+                session_token = session_info.get("token", "")
+                control_path = f"/api/captcha/control/{session_id}?token={session_token}"
                 _asyncio.ensure_future(
                     self._notification_callback(
                         self.cookie_id,
-                        f"【滑块验证需要人工介入】\nCookie: {self.cookie_id}\nSession: {session_id}\n"
+                        f"【滑块验证需要人工介入】\nCookie: {self.cookie_id}\nSession: {session_id}\nURL: {control_path}\n"
                         f"请访问滑块控制页面完成验证",
                         "滑块验证 - 人工介入"
                     )

@@ -409,6 +409,22 @@ class TestSliderTrajectoryPool:
             traj = pool.load_random_trajectory("test_user-123")
             assert traj is not None
 
+    def test_cookie_id_path_traversal_is_sanitized(self):
+        """测试 cookie_id 不能逃逸轨迹池目录"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pool = SliderTrajectoryPool(tmpdir)
+
+            filename = pool.save_trajectory(
+                [[0, 0, 100], [10, 0, 50], [20, 0, 50]],
+                "../../outside",
+                20,
+                True,
+            )
+
+            assert filename is not None
+            assert (Path(tmpdir) / "outside" / filename).exists()
+            assert not (Path(tmpdir).parent / "outside" / filename).exists()
+
     def test_empty_points_list(self):
         """测试空 points 列表"""
         with tempfile.TemporaryDirectory() as tmpdir:

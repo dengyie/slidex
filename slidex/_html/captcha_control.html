@@ -263,6 +263,7 @@
 
         <div class="session-input">
             <input type="text" id="sessionIdInput" placeholder="输入会话ID（通常是用户ID）" />
+            <input type="text" id="sessionTokenInput" placeholder="输入会话令牌" />
             <button id="connectBtn" onclick="connectSession()">连接</button>
         </div>
 
@@ -316,6 +317,7 @@
         let isRecording = true;
         let trajectoryPoints = [];
         let trajectoryStartX = 0, trajectoryStartY = 0;
+        let currentSessionToken = null;
 
         // 初始化
         document.addEventListener('DOMContentLoaded', () => {
@@ -343,6 +345,12 @@
             }
 
             // 检查是否有预设的会话ID
+            if (window.INITIAL_SESSION_TOKEN) {
+                document.getElementById('sessionTokenInput').value = window.INITIAL_SESSION_TOKEN;
+            } else if (urlParams.get('token')) {
+                document.getElementById('sessionTokenInput').value = urlParams.get('token');
+            }
+
             if (window.INITIAL_SESSION_ID) {
                 document.getElementById('sessionIdInput').value = window.INITIAL_SESSION_ID;
                 connectSession();
@@ -377,13 +385,15 @@
 
         async function connectSession() {
             const sessionId = document.getElementById('sessionIdInput').value.trim();
+            const sessionToken = document.getElementById('sessionTokenInput').value.trim();
             
-            if (!sessionId) {
-                alert('请输入会话ID');
+            if (!sessionId || !sessionToken) {
+                alert('请输入会话ID和会话令牌');
                 return;
             }
 
             currentSessionId = sessionId;
+            currentSessionToken = sessionToken;
             document.getElementById('sessionIdDisplay').textContent = sessionId;
             document.getElementById('connectBtn').disabled = true;
 
@@ -391,8 +401,9 @@
 
             try {
                 // 建立 WebSocket 连接
-                const wsUrl = `ws://${window.location.host}/api/captcha/ws/${sessionId}`;
-                log(`WebSocket URL: ${wsUrl}`, 'info');
+                const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const wsUrl = `${wsProtocol}//${window.location.host}/api/captcha/ws/${encodeURIComponent(sessionId)}?token=${encodeURIComponent(sessionToken)}`;
+                log(`WebSocket URL: /api/captcha/ws/${sessionId}?token=<redacted>`, 'info');
                 
                 ws = new WebSocket(wsUrl);
 
@@ -457,6 +468,7 @@
                 log('✅ 验证成功！', 'success');
                 updateStatus('completed', '验证成功');
                 document.getElementById('verificationStatus').textContent = '已完成';
+                submitTrajectory();
                 
                 // 显示成功提示
                 setTimeout(() => {
@@ -466,10 +478,6 @@
                     }
                 }, 500);
             }
-            
-            // 自动提交录制轨迹
-            submitTrajectory();
-
             else if (type === 'error') {
                 log(`错误: ${data.message}`, 'error');
             }
@@ -602,7 +610,7 @@
         }
 
         async function submitTrajectory() {
-            if (!window._pendingTrajectory || !currentSessionId) return;
+            if (!window._pendingTrajectory || !currentSessionId || !currentSessionToken) return;
             const t = window._pendingTrajectory;
             if (!t.points || t.points.length < 3) return;
 
@@ -624,7 +632,10 @@
             try {
                 const resp = await fetch("/api/captcha/trajectory", {
                     method: "POST",
-                    headers: { "Content-Type": "application/json" },
+                    headers: {
+                        "Content-Type": "application/json",
+                        "X-Captcha-Token": currentSessionToken,
+                    },
                     body: JSON.stringify({
                         session_id: currentSessionId,
                         cookie_id: cookieId,
@@ -651,4 +662,3 @@
     </script>
 </body>
 </html>
-

@@ -3,11 +3,12 @@
 提供 WebSocket 和 HTTP 接口用于远程操作滑块验证
 """
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Header, Query
 from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 from typing import Optional, List
 import asyncio
+import json
 import os
 from loguru import logger
 
@@ -18,6 +19,17 @@ trajectory_pool = SliderTrajectoryPool()
 
 # 创建路由器
 router = APIRouter(prefix="/api/captcha", tags=["captcha"])
+
+
+def _verify_session_or_404(session_id: str, token: Optional[str]) -> None:
+    if session_id not in captcha_controller.active_sessions:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if not captcha_controller.verify_session_token(session_id, token):
+        raise HTTPException(status_code=403, detail="无效会话令牌")
+
+
+def _json_for_script(value: Optional[str]) -> str:
+    return json.dumps(value).replace("</", "<\\/")
 
 
 class MouseEvent(BaseModel):
@@ -47,9 +59,17 @@ class SessionCheckRequest(BaseModel):
 # =============================================================================
 
 @router.websocket("/ws/{session_id}")
-async def websocket_endpoint(websocket: WebSocket, session_id: str):
+async def websocket_endpoint(websocket: WebSocket, session_id: str, token: Optional[str] = Query(default=None)):
     await websocket.accept()
     logger.info(f"WebSocket 连接建立: {session_id}")
+
+    if not captcha_controller.verify_session_token(session_id, token):
+        await websocket.send_json({
+            'type': 'error',
+            'message': '无效会话令牌'
+        })
+        await websocket.close(code=1008)
+        return
 
     captcha_controller.websocket_connections[session_id] = websocket
 
@@ -148,24 +168,14 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
 @router.get("/sessions")
 async def get_active_sessions():
-    sessions = []
-    for session_id, data in captcha_controller.active_sessions.items():
-        sessions.append({
-            'session_id': session_id,
-            'completed': data.get('completed', False),
-            'has_websocket': session_id in captcha_controller.websocket_connections
-        })
-
     return {
-        'count': len(sessions),
-        'sessions': sessions
+        'count': len(captcha_controller.active_sessions),
     }
 
 
 @router.get("/session/{session_id}")
-async def get_session_info(session_id: str):
-    if session_id not in captcha_controller.active_sessions:
-        raise HTTPException(status_code=404, detail="会话不存在")
+async def get_session_info(session_id: str, x_captcha_token: Optional[str] = Header(default=None)):
+    _verify_session_or_404(session_id, x_captcha_token)
 
     session_data = captcha_controller.active_sessions[session_id]
 
@@ -179,7 +189,8 @@ async def get_session_info(session_id: str):
 
 
 @router.get("/screenshot/{session_id}")
-async def get_screenshot(session_id: str):
+async def get_screenshot(session_id: str, x_captcha_token: Optional[str] = Header(default=None)):
+    _verify_session_or_404(session_id, x_captcha_token)
     screenshot = await captcha_controller.update_screenshot(session_id)
 
     if not screenshot:
@@ -189,7 +200,8 @@ async def get_screenshot(session_id: str):
 
 
 @router.post("/mouse_event")
-async def handle_mouse_event(event: MouseEvent):
+async def handle_mouse_event(event: MouseEvent, x_captcha_token: Optional[str] = Header(default=None)):
+    _verify_session_or_404(event.session_id, x_captcha_token)
     success = await captcha_controller.handle_mouse_event(
         event.session_id,
         event.event_type,
@@ -209,7 +221,8 @@ async def handle_mouse_event(event: MouseEvent):
 
 
 @router.post("/check_completion")
-async def check_completion(request: SessionCheckRequest):
+async def check_completion(request: SessionCheckRequest, x_captcha_token: Optional[str] = Header(default=None)):
+    _verify_session_or_404(request.session_id, x_captcha_token)
     completed = await captcha_controller.check_completion(request.session_id)
 
     return {
@@ -219,20 +232,24 @@ async def check_completion(request: SessionCheckRequest):
 
 
 @router.post("/trajectory")
-async def submit_trajectory(request: TrajectorySubmitRequest):
+async def submit_trajectory(request: TrajectorySubmitRequest, x_captcha_token: Optional[str] = Header(default=None)):
+    _verify_session_or_404(request.session_id, x_captcha_token)
+    session_data = captcha_controller.active_sessions[request.session_id]
+    cookie_id = session_data.get('cookie_id') or request.session_id
     try:
         if not request.points or len(request.points) < 3:
             raise HTTPException(status_code=400, detail="too few points")
-        trajectory_pool.save_trajectory(request.points, request.cookie_id, request.distance, True, request.verify_url or "")
-        logger.success(f"trajectory saved: cookie={request.cookie_id}")
-        return {"success": True, "message": "saved", "cookie_id": request.cookie_id}
+        trajectory_pool.save_trajectory(request.points, cookie_id, request.distance, True, request.verify_url or "")
+        logger.success(f"trajectory saved: cookie={cookie_id}")
+        return {"success": True, "message": "saved", "cookie_id": cookie_id}
     except Exception as e:
         logger.error(f"trajectory save failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.delete("/session/{session_id}")
-async def close_session(session_id: str):
+async def close_session(session_id: str, x_captcha_token: Optional[str] = Header(default=None)):
+    _verify_session_or_404(session_id, x_captcha_token)
     await captcha_controller.close_session(session_id)
     return {'success': True}
 
@@ -245,7 +262,8 @@ _HTML_FILE = os.path.join(os.path.dirname(__file__), "_html", "captcha_control.h
 
 
 @router.get("/status/{session_id}")
-async def get_captcha_status(session_id: str):
+async def get_captcha_status(session_id: str, x_captcha_token: Optional[str] = Header(default=None)):
+    _verify_session_or_404(session_id, x_captcha_token)
     try:
         is_completed = captcha_controller.is_completed(session_id)
         session_exists = captcha_controller.session_exists(session_id)
@@ -288,13 +306,20 @@ async def captcha_control_page():
 
 
 @router.get("/control/{session_id}", response_class=HTMLResponse)
-async def captcha_control_page_with_session(session_id: str):
+async def captcha_control_page_with_session(session_id: str, token: Optional[str] = Query(default=None)):
+    _verify_session_or_404(session_id, token)
     if os.path.exists(_HTML_FILE):
         with open(_HTML_FILE, 'r', encoding='utf-8') as f:
             html_content = f.read()
+            initial_session_id = _json_for_script(session_id)
+            initial_session_token = _json_for_script(token)
+            initial_session_script = (
+                f"<script>window.INITIAL_SESSION_ID = {initial_session_id}; "
+                f"window.INITIAL_SESSION_TOKEN = {initial_session_token};</script>"
+            )
             html_content = html_content.replace(
                 '</body>',
-                f'<script>window.INITIAL_SESSION_ID = "{session_id}";</script></body>'
+                f'{initial_session_script}</body>'
             )
             return HTMLResponse(content=html_content)
     else:

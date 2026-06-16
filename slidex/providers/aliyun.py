@@ -2,6 +2,7 @@
 
 import base64
 import json
+import asyncio
 from typing import List, Optional, Tuple
 from playwright.async_api import Page, Response
 from loguru import logger
@@ -18,6 +19,7 @@ class AliyunNoCaptchaProvider(CaptchaProvider):
     def __init__(self):
         super().__init__()
         self._result: Optional[bool] = None
+        self._response_handler = None
 
     async def detect(self, page: Page) -> bool:
         """检测是否是 Aliyun NoCaptcha"""
@@ -120,48 +122,53 @@ class AliyunNoCaptchaProvider(CaptchaProvider):
         # 注册响应监听
         self._result = None
 
-        async def response_handler(response: Response):
-            result = self.validate_response(response)
-            if result is not None:
-                self._result = result
+        def response_handler(response: Response):
+            async def _handle():
+                result = await self.validate_response(response)
+                if result is not None:
+                    self._result = result
 
+            asyncio.create_task(_handle())
+
+        self._response_handler = response_handler
         page.on("response", response_handler)
 
-        try:
-            # 获取滑块中心坐标
-            btn_box = await elements.slider_btn.bounding_box()
-            if not btn_box:
-                raise RuntimeError("Cannot get slider button bounding box")
+        # 获取滑块中心坐标
+        btn_box = await elements.slider_btn.bounding_box()
+        if not btn_box:
+            raise RuntimeError("Cannot get slider button bounding box")
 
-            start_x = btn_box["x"] + btn_box["width"] / 2
-            start_y = btn_box["y"] + btn_box["height"] / 2
+        start_x = btn_box["x"] + btn_box["width"] / 2
+        start_y = btn_box["y"] + btn_box["height"] / 2
 
-            # 开始拖动
-            await page.mouse.move(start_x, start_y)
-            await page.mouse.down()
-            await page.wait_for_timeout(50)
+        # 开始拖动
+        await page.mouse.move(start_x, start_y)
+        await page.mouse.down()
+        await page.wait_for_timeout(50)
 
-            # 执行轨迹
-            for x, y, ts_ms in trajectory:
-                target_x = start_x + x
-                target_y = start_y + y
-                await page.mouse.move(target_x, target_y)
-                await page.wait_for_timeout(10)
+        # 执行轨迹
+        for x, y, ts_ms in trajectory:
+            target_x = start_x + x
+            target_y = start_y + y
+            await page.mouse.move(target_x, target_y)
+            await page.wait_for_timeout(10)
 
-            await page.wait_for_timeout(50)
-            await page.mouse.up()
+        await page.wait_for_timeout(50)
+        await page.mouse.up()
 
-        finally:
-            page.remove_listener("response", response_handler)
+    async def cleanup_after_result(self, page: Page) -> None:
+        if self._response_handler:
+            page.remove_listener("response", self._response_handler)
+            self._response_handler = None
 
-    def validate_response(self, response: Response) -> Optional[bool]:
+    async def validate_response(self, response: Response) -> Optional[bool]:
         """验证响应"""
         url = response.url
         if "/slide?" not in url and "/_____tmd_____/slide" not in url:
             return None
 
         try:
-            body = response.body()
+            body = await response.body()
             text = body.decode("utf-8", errors="ignore")
             data = json.loads(text)
 

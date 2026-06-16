@@ -6,6 +6,7 @@
 import asyncio
 import base64
 import json
+import secrets
 from typing import Optional, Dict, Any
 from loguru import logger
 from playwright.async_api import Page
@@ -20,7 +21,7 @@ class CaptchaRemoteController:
         self.recording_enabled: bool = True
         self.session_recordings: Dict[str, list] = {}
 
-    async def create_session(self, session_id: str, page: Page) -> Dict[str, str]:
+    async def create_session(self, session_id: str, page: Page, cookie_id: str = "default") -> Dict[str, str]:
         session_info = await self._get_captcha_info(page)
         screenshot_bytes = await self._screenshot_captcha_area(page, session_info)
         screenshot_base64 = base64.b64encode(screenshot_bytes).decode('utf-8')
@@ -32,22 +33,36 @@ class CaptchaRemoteController:
         except Exception:
             viewport = {'width': 1280, 'height': 720}
 
+        session_token = secrets.token_urlsafe(32)
         self.active_sessions[session_id] = {
             'page': page,
             'screenshot': screenshot_base64,
             'captcha_info': session_info,
             'completed': False,
-            'viewport': viewport
+            'viewport': viewport,
+            'token': session_token,
+            'cookie_id': cookie_id,
         }
 
         logger.info(f"创建远程控制会话: {session_id}")
 
         return {
             'session_id': session_id,
+            'token': session_token,
             'screenshot': screenshot_base64,
             'captcha_info': session_info,
             'viewport': self.active_sessions[session_id]['viewport']
         }
+
+    def get_session_token(self, session_id: str) -> Optional[str]:
+        session = self.active_sessions.get(session_id)
+        if not session:
+            return None
+        return session.get('token')
+
+    def verify_session_token(self, session_id: str, token: Optional[str]) -> bool:
+        expected = self.get_session_token(session_id)
+        return bool(expected and token and secrets.compare_digest(expected, token))
 
     async def _screenshot_captcha_area(self, page: Page, captcha_info: Dict[str, Any]) -> bytes:
         try:
