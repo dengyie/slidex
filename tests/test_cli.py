@@ -66,6 +66,7 @@ class TestSlideSolveCdpCLI:
             page_url="https://test.com",
             selectors=None,
             trajectory_mode="auto",
+            provider=None,
             cookie_id="test_user"
         )
 
@@ -87,7 +88,8 @@ class TestSlideSolveCdpCLI:
             cookie_id="test_user",
             headless=True,
             trajectory_mode="auto",
-            selectors=None
+            selectors=None,
+            provider=None,
         )
         mock_solver.solve_on_existing_page.assert_called_once_with(
             cdp_endpoint="ws://localhost:9222/test",
@@ -116,6 +118,7 @@ class TestSlideSolveCdpCLI:
             page_url="https://test.com",
             selectors=None,
             trajectory_mode="auto",
+            provider=None,
             cookie_id="test_user"
         )
 
@@ -148,6 +151,7 @@ class TestSlideSolveCdpCLI:
             page_url="https://test.com",
             selectors=None,
             trajectory_mode="auto",
+            provider=None,
             cookie_id="test_user"
         )
 
@@ -184,6 +188,7 @@ class TestSlideSolveCdpCLI:
             page_url="",
             selectors=custom_selectors,
             trajectory_mode="auto",
+            provider=None,
             cookie_id="test"
         )
 
@@ -212,6 +217,7 @@ class TestSlideSolveCdpCLI:
                 page_url="",
                 selectors=None,
                 trajectory_mode=mode,
+                provider=None,
                 cookie_id="test"
             )
 
@@ -319,6 +325,7 @@ class TestSlideSolveCdpCLI:
             page_url="",
             selectors=None,
             trajectory_mode="auto",
+            provider=None,
             cookie_id="test"
         )
 
@@ -335,6 +342,7 @@ class TestSlideSolveCdpCLI:
         parser.add_argument("--page-url", default="")
         parser.add_argument("--selectors", default=None)
         parser.add_argument("--trajectory-mode", default="auto")
+        parser.add_argument("--provider", default=None)
         parser.add_argument("--cookie-id", default="default")
 
         args = parser.parse_args([
@@ -344,7 +352,30 @@ class TestSlideSolveCdpCLI:
         assert args.page_url == ""
         assert args.selectors is None
         assert args.trajectory_mode == "auto"
+        assert args.provider is None
         assert args.cookie_id == "default"
+
+    @pytest.mark.asyncio
+    @patch("slidex.solver.SliderSolver")
+    async def test_run_passes_provider_to_solver(self, mock_solver_class):
+        from slidex.scripts.slide_solve_cdp import _run
+
+        mock_solver = AsyncMock()
+        mock_solver.solve_on_existing_page = AsyncMock(return_value=(True, {}))
+        mock_solver.get_telemetry_summary.return_value = {"success": True, "status": "success"}
+        mock_solver.close = AsyncMock()
+        mock_solver_class.return_value = mock_solver
+
+        await _run(
+            cdp_endpoint="ws://localhost:9222/test",
+            page_url="",
+            selectors=None,
+            trajectory_mode="auto",
+            provider="auto",
+            cookie_id="test",
+        )
+
+        assert mock_solver_class.call_args.kwargs["provider"] == "auto"
 
     def test_invalid_selectors_json(self):
         """测试无效的 selectors JSON（需要运行 main，较慢）"""

@@ -41,6 +41,10 @@ def main():
         help="轨迹模式 (默认: auto)",
     )
     parser.add_argument(
+        "--provider", default=None,
+        help="Provider 名称，如 auto、geetest、aliyun-nocaptcha；默认使用 legacy 选择器模式",
+    )
+    parser.add_argument(
         "--cookie-id", default="default",
         help="用户标识符 (默认: default)",
     )
@@ -67,6 +71,7 @@ def main():
         page_url=args.page_url,
         selectors=selectors,
         trajectory_mode=args.trajectory_mode,
+        provider=args.provider,
         cookie_id=args.cookie_id,
     ))
 
@@ -79,6 +84,7 @@ async def _run(
     page_url: str,
     selectors: Optional[Dict[str, Any]],
     trajectory_mode: str,
+    provider: Optional[str],
     cookie_id: str,
 ) -> Dict[str, Any]:
     from slidex.solver import SliderSolver
@@ -131,6 +137,7 @@ async def _run(
         headless=True,
         trajectory_mode=trajectory_mode,
         selectors=selectors,
+        provider=provider,
     )
 
     try:

@@ -1,8 +1,8 @@
 # Slidex
 
 <p align="center">
-  <strong>Generic Slider CAPTCHA Solver</strong><br>
-  <em>通用滑块验证码求解库</em>
+  <strong>Vision Challenge Platform for automation-kit</strong><br>
+  <em>automation-kit 视觉能力平台</em>
 </p>
 
 <p align="center">
@@ -14,14 +14,17 @@
   <a href="README.md">中文</a> | <strong>English</strong>
 </p>
 
-Slidex is a professional slider CAPTCHA solver library. It supports multi-provider auto-detection, CDP mode integration, image recognition, trajectory simulation, and anti-detection. Suitable for batch account verification and automation flows.
+Slidex has evolved from a slider CAPTCHA solver into the visual capability platform for the `automation-kit` ecosystem. The current revision unifies slider CAPTCHA solving, OCR, screenshot evidence, manual fallback sessions, and telemetry/artifact contracts, while keeping `SliderSolver` compatible for existing integrations.
 
 > Delivery status: the current revision passes repository-level automated verification and is ready for integration handoff; perform one real browser smoke test against the target site before production rollout.
 
 **Features**:
 - 🎯 **Multi-provider support** — Built-in Aliyun NoCaptcha, GeeTest adapters with auto-detection
+- 🔎 **Unified vision API** — `slidex.vision` models slider, OCR, and manual fallback challenges
+- 🧾 **Built-in OCR surface** — `slidex.ocr` exposes `OcrTextExtractor`, `OcrResult`, and `FakeOcrExtractor`
 - 🔌 **Plugin-based extension** — Implement custom providers in 10 minutes
 - 🌐 **CDP mode** — Connect to existing browser, ideal for TypeScript/Node integration
+- ♻️ **Session reuse** — Supports CDP, existing Playwright `Page`, and image bytes/path inputs
 - 🧠 **Intelligent solving** — OpenCV + physics trajectory + recorded replay
 - 🛡️ **Anti-detection** — Stealth args + JS injection
 
@@ -31,6 +34,7 @@ Slidex is a professional slider CAPTCHA solver library. It supports multi-provid
 pip install -e .
 playwright install chromium
 pip install -e ".[remote]"   # optional: remote control API
+pip install -e ".[automation-kit]"  # optional: native automation-kit adapter
 ```
 
 ## Quick Start
@@ -52,6 +56,42 @@ solver = SliderSolver(provider="aliyun-nocaptcha")
 
 # GeeTest
 solver = SliderSolver(provider="geetest")
+```
+
+### Unified Vision API
+
+```python
+from slidex.ocr import FakeOcrExtractor
+from slidex.vision import (
+    ChallengeType,
+    VisionContext,
+    VisualChallengeRequest,
+    VisualChallengeSolver,
+)
+
+solver = VisualChallengeSolver(
+    ocr_extractor=FakeOcrExtractor(text="seat-a12", confidence=0.98)
+)
+
+ocr_result = await solver.solve(
+    VisualChallengeRequest(
+        challenge_type=ChallengeType.OCR_TEXT,
+        context=VisionContext.IMAGE_BYTES,
+        image_bytes=b"fake-image",
+    )
+)
+```
+
+### OCR API
+
+```python
+from slidex.ocr import FakeOcrExtractor
+
+extractor = FakeOcrExtractor(text="seat-a12", confidence=0.95, language="en")
+result = extractor.extract(
+    image_path="captcha.png",
+    roi={"x": 10, "y": 20, "width": 100, "height": 32},
+)
 ```
 
 ## Technical Overview
@@ -155,10 +195,24 @@ python -m slidex.scripts.slide_solve_cdp \
   --provider auto
 ```
 
-Output JSON:
+Output JSON (backward compatible plus unified visual result fields):
 
 ```json
-{"success": true, "cookies": {...}, "elapsed_ms": 3200.5, "error": null}
+{
+  "success": true,
+  "challenge_type": "slider_captcha",
+  "provider": "geetest",
+  "confidence": 0.93,
+  "duration_ms": 3200.5,
+  "error_code": null,
+  "retryable": false,
+  "cookies": {"session": "abc"},
+  "artifacts": [{"artifact_type": "telemetry", "path": "telemetry/run-id.json"}],
+  "metadata": {"telemetry": {"status": "success"}},
+  "elapsed_ms": 3200.5,
+  "error": null,
+  "telemetry": {"status": "success"}
+}
 ```
 
 ### 6. TypeScript Integration
@@ -208,6 +262,12 @@ uvicorn slidex.api:router --port 8000
 # Open http://localhost:8000/api/captcha/control
 ```
 
+The platform session contract also exposes:
+
+- `challenge_type` for the current visual challenge
+- `audit` records for session creation, mouse events, and completion
+- `ManualFallbackSession` for direct SDK-side manual results
+
 ### 9. Callbacks
 
 ```python
@@ -226,6 +286,15 @@ config = SlidexConfig(
 | `SLIDEX_TRAJ_POOL_DIR` | `~/.slidex/trajectories` | Trajectory storage path |
 | `SLIDEX_REMOTE_ENABLED` | `1` | Enable remote human fallback |
 | `SLIDEX_REMOTE_TIMEOUT` | `180` | Remote fallback timeout (seconds) |
+| `SLIDEX_TELEMETRY_ENABLED` | `1` | Enable structured E2E telemetry |
+| `SLIDEX_TELEMETRY_DIR` | `~/.slidex/telemetry` | Telemetry JSONL output directory |
+
+### 11. Artifacts and automation-kit adapters
+
+```python
+from slidex.integrations.automation_kit import to_action_result, to_artifacts, to_events
+from slidex.vision import build_artifact_path, safe_artifact_metadata
+```
 
 ---
 

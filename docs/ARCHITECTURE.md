@@ -2,15 +2,17 @@
 
 ## 概览
 
-Slidex 目前由三条主路径组成：
+Slidex 当前已经形成四条主路径：
 
 1. `SliderSolver` 主求解流程
 2. `CaptchaProvider` 插件式供应商适配层
-3. 远程人工兜底 API 与控制页
+3. `slidex.vision` / `slidex.ocr` 统一视觉契约层
+4. 远程人工兜底 API 与控制页
 
 当前代码目标是：
 
 - 自动检测或手动指定验证码供应商
+- 通过统一视觉模型承接 slider、OCR、manual fallback
 - 在 provider 模式和 legacy 模式之间平滑切换
 - 自动求解失败时进入远程人工兜底
 - 保持轨迹池、会话状态与安全边界可控
@@ -42,6 +44,46 @@ success, cookies = await solver.solve_on_existing_page(
     page_url="https://...",
 )
 ```
+
+已有 Playwright `Page` 复用：
+
+```python
+success, cookies = await solver.solve_on_page(page, page_url="https://...")
+```
+
+### `slidex.vision`
+
+`slidex/vision` 提供平台级公共契约：
+
+- `ChallengeType`
+- `VisionContext`
+- `VisualChallengeRequest`
+- `VisualChallengeResult`
+- `VisualChallengeSolver`
+- `ProviderManifest` / `ProviderDecision`
+- `build_artifact_path()` / `safe_artifact_metadata()`
+- `ManualFallbackSession`
+
+`VisualChallengeSolver` 当前负责：
+
+- `slider_captcha` 路由到既有 `SliderSolver`
+- `ocr_text` / `image_text` 路由到 OCR extractor
+- 输出统一 `VisualChallengeResult`
+
+### `slidex.ocr`
+
+`slidex/ocr` 是独立于浏览器生命周期的 OCR 表面，当前包含：
+
+- `OcrTextExtractor` 协议
+- `OcrResult`
+- `FakeOcrExtractor`
+
+输入模式已覆盖：
+
+- `image_bytes`
+- `image_path`
+- ROI 区域参数
+- 未来保留 `android_screenshot_bytes` 语义位于 `VisionContext`
 
 ### `ProviderSolverMixin`
 
@@ -98,6 +140,28 @@ class CaptchaProvider(ABC):
 
 ## 数据结构
 
+### `VisualChallengeResult`
+
+```python
+@dataclass
+class VisualChallengeResult:
+    success: bool
+    challenge_type: ChallengeType
+    provider: str
+    confidence: float = 0.0
+    duration_ms: float = 0.0
+    error_code: Optional[str] = None
+    retryable: bool = False
+    cookies: Optional[Dict[str, str]] = None
+    artifacts: List[VisionArtifact] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+```
+
+说明：
+
+- SDK 序列化默认会对 `cookies` 与敏感 metadata 做脱敏
+- CLI/CDP 输出为兼容现有调用方，会保留原始 `cookies` 顶层字段
+
 ### `ProviderElements`
 
 ```python
@@ -140,6 +204,7 @@ class SolveResult:
 
 - 文档中过去提到的 `geetest-v3` / `geetest-v4` 独立类并不存在于当前实现
 - v3/v4 由单个 `GeeTestProvider` 在运行时区分
+- provider 现在还带有 `ProviderManifest`，可按 `ChallengeType` 和 `VisionContext` 过滤
 
 ## 远程人工兜底
 
@@ -155,6 +220,12 @@ class SolveResult:
 3. 通过通知回调发送控制页 URL
 4. 前端控制页通过 token 建立 WebSocket
 5. 人工完成拖动后提交轨迹
+
+当前平台化补充：
+
+- session state 增加 `challenge_type`
+- session state 增加 `audit`
+- `ManualFallbackSession` 可以直接生成统一的人工完成结果
 
 ### 安全边界
 
@@ -185,8 +256,10 @@ class SolveResult:
 从仓库层面看，当前版本满足：
 
 - 全量自动化测试通过
+- slider、OCR、artifact、manual fallback 的核心平台契约已落地
 - provider 模式与远程控制关键安全边界已补齐
-- 文档契约与当前代码已同步
+- automation-kit optional adapter 已验证无硬依赖与有依赖两条路径
+- 文档契约与当前代码基本同步
 
 仍建议在正式上线前补做：
 

@@ -11,6 +11,7 @@ from slidex.providers.builtin import AliyunNoCaptchaProvider, GeeTestProvider
 from slidex.ocr import FakeOcrExtractor, OcrBox, OcrInput, OcrResult, OcrTextExtractor
 from slidex.vision import (
     ChallengeType,
+    ManualFallbackSession,
     ProviderDecision,
     ProviderManifest,
     VisionArtifact,
@@ -55,6 +56,7 @@ __all__ = [
     "OcrResult",
     "OcrTextExtractor",
     "ChallengeType",
+    "ManualFallbackSession",
     "ProviderDecision",
     "ProviderManifest",
     "VisionArtifact",

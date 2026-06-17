@@ -2,7 +2,7 @@
 
 ## 什么是 Provider？
 
-Provider 是 Slidex 的验证码供应商适配器，封装了特定供应商的：
+Provider 是 Slidex 视觉平台里 `slider_captcha` 类挑战的供应商适配器，封装了特定供应商的：
 - **检测逻辑** — 识别当前页面使用的验证码类型
 - **元素定位** — 找到滑块、轨道、图像等 DOM 元素
 - **图像提取** — 从 img/canvas 提取背景图和拼图块
@@ -20,6 +20,8 @@ Provider 抽象层让你可以：
 - **开箱即用**：内置 Aliyun、GeeTest 适配器
 - **自动检测**：`provider="auto"` 自动识别当前网站
 - **快速扩展**：10 分钟实现一个新供应商适配器
+
+对于 OCR、截图识别、人工兜底等非 slider 场景，不应实现为 `CaptchaProvider`；这些能力属于 `slidex.ocr` 或 `slidex.vision.manual` 层。
 
 ---
 
@@ -49,6 +51,21 @@ from slidex import SliderSolver
 
 print(SliderSolver.list_providers())
 # ['aliyun-nocaptcha', 'geetest']
+```
+
+查看 manifest：
+
+```python
+from slidex import ProviderRegistry
+from slidex.vision import ChallengeType, VisionContext
+
+print(ProviderRegistry.list_manifests())
+print(
+    ProviderRegistry.find_providers(
+        challenge_type=ChallengeType.SLIDER_CAPTCHA,
+        context=VisionContext.CDP,
+    )
+)
 ```
 
 ---
@@ -355,6 +372,25 @@ SliderSolver.register_provider(
 # 使用
 solver = SliderSolver(provider="my-custom")
 success, cookies = await solver.solve("https://...")
+```
+
+### 第 10 步：声明 Provider Manifest
+
+每个 provider 都应该声明自己的 manifest，用于平台层的能力过滤与决策记录：
+
+```python
+from slidex.vision import ChallengeType, ProviderManifest, VisionContext
+
+class MyCustomProvider(CaptchaProvider):
+    name = "my-custom"
+    manifest = ProviderManifest(
+        name="my-custom",
+        version="0.1.0",
+        challenge_types=[ChallengeType.SLIDER_CAPTCHA],
+        contexts=[VisionContext.PLAYWRIGHT_PAGE, VisionContext.CDP],
+        requires_network=False,
+        produces_artifacts=["screenshot", "crop", "trajectory", "telemetry"],
+    )
 ```
 
 ---

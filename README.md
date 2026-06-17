@@ -1,8 +1,8 @@
 # Slidex
 
 <p align="center">
-  <strong>通用滑块验证码求解库</strong><br>
-  <em>Generic Slider CAPTCHA Solver</em>
+  <strong>automation-kit 视觉能力平台</strong><br>
+  <em>Vision Challenge Platform for automation-kit</em>
 </p>
 
 <p align="center">
@@ -14,14 +14,17 @@
   <strong>中文</strong> | <a href="README_EN.md">English</a>
 </p>
 
-Slidex 是一个专业的滑块验证码自动求解库。支持多供应商自动适配、CDP 模式集成、图像识别、轨迹模拟和反检测。适用于批量账号验证、自动化流程中遇到滑块验证码的场景。
+Slidex 已从滑块验证码求解库升级为 `automation-kit` 生态的视觉能力平台。当前版本统一承接滑块验证码、OCR、截图识别证据、人工兜底会话和相关 telemetry/artifact 契约，同时保持 `SliderSolver` 对旧接入方式的兼容。
 
 > 交付状态：当前版本已经通过仓库级自动化测试，可用于集成与验收交付；上线前仍建议在目标站点完成一次真实浏览器冒烟验证。
 
 **特性**：
 - 🎯 **多供应商支持** — 内置 Aliyun NoCaptcha、GeeTest 适配器，自动检测
+- 🔎 **统一视觉接口** — `slidex.vision` 统一描述 slider、OCR、manual fallback
+- 🧾 **OCR 能力内建** — `slidex.ocr` 提供 `OcrTextExtractor` / `OcrResult` / `FakeOcrExtractor`
 - 🔌 **插件式扩展** — 10 分钟实现自定义 Provider，无需修改核心代码
 - 🌐 **CDP 模式** — 连接已有浏览器，适合 TypeScript/Node 集成
+- ♻️ **会话复用** — 支持 CDP、已有 Playwright `Page`、图片 bytes/path
 - 🧠 **智能求解** — OpenCV 图像匹配 + 物理轨迹模拟 + 真人轨迹回放
 - 🛡️ **反检测** — Stealth 参数 + JS 注入隐藏自动化特征
 
@@ -31,6 +34,7 @@ Slidex 是一个专业的滑块验证码自动求解库。支持多供应商自�
 pip install -e .
 playwright install chromium
 pip install -e ".[remote]"   # 可选：远程控制 API
+pip install -e ".[automation-kit]"  # 可选：native automation-kit 适配
 ```
 
 ## 快速开始
@@ -53,6 +57,51 @@ solver = SliderSolver(provider="aliyun-nocaptcha")
 
 # GeeTest 极验
 solver = SliderSolver(provider="geetest")
+```
+
+### 统一视觉 API
+
+```python
+from slidex.ocr import FakeOcrExtractor
+from slidex.vision import (
+    ChallengeType,
+    VisionContext,
+    VisualChallengeRequest,
+    VisualChallengeSolver,
+)
+
+solver = VisualChallengeSolver(
+    ocr_extractor=FakeOcrExtractor(text="大麦", confidence=0.98)
+)
+
+ocr_result = await solver.solve(
+    VisualChallengeRequest(
+        challenge_type=ChallengeType.OCR_TEXT,
+        context=VisionContext.IMAGE_BYTES,
+        image_bytes=b"fake-image",
+    )
+)
+
+slider_result = await solver.solve(
+    VisualChallengeRequest(
+        challenge_type=ChallengeType.SLIDER_CAPTCHA,
+        context=VisionContext.CDP,
+        cdp_endpoint="ws://localhost:9222/devtools/browser/xxx",
+        page_url="https://...",
+    )
+)
+```
+
+### OCR API
+
+```python
+from slidex.ocr import FakeOcrExtractor
+
+extractor = FakeOcrExtractor(text="A12", confidence=0.95, language="zh-CN")
+result = extractor.extract(
+    image_bytes=b"...png bytes...",
+    roi={"x": 10, "y": 20, "width": 100, "height": 32},
+)
 ```
 
 ### Legacy 模式（向后兼容）
@@ -175,10 +224,24 @@ python -m slidex.scripts.slide_solve_cdp \
   --provider auto  # 自动检测
 ```
 
-输出 JSON：
+输出 JSON（兼容旧字段，同时包含统一视觉结果字段）：
 
 ```json
-{"success": true, "cookies": {...}, "elapsed_ms": 3200.5, "error": null}
+{
+  "success": true,
+  "challenge_type": "slider_captcha",
+  "provider": "geetest",
+  "confidence": 0.93,
+  "duration_ms": 3200.5,
+  "error_code": null,
+  "retryable": false,
+  "cookies": {"session": "abc"},
+  "artifacts": [{"artifact_type": "telemetry", "path": "telemetry/run-id.json"}],
+  "metadata": {"telemetry": {"status": "success"}},
+  "elapsed_ms": 3200.5,
+  "error": null,
+  "telemetry": {"status": "success"}
+}
 ```
 
 ### 6. TypeScript 集成示例
@@ -226,6 +289,25 @@ solver = SliderSolver(
 pip install -e ".[remote]"
 uvicorn slidex.api:router --port 8000
 # 打开 http://localhost:8000/api/captcha/control
+```
+
+当前平台化会话契约还提供：
+
+- `challenge_type`: 当前人工兜底所处理的视觉挑战类型
+- `audit`: 会话创建、鼠标事件、完成状态的审计记录
+- `ManualFallbackSession`: 可在 SDK 层直接构造统一的人工结果
+
+```python
+from slidex.vision import ChallengeType, ManualFallbackSession
+
+session = ManualFallbackSession(
+    session_id="session-1",
+    challenge_type=ChallengeType.OCR_TEXT,
+    token="secret-token",
+    timeout_s=60,
+)
+
+result = session.complete_text("人工修正结果")
 ```
 
 ### 9. 回调接口
@@ -285,6 +367,30 @@ solver = SliderSolver(cookie_id="user_123", provider="auto", config=config)
 - `cookie_count`: 求解后上下文是否产出有效 cookie
 
 如果你走 CLI/CDP 集成，`python -m slidex.scripts.slide_solve_cdp` 现在也会在 JSON 输出中附带 `telemetry` 字段，可直接上报。
+
+### 12. Artifact 与 automation-kit 适配
+
+`slidex.vision` 当前提供稳定 artifact 辅助函数：
+
+```python
+from pathlib import Path
+from slidex.vision import build_artifact_path, safe_artifact_metadata
+
+artifact_path = build_artifact_path(
+    root=Path("artifacts"),
+    run_id="run-1",
+    artifact_type="telemetry",
+    name="events.jsonl",
+)
+
+metadata = safe_artifact_metadata({"token": "secret", "source": "unit"})
+```
+
+安装 `automation-kit` extra 后，还可以把统一视觉结果直接转成 action result / artifact / event：
+
+```python
+from slidex.integrations.automation_kit import to_action_result, to_artifacts, to_events
+```
 
 ---
 

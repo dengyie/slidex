@@ -1951,3 +1951,45 @@ Each phase must end with:
 - Phase 0.6 manual fallback platformization: done for model/session/audit contract.
 - Phase 0.6 CLI/API unified output: done.
 - Remaining: final hardening review and delivery audit.
+
+### 2026-06-18: Final Delivery Audit
+
+**Cross-Repository Traceability:**
+
+- `automation-kit`: `c6619d8 docs: 完善 slidex 视觉平台兼容矩阵`
+- `automation-app-damai`: `2826ce7 feat: 使用 slidex 视觉能力测试入口`
+- `automation-app-dianping`: `0d646ca test: 保持 dianping 视觉能力可选`
+- `automation-plugin-ocr`: `0b4f9c1 docs: 明确 OCR 插件归档迁移策略`
+
+**Requirement Evidence:**
+
+- `automation-plugin-ocr` 不再被应用仓引用: verified by `rg -n "automation-plugin-ocr|automation_plugin_ocr" .` returning no matches in damai and dianping.
+- `automation-app-damai` 使用 `slidex.ocr.FakeOcrExtractor`: covered by `/tmp/slidex-integration/automation-app-damai/tests/test_workflow.py`.
+- `automation-kit` 文档推荐 `slidex` 作为视觉能力平台: covered by `/tmp/slidex-integration/automation-kit/docs/ecosystem.md` and `docs/compatibility.md`.
+- `slidex` 同时支持 `slider_captcha` and `ocr_text`: covered by `tests/test_vision_solver.py`.
+- `VisualChallengeResult` 可映射为 automation-kit action result / artifact / event: covered by `tests/test_automation_kit_integration.py` and native-path verification with `PYTHONPATH=/tmp/slidex-integration/automation-kit`.
+- artifact and metadata redaction helpers: covered by `tests/test_vision_artifacts.py`.
+- manual fallback unified result model and session audit fields: covered by `tests/test_manual_fallback.py` and `tests/test_api_security.py`.
+- CLI/CDP unified visual output while preserving compatibility fields: covered by `tests/test_cli.py`.
+
+**Final Verification Commands:**
+
+- `pytest -q`
+- `PYTHONPATH=/tmp/slidex-integration/automation-kit pytest -q tests/test_automation_kit_integration.py`
+- `/tmp/slidex-integration/automation-kit`: `PYTHONPATH=/tmp/slidex-integration/automation-kit pytest -q -o addopts=''`
+- `/tmp/slidex-integration/automation-app-damai`: `PYTHONPATH=/Users/mango/project/codex/slidex:/tmp/slidex-integration/automation-kit:/tmp/slidex-integration/automation-app-damai pytest -q -o addopts=''`
+- `/tmp/slidex-integration/automation-app-dianping`: `PYTHONPATH=/tmp/slidex-integration/automation-kit:/tmp/slidex-integration/automation-app-dianping pytest -q -o addopts=''`
+- `/tmp/slidex-integration/automation-plugin-ocr`: `PYTHONPATH=/tmp/slidex-integration/automation-plugin-ocr pytest -q -o addopts=''`
+
+**Final Review Status:**
+
+- Mode: `final`.
+- Severe issues: one documentation/implementation mismatch found and fixed: README used `--provider auto` before the CDP CLI accepted `--provider`.
+- Fix: added `--provider` support to `slide_solve_cdp.py` and test coverage in `tests/test_cli.py`.
+- Quality score: 93/100.
+- Pass status: passed.
+
+**Remaining Risks:**
+
+- Real target-site E2E validation still depends on a live user-side browser/session and target CAPTCHA availability.
+- `automation-plugin-ocr` can be archived on GitHub after the external commits are pushed.

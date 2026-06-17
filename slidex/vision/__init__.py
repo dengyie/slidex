@@ -9,6 +9,7 @@ from slidex.vision.models import (
     redact_sensitive,
 )
 from slidex.vision.artifacts import build_artifact_path, safe_artifact_metadata
+from slidex.vision.manual import ManualFallbackSession
 
 __all__ = [
     "ChallengeType",
@@ -19,6 +20,7 @@ __all__ = [
     "VisualChallengeRequest",
     "VisualChallengeResult",
     "VisualChallengeSolver",
+    "ManualFallbackSession",
     "build_artifact_path",
     "redact_sensitive",
     "safe_artifact_metadata",
