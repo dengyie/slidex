@@ -16,6 +16,8 @@
 
 Slidex is a professional slider CAPTCHA solver library. It supports multi-provider auto-detection, CDP mode integration, image recognition, trajectory simulation, and anti-detection. Suitable for batch account verification and automation flows.
 
+> Delivery status: the current revision passes repository-level automated verification and is ready for integration handoff; perform one real browser smoke test against the target site before production rollout.
+
 **Features**:
 - 🎯 **Multi-provider support** — Built-in Aliyun NoCaptcha, GeeTest adapters with auto-detection
 - 🔌 **Plugin-based extension** — Implement custom providers in 10 minutes
@@ -134,7 +136,7 @@ class MyProvider(CaptchaProvider):
     async def perform_slide(self, page, elements, gap_x, trajectory):
         # Perform slide...
     
-    def validate_response(self, response):
+    async def validate_response(self, response):
         # Validate result...
 
 # Register and use

@@ -206,13 +206,15 @@ async def find_gap(
     return gap_x, confidence
 ```
 
-**默认行为**: 调用 `SliderImageMatcher.find_gap_position(bg_bytes, piece_bytes)` 使用 OpenCV。
+**默认行为**: 调用 `SliderImageMatcher.find_gap_with_confidence(bg_bytes, piece_bytes)` 使用 OpenCV。
 
 ### 第 6 步：实现 perform_slide()
 
 执行滑动操作。
 
 ```python
+import asyncio
+
 async def perform_slide(
     self,
     page: Page,
@@ -230,46 +232,55 @@ async def perform_slide(
     # 注册响应监听
     self._result = None
     
-    async def response_handler(response: Response):
-        result = self.validate_response(response)
-        if result is not None:
-            self._result = result
-    
+    def response_handler(response: Response):
+        async def _handle():
+            result = await self.validate_response(response)
+            if result is not None:
+                self._result = result
+
+        asyncio.create_task(_handle())
+
+    self._response_handler = response_handler
     page.on("response", response_handler)
-    
-    try:
-        # 获取滑块中心坐标
-        btn_box = await elements.slider_btn.bounding_box()
-        if not btn_box:
-            raise RuntimeError("Cannot get slider button bounding box")
-        
-        start_x = btn_box["x"] + btn_box["width"] / 2
-        start_y = btn_box["y"] + btn_box["height"] / 2
-        
-        # 按下
-        await page.mouse.move(start_x, start_y)
-        await page.mouse.down()
-        await page.wait_for_timeout(100)
-        
-        # 执行轨迹
-        for x, y, ts_ms in trajectory:
-            await page.mouse.move(start_x + x, start_y + y)
-            await page.wait_for_timeout(15)
-        
-        # 松开
-        await page.wait_for_timeout(100)
-        await page.mouse.up()
-    
-    finally:
-        page.remove_listener("response", response_handler)
+
+    # 获取滑块中心坐标
+    btn_box = await elements.slider_btn.bounding_box()
+    if not btn_box:
+        raise RuntimeError("Cannot get slider button bounding box")
+
+    start_x = btn_box["x"] + btn_box["width"] / 2
+    start_y = btn_box["y"] + btn_box["height"] / 2
+
+    # 按下
+    await page.mouse.move(start_x, start_y)
+    await page.mouse.down()
+    await page.wait_for_timeout(100)
+
+    # 执行轨迹
+    for x, y, ts_ms in trajectory:
+        await page.mouse.move(start_x + x, start_y + y)
+        await page.wait_for_timeout(15)
+
+    # 松开
+    await page.wait_for_timeout(100)
+    await page.mouse.up()
 ```
 
-### 第 6 步：实现 validate_response()
+为避免结果响应在 `perform_slide()` 返回后才到达，监听器应保留到 `get_result()` 完成。推荐同时实现一个清理钩子：
+
+```python
+async def cleanup_after_result(self, page: Page) -> None:
+    if self._response_handler:
+        page.remove_listener("response", self._response_handler)
+        self._response_handler = None
+```
+
+### 第 7 步：实现 validate_response()
 
 从网络响应判断验证结果。
 
 ```python
-def validate_response(self, response: Response) -> Optional[bool]:
+async def validate_response(self, response: Response) -> Optional[bool]:
     """
     返回：
     - True: 验证成功
@@ -283,7 +294,7 @@ def validate_response(self, response: Response) -> Optional[bool]:
         return None
     
     try:
-        body = response.body()
+        body = await response.body()
         text = body.decode("utf-8", errors="ignore")
         data = json.loads(text)
         
@@ -300,7 +311,7 @@ def validate_response(self, response: Response) -> Optional[bool]:
     return None
 ```
 
-### 第 7 步：实现 get_result()
+### 第 8 步：实现 get_result()
 
 等待验证结果（可选，覆盖默认实现）。
 
@@ -330,7 +341,7 @@ async def get_result(self, page: Page, timeout_ms: int = 5000) -> SolveResult:
     )
 ```
 
-### 第 8 步：注册 Provider
+### 第 9 步：注册 Provider
 
 ```python
 from slidex import SliderSolver
