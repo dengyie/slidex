@@ -13,6 +13,7 @@ import asyncio
 import json
 import sys
 import time
+from pathlib import Path
 from typing import Dict, Any, Optional
 
 from loguru import logger
@@ -81,12 +82,48 @@ async def _run(
     cookie_id: str,
 ) -> Dict[str, Any]:
     from slidex.solver import SliderSolver
+    from slidex.vision import ChallengeType, VisionArtifact, VisualChallengeResult
 
     async def _resolve_telemetry() -> Dict[str, Any]:
         telemetry = solver.get_telemetry_summary()
         if asyncio.iscoroutine(telemetry):
             telemetry = await telemetry
-        return telemetry
+        return telemetry if isinstance(telemetry, dict) else {}
+
+    def _serialize_result(
+        *,
+        success: bool,
+        cookies: Optional[Dict[str, str]],
+        elapsed_ms: float,
+        error_code: Optional[str],
+        telemetry: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        run_id = str(telemetry.get("run_id") or "unknown")
+        result = VisualChallengeResult(
+            success=success,
+            challenge_type=ChallengeType.SLIDER_CAPTCHA,
+            provider=str(telemetry.get("provider_name") or "auto"),
+            confidence=float(telemetry.get("confidence") or 0.0),
+            duration_ms=round(elapsed_ms, 1),
+            error_code=error_code,
+            retryable=not success,
+            cookies=cookies,
+            artifacts=[
+                VisionArtifact(
+                    artifact_type="telemetry",
+                    path=Path("telemetry") / f"{run_id}.json",
+                    metadata={"run_id": run_id},
+                )
+            ],
+            metadata={"telemetry": telemetry},
+        )
+        payload = result.to_dict()
+        # Backward-compatible runtime output: callers still need solved cookies.
+        payload["cookies"] = cookies
+        payload["elapsed_ms"] = payload["duration_ms"]
+        payload["error"] = error_code
+        payload["telemetry"] = telemetry
+        return payload
 
     start = time.time()
     solver = SliderSolver(
@@ -102,22 +139,24 @@ async def _run(
             page_url=page_url,
         )
         elapsed_ms = (time.time() - start) * 1000
-        return {
-            "success": success,
-            "cookies": cookies,
-            "elapsed_ms": round(elapsed_ms, 1),
-            "error": None if success else "solve_failed",
-            "telemetry": await _resolve_telemetry(),
-        }
+        telemetry = await _resolve_telemetry()
+        return _serialize_result(
+            success=success,
+            cookies=cookies,
+            elapsed_ms=elapsed_ms,
+            error_code=None if success else "solve_failed",
+            telemetry=telemetry,
+        )
     except Exception as e:
         elapsed_ms = (time.time() - start) * 1000
-        return {
-            "success": False,
-            "cookies": None,
-            "elapsed_ms": round(elapsed_ms, 1),
-            "error": str(e),
-            "telemetry": await _resolve_telemetry(),
-        }
+        telemetry = await _resolve_telemetry()
+        return _serialize_result(
+            success=False,
+            cookies=None,
+            elapsed_ms=elapsed_ms,
+            error_code=str(e),
+            telemetry=telemetry,
+        )
     finally:
         await solver.close()
 

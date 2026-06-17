@@ -10,6 +10,7 @@ import secrets
 from typing import Optional, Dict, Any
 from loguru import logger
 from playwright.async_api import Page
+from slidex.vision import ChallengeType
 
 
 class CaptchaRemoteController:
@@ -21,7 +22,13 @@ class CaptchaRemoteController:
         self.recording_enabled: bool = True
         self.session_recordings: Dict[str, list] = {}
 
-    async def create_session(self, session_id: str, page: Page, cookie_id: str = "default") -> Dict[str, str]:
+    async def create_session(
+        self,
+        session_id: str,
+        page: Page,
+        cookie_id: str = "default",
+        challenge_type: ChallengeType = ChallengeType.SLIDER_CAPTCHA,
+    ) -> Dict[str, str]:
         session_info = await self._get_captcha_info(page)
         screenshot_bytes = await self._screenshot_captcha_area(page, session_info)
         screenshot_base64 = base64.b64encode(screenshot_bytes).decode('utf-8')
@@ -42,7 +49,10 @@ class CaptchaRemoteController:
             'viewport': viewport,
             'token': session_token,
             'cookie_id': cookie_id,
+            'challenge_type': challenge_type.value,
+            'audit': [],
         }
+        self.record_audit(session_id, "session_created", challenge_type=challenge_type.value)
 
         logger.info(f"创建远程控制会话: {session_id}")
 
@@ -53,6 +63,12 @@ class CaptchaRemoteController:
             'captcha_info': session_info,
             'viewport': self.active_sessions[session_id]['viewport']
         }
+
+    def record_audit(self, session_id: str, event: str, **metadata):
+        if session_id in self.active_sessions:
+            self.active_sessions[session_id].setdefault("audit", []).append(
+                {"event": event, "metadata": metadata}
+            )
 
     def get_session_token(self, session_id: str) -> Optional[str]:
         session = self.active_sessions.get(session_id)
@@ -186,6 +202,7 @@ class CaptchaRemoteController:
         try:
             page = self.active_sessions[session_id]['page']
             self._record_event(session_id, event_type, x, y)
+            self.record_audit(session_id, "mouse_event", event_type=event_type)
 
             if event_type == 'down':
                 await page.mouse.move(x, y)
@@ -270,6 +287,7 @@ class CaptchaRemoteController:
 
             logger.success(f"验证完成（所有滑块元素已消失）: {session_id}")
             self.active_sessions[session_id]['completed'] = True
+            self.record_audit(session_id, "session_completed")
             return True
 
         except Exception as e:

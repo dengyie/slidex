@@ -80,7 +80,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: Optio
                 'type': 'session_info',
                 'screenshot': session_data['screenshot'],
                 'captcha_info': session_data['captcha_info'],
-                'viewport': session_data['viewport']
+                'viewport': session_data['viewport'],
+                'challenge_type': session_data.get('challenge_type', 'slider_captcha'),
+                'audit': session_data.get('audit', []),
             })
         else:
             await websocket.send_json({
@@ -184,6 +186,8 @@ async def get_session_info(session_id: str, x_captcha_token: Optional[str] = Hea
         'screenshot': session_data['screenshot'],
         'captcha_info': session_data['captcha_info'],
         'viewport': session_data['viewport'],
+        'challenge_type': session_data.get('challenge_type', 'slider_captcha'),
+        'audit': session_data.get('audit', []),
         'completed': session_data.get('completed', False)
     }
 

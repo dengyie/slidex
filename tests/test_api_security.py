@@ -34,6 +34,26 @@ def test_verify_session_accepts_correct_token():
     _verify_session_or_404("s1", "secret")
 
 
+@pytest.mark.asyncio
+async def test_session_info_exposes_visual_challenge_audit_metadata():
+    captcha_controller.active_sessions.clear()
+    captcha_controller.active_sessions["s1"] = {
+        "token": "secret",
+        "screenshot": "image",
+        "captcha_info": {"selector": "#captcha"},
+        "viewport": {"width": 100, "height": 100},
+        "challenge_type": "ocr_text",
+        "audit": [{"event": "session_created", "metadata": {"challenge_type": "ocr_text"}}],
+        "completed": False,
+    }
+
+    payload = await api.get_session_info("s1", x_captcha_token="secret")
+
+    assert payload["challenge_type"] == "ocr_text"
+    assert payload["audit"][0]["event"] == "session_created"
+    assert "token" not in payload
+
+
 def test_control_page_does_not_log_raw_token():
     html = Path("slidex/_html/captcha_control.html").read_text(encoding="utf-8")
 

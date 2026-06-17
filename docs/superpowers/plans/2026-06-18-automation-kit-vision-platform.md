@@ -1905,4 +1905,49 @@ Each phase must end with:
 - Phase 0.4 unified visual API: done for OCR and slider routing.
 - Phase 0.4 session reuse: done for Playwright page and existing CDP path.
 - Phase 0.5 optional automation-kit adapter: done for action result, artifact, and event conversion.
-- Remaining: artifact persistence helpers, generic manual fallback model, full CLI unified output, final hardening review.
+- Phase 0.5 artifact standardization: done for path sanitization and metadata redaction.
+- Phase 0.6 manual fallback platformization: done for session audit, challenge type, and OCR correction completion.
+- Phase 0.6 CLI/API unified output: done for `VisualChallengeResult` fields plus backward-compatible solver output.
+- Remaining: final hardening review and any future provider split work.
+
+### 2026-06-18: Phase 0.5/0.6 Checkpoint
+
+**Completed:**
+
+- Added `slidex.vision.artifacts.build_artifact_path(...)` and `safe_artifact_metadata(...)`.
+- Added `slidex.vision.manual.ManualFallbackSession` for OCR correction and generic manual completion metadata.
+- Extended remote session state with `challenge_type` and `audit` records.
+- Exposed `challenge_type` and `audit` via session info APIs.
+- Unified CLI/CDP JSON output around `VisualChallengeResult` fields while preserving backward-compatible `cookies`, `elapsed_ms`, `error`, and `telemetry`.
+
+**Decision Record:**
+
+- Problem: CLI consumers already depend on solved cookies and legacy top-level fields.
+  Choice: output the unified visual result contract and keep `cookies`, `elapsed_ms`, `error`, and `telemetry` at top level as compatibility aliases.
+  Reason: satisfies the new SDK/CLI contract requirement without breaking existing CDP integrations.
+  Risk: callers should eventually migrate to `duration_ms` and `error_code` to avoid dual-field ambiguity.
+- Problem: remote manual fallback must become platform-aware, but the current UI/controller is still slider-specific.
+  Choice: platformize the session/audit model first and leave the UI surface unchanged in this phase.
+  Reason: preserves existing remote control behavior while establishing the stable session contract needed by future OCR/manual flows.
+  Risk: the current browser UI still reflects slider semantics until a later UX pass.
+
+**Verification:**
+
+- `pytest -q tests/test_vision_artifacts.py tests/test_manual_fallback.py tests/test_cli.py tests/test_api_security.py`: `25 passed`.
+- `pytest -q`: `238 passed, 1 skipped`.
+- `PYTHONPATH=/tmp/slidex-integration/automation-kit pytest -q tests/test_automation_kit_integration.py`: `5 passed`.
+
+**Production Code Quality Review:**
+
+- Mode: `checkpoint`.
+- Severe issues: none found.
+- Improvement suggestions: keep a dedicated CI job for native automation-kit adapter coverage and add a future browser/UI test once manual fallback becomes truly challenge-generic at the front-end layer.
+- Quality score: 91/100.
+- Pass status: passed.
+
+**Todo Status:**
+
+- Phase 0.5 artifact standardization: done.
+- Phase 0.6 manual fallback platformization: done for model/session/audit contract.
+- Phase 0.6 CLI/API unified output: done.
+- Remaining: final hardening review and delivery audit.

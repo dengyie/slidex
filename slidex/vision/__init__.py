@@ -8,6 +8,7 @@ from slidex.vision.models import (
     VisualChallengeResult,
     redact_sensitive,
 )
+from slidex.vision.artifacts import build_artifact_path, safe_artifact_metadata
 
 __all__ = [
     "ChallengeType",
@@ -18,7 +19,9 @@ __all__ = [
     "VisualChallengeRequest",
     "VisualChallengeResult",
     "VisualChallengeSolver",
+    "build_artifact_path",
     "redact_sensitive",
+    "safe_artifact_metadata",
 ]
 
 

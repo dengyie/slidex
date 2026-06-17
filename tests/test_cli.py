@@ -75,6 +75,12 @@ class TestSlideSolveCdpCLI:
         assert result["error"] is None
         assert result["elapsed_ms"] >= 0  # 可能接近 0
         assert result["telemetry"]["status"] == "success"
+        assert result["challenge_type"] == "slider_captcha"
+        assert result["provider"] == "auto"
+        assert result["duration_ms"] == result["elapsed_ms"]
+        assert result["error_code"] is None
+        assert result["retryable"] is False
+        assert result["artifacts"][0]["artifact_type"] == "telemetry"
 
         # 验证 solver 被正确调用
         mock_solver_class.assert_called_once_with(
@@ -117,6 +123,8 @@ class TestSlideSolveCdpCLI:
         assert result["success"] is False
         assert result["cookies"] is None
         assert result["error"] == "solve_failed"
+        assert result["error_code"] == "solve_failed"
+        assert result["retryable"] is True
         assert result["telemetry"]["status"] == "failed"
 
     @pytest.mark.asyncio
@@ -147,6 +155,7 @@ class TestSlideSolveCdpCLI:
         assert result["success"] is False
         assert result["cookies"] is None
         assert "Connection failed" in result["error"]
+        assert "Connection failed" in result["error_code"]
         assert result["elapsed_ms"] >= 0
         assert result["telemetry"]["status"] == "exception"
 
@@ -161,6 +170,7 @@ class TestSlideSolveCdpCLI:
 
         mock_solver = AsyncMock()
         mock_solver.solve_on_existing_page = AsyncMock(return_value=(True, {}))
+        mock_solver.get_telemetry_summary.return_value = {"success": True, "status": "success"}
         mock_solver.close = AsyncMock()
         mock_solver_class.return_value = mock_solver
 
@@ -190,6 +200,7 @@ class TestSlideSolveCdpCLI:
 
         mock_solver = AsyncMock()
         mock_solver.solve_on_existing_page = AsyncMock(return_value=(True, {}))
+        mock_solver.get_telemetry_summary.return_value = {"success": True, "status": "success"}
         mock_solver.close = AsyncMock()
         mock_solver_class.return_value = mock_solver
 
@@ -210,12 +221,34 @@ class TestSlideSolveCdpCLI:
     def test_json_output_format_on_success(self):
         """测试成功时的 JSON 输出格式（集成测试需要 mock）"""
         # 这个测试需要完整环境，这里只验证格式要求
-        expected_keys = {"success", "cookies", "elapsed_ms", "error", "telemetry"}
+        expected_keys = {
+            "success",
+            "challenge_type",
+            "provider",
+            "confidence",
+            "duration_ms",
+            "error_code",
+            "retryable",
+            "cookies",
+            "artifacts",
+            "metadata",
+            "elapsed_ms",
+            "error",
+            "telemetry",
+        }
 
         # 模拟的输出
         sample_output = {
             "success": True,
             "cookies": {"key": "value"},
+            "challenge_type": "slider_captcha",
+            "provider": "auto",
+            "confidence": 0.0,
+            "duration_ms": 1234.5,
+            "error_code": None,
+            "retryable": False,
+            "artifacts": [],
+            "metadata": {},
             "elapsed_ms": 1234.5,
             "error": None,
             "telemetry": {"status": "success"}
@@ -227,11 +260,33 @@ class TestSlideSolveCdpCLI:
 
     def test_json_output_format_on_failure(self):
         """测试失败时的 JSON 输出格式"""
-        expected_keys = {"success", "cookies", "elapsed_ms", "error", "telemetry"}
+        expected_keys = {
+            "success",
+            "challenge_type",
+            "provider",
+            "confidence",
+            "duration_ms",
+            "error_code",
+            "retryable",
+            "cookies",
+            "artifacts",
+            "metadata",
+            "elapsed_ms",
+            "error",
+            "telemetry",
+        }
 
         sample_output = {
             "success": False,
             "cookies": None,
+            "challenge_type": "slider_captcha",
+            "provider": "auto",
+            "confidence": 0.0,
+            "duration_ms": 567.8,
+            "error_code": "solve_failed",
+            "retryable": True,
+            "artifacts": [],
+            "metadata": {},
             "elapsed_ms": 567.8,
             "error": "solve_failed",
             "telemetry": {"status": "failed"}
