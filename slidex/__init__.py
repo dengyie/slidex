@@ -8,6 +8,17 @@ from slidex.remote import CaptchaRemoteController, captcha_controller
 from slidex._concurrency import SliderConcurrencyManager, concurrency_manager
 from slidex.providers import CaptchaProvider, ProviderRegistry, ProviderElements, SolveResult
 from slidex.providers.builtin import AliyunNoCaptchaProvider, GeeTestProvider
+from slidex.ocr import FakeOcrExtractor, OcrBox, OcrInput, OcrResult, OcrTextExtractor
+from slidex.vision import (
+    ChallengeType,
+    ProviderDecision,
+    ProviderManifest,
+    VisionArtifact,
+    VisionContext,
+    VisualChallengeRequest,
+    VisualChallengeResult,
+    VisualChallengeSolver,
+)
 from slidex._chromium_lifecycle import (
     get_pid_lock,
     kill_chromium_by_pid,
@@ -38,6 +49,19 @@ __all__ = [
     "SolveResult",
     "AliyunNoCaptchaProvider",
     "GeeTestProvider",
+    "FakeOcrExtractor",
+    "OcrBox",
+    "OcrInput",
+    "OcrResult",
+    "OcrTextExtractor",
+    "ChallengeType",
+    "ProviderDecision",
+    "ProviderManifest",
+    "VisionArtifact",
+    "VisionContext",
+    "VisualChallengeRequest",
+    "VisualChallengeResult",
+    "VisualChallengeSolver",
     # Chromium lifecycle (for tests)
     "get_pid_lock",
     "kill_chromium_by_pid",

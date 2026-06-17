@@ -185,6 +185,7 @@ class CaptchaRemoteController:
 
         try:
             page = self.active_sessions[session_id]['page']
+            self._record_event(session_id, event_type, x, y)
 
             if event_type == 'down':
                 await page.mouse.move(x, y)

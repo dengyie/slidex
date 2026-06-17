@@ -56,6 +56,7 @@ class TestSlideSolveCdpCLI:
         mock_solver.solve_on_existing_page = AsyncMock(
             return_value=(True, {"session": "abc123"})
         )
+        mock_solver.get_telemetry_summary.return_value = {"success": True, "status": "success"}
         mock_solver.close = AsyncMock()
         mock_solver_class.return_value = mock_solver
 
@@ -73,6 +74,7 @@ class TestSlideSolveCdpCLI:
         assert result["cookies"] == {"session": "abc123"}
         assert result["error"] is None
         assert result["elapsed_ms"] >= 0  # 可能接近 0
+        assert result["telemetry"]["status"] == "success"
 
         # 验证 solver 被正确调用
         mock_solver_class.assert_called_once_with(
@@ -98,6 +100,7 @@ class TestSlideSolveCdpCLI:
         mock_solver.solve_on_existing_page = AsyncMock(
             return_value=(False, None)
         )
+        mock_solver.get_telemetry_summary.return_value = {"success": False, "status": "failed"}
         mock_solver.close = AsyncMock()
         mock_solver_class.return_value = mock_solver
 
@@ -114,6 +117,7 @@ class TestSlideSolveCdpCLI:
         assert result["success"] is False
         assert result["cookies"] is None
         assert result["error"] == "solve_failed"
+        assert result["telemetry"]["status"] == "failed"
 
     @pytest.mark.asyncio
     @patch("slidex.solver.SliderSolver")
@@ -126,6 +130,7 @@ class TestSlideSolveCdpCLI:
         mock_solver.solve_on_existing_page = AsyncMock(
             side_effect=Exception("Connection failed")
         )
+        mock_solver.get_telemetry_summary.return_value = {"success": False, "status": "exception"}
         mock_solver.close = AsyncMock()
         mock_solver_class.return_value = mock_solver
 
@@ -143,6 +148,7 @@ class TestSlideSolveCdpCLI:
         assert result["cookies"] is None
         assert "Connection failed" in result["error"]
         assert result["elapsed_ms"] >= 0
+        assert result["telemetry"]["status"] == "exception"
 
         # close 仍然应该被调用
         mock_solver.close.assert_called_once()
@@ -204,14 +210,15 @@ class TestSlideSolveCdpCLI:
     def test_json_output_format_on_success(self):
         """测试成功时的 JSON 输出格式（集成测试需要 mock）"""
         # 这个测试需要完整环境，这里只验证格式要求
-        expected_keys = {"success", "cookies", "elapsed_ms", "error"}
+        expected_keys = {"success", "cookies", "elapsed_ms", "error", "telemetry"}
 
         # 模拟的输出
         sample_output = {
             "success": True,
             "cookies": {"key": "value"},
             "elapsed_ms": 1234.5,
-            "error": None
+            "error": None,
+            "telemetry": {"status": "success"}
         }
 
         assert set(sample_output.keys()) == expected_keys
@@ -220,13 +227,14 @@ class TestSlideSolveCdpCLI:
 
     def test_json_output_format_on_failure(self):
         """测试失败时的 JSON 输出格式"""
-        expected_keys = {"success", "cookies", "elapsed_ms", "error"}
+        expected_keys = {"success", "cookies", "elapsed_ms", "error", "telemetry"}
 
         sample_output = {
             "success": False,
             "cookies": None,
             "elapsed_ms": 567.8,
-            "error": "solve_failed"
+            "error": "solve_failed",
+            "telemetry": {"status": "failed"}
         }
 
         assert set(sample_output.keys()) == expected_keys
@@ -247,6 +255,7 @@ class TestSlideSolveCdpCLI:
             return True, {}
 
         mock_solver.solve_on_existing_page = slow_solve
+        mock_solver.get_telemetry_summary.return_value = {"success": True, "status": "success"}
         mock_solver.close = AsyncMock()
         mock_solver_class.return_value = mock_solver
 

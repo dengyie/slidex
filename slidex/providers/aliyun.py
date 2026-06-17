@@ -8,6 +8,7 @@ from playwright.async_api import Page, Response
 from loguru import logger
 
 from slidex.providers import CaptchaProvider, ProviderElements, SolveResult
+from slidex.vision.models import ChallengeType, ProviderManifest, VisionContext
 
 
 class AliyunNoCaptchaProvider(CaptchaProvider):
@@ -15,6 +16,14 @@ class AliyunNoCaptchaProvider(CaptchaProvider):
 
     name = "aliyun-nocaptcha"
     description = "Aliyun NoCaptcha slider CAPTCHA"
+    manifest = ProviderManifest(
+        name=name,
+        version="0.1.0",
+        challenge_types=[ChallengeType.SLIDER_CAPTCHA],
+        contexts=[VisionContext.PLAYWRIGHT_PAGE, VisionContext.CDP],
+        requires_network=False,
+        produces_artifacts=["screenshot", "crop", "trajectory", "telemetry"],
+    )
 
     def __init__(self):
         super().__init__()

@@ -30,6 +30,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+automation-kit = [
+    "automation-kit>=0.1.0",
+]
 remote = [
     "fastapi>=0.111.0",
     "uvicorn[standard]>=0.29.0",
@@ -42,7 +45,7 @@ dev = [
     "pytest-mock>=3.12",
 ]
 all = [
-    "slidex[remote,dev]",
+    "slidex[automation-kit,remote,dev]",
 ]
 
 [tool.setuptools.packages.find]

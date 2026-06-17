@@ -7,6 +7,13 @@ from playwright.async_api import Page, ElementHandle, Response
 from loguru import logger
 import threading
 
+from slidex.vision.models import (
+    ChallengeType,
+    ProviderDecision,
+    ProviderManifest,
+    VisionContext,
+)
+
 
 @dataclass
 class ProviderElements:
@@ -38,6 +45,14 @@ class CaptchaProvider(ABC):
 
     name: str = "base"
     description: str = "Base CAPTCHA Provider"
+    manifest = ProviderManifest(
+        name="base",
+        version="0.1.0",
+        challenge_types=[ChallengeType.SLIDER_CAPTCHA],
+        contexts=[VisionContext.PLAYWRIGHT_PAGE, VisionContext.CDP],
+        requires_network=False,
+        produces_artifacts=["screenshot", "crop", "trajectory", "telemetry"],
+    )
 
     def __init__(self):
         self._last_response: Optional[Response] = None
@@ -241,6 +256,56 @@ class ProviderRegistry:
         return cls._providers[name]()
 
     @classmethod
+    def get_manifest(cls, name: str) -> ProviderManifest:
+        """获取 provider manifest。"""
+        provider = cls.get(name)
+        manifest = getattr(provider, "manifest", None)
+        if manifest is None:
+            return CaptchaProvider.manifest
+        return manifest
+
+    @classmethod
+    def list_manifests(cls) -> List[ProviderManifest]:
+        """列出所有 provider manifest。"""
+        return [cls.get_manifest(name) for name in cls.list_providers()]
+
+    @classmethod
+    def find_providers(
+        cls,
+        *,
+        challenge_type: ChallengeType,
+        context: VisionContext,
+    ) -> List[str]:
+        """按 challenge type 和执行上下文过滤 provider。"""
+        matched = []
+        for name in cls.list_providers():
+            manifest = cls.get_manifest(name)
+            if manifest.supports(challenge_type, context):
+                matched.append(name)
+        return matched
+
+    @classmethod
+    def build_decision(
+        cls,
+        *,
+        challenge_type: ChallengeType,
+        context: VisionContext,
+        requested_provider: str,
+        selected_provider: Optional[str],
+        candidates: List[str],
+        reason: str,
+    ) -> ProviderDecision:
+        """构造可写入 telemetry/artifact 的 provider 决策记录。"""
+        return ProviderDecision(
+            challenge_type=challenge_type,
+            context=context,
+            requested_provider=requested_provider,
+            selected_provider=selected_provider,
+            candidates=list(candidates),
+            reason=reason,
+        )
+
+    @classmethod
     async def auto_detect(cls, page: Page) -> Optional[CaptchaProvider]:
         """
         自动检测当前页面使用的验证码供应商。
@@ -270,4 +335,6 @@ __all__ = [
     "ProviderElements",
     "SolveResult",
     "ProviderRegistry",
+    "ProviderManifest",
+    "ProviderDecision",
 ]

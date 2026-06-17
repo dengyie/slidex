@@ -1,4 +1,4 @@
-import asyncio, json, os, time, random, shutil, psutil
+import asyncio, json, os, time, random, shutil, psutil, uuid
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List, Callable
 from loguru import logger
@@ -85,6 +85,111 @@ class SliderSolver(ProviderSolverMixin):
         self._result_event = asyncio.Event()
         self._slide_code = None
         self._calibration = self._load_calibration()
+        self._telemetry_run_id = uuid.uuid4().hex
+        self._telemetry_events: List[Dict] = []
+        self._telemetry_summary: Dict[str, object] = {
+            "run_id": self._telemetry_run_id,
+            "cookie_id": self.cookie_id,
+            "pure_user_id": self.pure_user_id,
+            "provider_mode": self._provider_name or "legacy",
+            "trajectory_mode": self.trajectory_mode,
+            "status": "running",
+            "success": None,
+            "fallback_used": None,
+            "failure_reason": None,
+            "distance": None,
+            "distance_source": None,
+            "provider_name": None,
+            "slide_code": None,
+            "cookie_count": 0,
+            "remote_session_id": None,
+            "started_at": time.time(),
+            "elapsed_ms": None,
+            "risk_log_id": None,
+        }
+
+    def _emit_telemetry_event(self, event: str, **payload):
+        if not self._config.telemetry_enabled:
+            return None
+
+        entry = {
+            "event": event,
+            "run_id": self._telemetry_run_id,
+            "cookie_id": self.cookie_id,
+            "pure_user_id": self.pure_user_id,
+            "timestamp": time.time(),
+            **payload,
+        }
+        self._telemetry_events.append(entry)
+
+        if event == "distance_detected":
+            self._telemetry_summary["distance"] = payload.get("distance")
+            self._telemetry_summary["distance_source"] = payload.get("source")
+        elif event == "provider_selected":
+            self._telemetry_summary["provider_name"] = payload.get("provider_name")
+        elif event == "fallback_started":
+            self._telemetry_summary["fallback_used"] = payload.get("fallback")
+            self._telemetry_summary["remote_session_id"] = payload.get("session_id")
+        elif event == "slide_result":
+            self._telemetry_summary["slide_code"] = payload.get("slide_code")
+
+        callback = self._config.on_risk_log_update
+        if callback:
+            try:
+                callback(entry)
+            except Exception as e:
+                logger.debug(f"[{self.pure_user_id}] telemetry callback error: {e}")
+        return entry
+
+    def _write_telemetry_record(self, payload: Dict[str, object]):
+        if not self._config.telemetry_enabled:
+            return
+        try:
+            telemetry_dir = Path(self._config.get_telemetry_dir())
+            telemetry_dir.mkdir(parents=True, exist_ok=True)
+            events_path = telemetry_dir / "events.jsonl"
+            with events_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logger.debug(f"[{self.pure_user_id}] telemetry persist failed: {e}")
+
+    def _finalize_telemetry(
+        self,
+        *,
+        success: bool,
+        status: str,
+        cookies: Optional[dict] = None,
+        extra: Optional[Dict[str, object]] = None,
+    ) -> Dict[str, object]:
+        self._telemetry_summary["success"] = success
+        self._telemetry_summary["status"] = status
+        self._telemetry_summary["elapsed_ms"] = round(
+            max(0.0, (time.time() - float(self._telemetry_summary["started_at"])) * 1000), 1
+        )
+        self._telemetry_summary["cookie_count"] = len(cookies or {})
+        if extra:
+            self._telemetry_summary.update(extra)
+
+        payload = {
+            "event": "solve_summary",
+            **self._telemetry_summary,
+        }
+
+        callback = self._config.on_risk_log
+        if callback:
+            try:
+                risk_log_id = callback(**payload)
+                if risk_log_id is not None:
+                    self._telemetry_summary["risk_log_id"] = risk_log_id
+                    payload["risk_log_id"] = risk_log_id
+            except Exception as e:
+                logger.debug(f"[{self.pure_user_id}] summary callback error: {e}")
+
+        self._write_telemetry_record(payload)
+        return dict(self._telemetry_summary)
+
+    def get_telemetry_summary(self) -> Dict[str, object]:
+        return dict(self._telemetry_summary)
 
     # ════════════════════════════════════════════════════════════
     #  主求解入口
@@ -93,14 +198,29 @@ class SliderSolver(ProviderSolverMixin):
         """启动自己的浏览器求解"""
         self.last_fallback_used = None
         self._is_cdp_mode = False
+        self._emit_telemetry_event("solve_started", mode="browser", verify_url=verify_url)
         logger.info(f"[{self.pure_user_id}] solving (mode={self.trajectory_mode})...")
         try:
             await self._init_browser()
             await self._load_page(verify_url)
-            return await self._run_solve_loop(verify_url)
+            success, cookies = await self._run_solve_loop(verify_url)
+            self._finalize_telemetry(
+                success=success,
+                status="success" if success else "failed",
+                cookies=cookies,
+                extra={"failure_reason": None if success else "solve_failed"},
+            )
+            return success, cookies
         except Exception as e:
             logger.error(f"[{self.pure_user_id}] error: {e}")
-            return await self._fallback_or_fail(verify_url)
+            success, cookies = await self._fallback_or_fail(verify_url)
+            self._finalize_telemetry(
+                success=success,
+                status="exception" if not success else "success",
+                cookies=cookies,
+                extra={"failure_reason": str(e) if not success else None},
+            )
+            return success, cookies
         finally:
             await self._close()
 
@@ -120,16 +240,68 @@ class SliderSolver(ProviderSolverMixin):
         """
         self.last_fallback_used = None
         self._is_cdp_mode = True
+        self._emit_telemetry_event("solve_started", mode="cdp", page_url=page_url)
         logger.info(f"[{self.pure_user_id}] solving on existing page "
                     f"(cdp={cdp_endpoint[:60]}, mode={self.trajectory_mode})...")
         try:
             await self._connect_existing_browser(cdp_endpoint, page_url)
-            return await self._run_solve_loop(page_url)
+            success, cookies = await self._run_solve_loop(page_url)
+            self._finalize_telemetry(
+                success=success,
+                status="success" if success else "failed",
+                cookies=cookies,
+                extra={"failure_reason": None if success else "solve_failed"},
+            )
+            return success, cookies
         except Exception as e:
             logger.error(f"[{self.pure_user_id}] CDP solve error: {e}")
+            self._finalize_telemetry(
+                success=False,
+                status="exception",
+                cookies=None,
+                extra={"failure_reason": str(e)},
+            )
             return False, None
         finally:
             await self._close_cdp_only()
+
+    async def solve_on_page(self, page, page_url: str = "") -> Tuple[bool, Optional[dict]]:
+        """在调用方持有的 Playwright Page 上求解，不接管浏览器生命周期。"""
+        self.last_fallback_used = None
+        self._is_cdp_mode = True
+        self.page = page
+        self.context = page.context
+        self._emit_telemetry_event("solve_started", mode="playwright_page", page_url=page_url)
+        try:
+            self.page.on("response", self._on_response)
+            try:
+                self._cdp = await self.context.new_cdp_session(self.page)
+                logger.debug(f"[{self.pure_user_id}] CDP session ready (provided page)")
+            except Exception:
+                self._cdp = None
+                logger.warning(f"[{self.pure_user_id}] CDP session failed (provided page)")
+
+            if page_url:
+                await self.page.goto(page_url, wait_until="networkidle", timeout=45000)
+                await asyncio.sleep(3)
+
+            success, cookies = await self._run_solve_loop(page_url)
+            self._finalize_telemetry(
+                success=success,
+                status="success" if success else "failed",
+                cookies=cookies,
+                extra={"failure_reason": None if success else "solve_failed"},
+            )
+            return success, cookies
+        except Exception as e:
+            logger.error(f"[{self.pure_user_id}] Playwright page solve error: {e}")
+            self._finalize_telemetry(
+                success=False,
+                status="exception",
+                cookies=None,
+                extra={"failure_reason": str(e)},
+            )
+            return False, None
 
     async def _run_solve_loop(self, verify_url: str):
         """核心求解循环 — Provider 模式 或 Legacy 模式"""
@@ -138,6 +310,7 @@ class SliderSolver(ProviderSolverMixin):
         if self._use_provider_mode:
             if await self._detect_and_init_provider(self.page):
                 logger.info(f"[{self.pure_user_id}] using provider mode: {self._provider.name}")
+                self._emit_telemetry_event("provider_selected", provider_name=self._provider.name, selected_by="detect")
                 success, cookies = await self._solve_with_provider(self.page)
                 if success:
                     return True, cookies
@@ -208,6 +381,7 @@ class SliderSolver(ProviderSolverMixin):
     async def _fallback_or_fail(self, verify_url):
         if self._is_cdp_mode:
             logger.warning(f"[{self.pure_user_id}] CDP mode: skipping remote fallback")
+            self._emit_telemetry_event("fallback_skipped", reason="cdp_mode")
             return False, None
         if self.trajectory_mode in ("auto", "recorded"):
             try:
@@ -230,6 +404,7 @@ class SliderSolver(ProviderSolverMixin):
 
         session_id = f"slider_fallback_{self.pure_user_id}_{int(time.time())}"
         logger.info(f"[{self.pure_user_id}] starting remote fallback session: {session_id}")
+        self._emit_telemetry_event("fallback_started", fallback="remote", session_id=session_id)
 
         if not self.page:
             if self._is_cdp_mode:
@@ -279,6 +454,7 @@ class SliderSolver(ProviderSolverMixin):
                 if completed:
                     logger.success(f"[{self.pure_user_id}] remote solve completed!")
                     cookies = await self._get_cookies()
+                    self._emit_telemetry_event("fallback_completed", fallback="remote", session_id=session_id)
                     try:
                         recording = captcha_controller.finish_recording(session_id)
                         if recording and recording.get("points"):
@@ -297,6 +473,7 @@ class SliderSolver(ProviderSolverMixin):
                 await asyncio.sleep(poll_interval)
 
         logger.warning(f"[{self.pure_user_id}] remote fallback timed out after {timeout}s")
+        self._emit_telemetry_event("fallback_timeout", fallback="remote", session_id=session_id, timeout_s=timeout)
         try:
             await captcha_controller.close_session(session_id)
         except Exception:
@@ -322,10 +499,18 @@ class SliderSolver(ProviderSolverMixin):
                 self._save_calibration()
                 logger.warning(f"[{self.pure_user_id}] image ({img_dist:.0f}) vs JS ({js_dist:.0f}) "
                                f"mismatch (ratio={ratio:.2f}), calibrated offset={new_offset}, using JS")
+                self._emit_telemetry_event(
+                    "distance_detected",
+                    distance=js_dist,
+                    source="js_after_mismatch",
+                    image_distance=img_dist,
+                    ratio=round(ratio, 3),
+                )
                 return js_dist
 
         if js_dist and js_dist > 0:
             logger.info(f"[{self.pure_user_id}] using JS distance: {js_dist:.0f}px")
+            self._emit_telemetry_event("distance_detected", distance=js_dist, source="js")
             return js_dist
 
         try:
@@ -337,6 +522,7 @@ class SliderSolver(ProviderSolverMixin):
             if track_w and track_w > 0:
                 estimated = track_w * 0.85
                 logger.warning(f"[{self.pure_user_id}] estimated distance from track: {estimated:.0f}px")
+                self._emit_telemetry_event("distance_detected", distance=estimated, source="track_estimate")
                 return estimated
         except Exception:
             pass
@@ -359,6 +545,7 @@ class SliderSolver(ProviderSolverMixin):
                 d = SliderImageMatcher.find_gap_from_bytes(bb, pb, offset)
                 if d and d > 0:
                     logger.info(f"[{self.pure_user_id}] image match distance: {d} (offset={offset})")
+                    self._emit_telemetry_event("distance_detected", distance=float(d), source="image_match")
                     return float(d)
         except Exception as e:
             logger.debug(f"[{self.pure_user_id}] image match error: {e}")
@@ -756,6 +943,7 @@ class SliderSolver(ProviderSolverMixin):
                 data = json.loads(text)
                 code = data.get("code", -1)
                 logger.info(f"[{self.pure_user_id}] SLIDE RESPONSE: code={code}")
+                self._emit_telemetry_event("slide_result", slide_code=code, response_url=url[:200])
                 self._slide_code = code
                 self._result_event.set()
             except Exception:

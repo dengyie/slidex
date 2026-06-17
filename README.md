@@ -246,6 +246,45 @@ config = SlidexConfig(
 | `SLIDEX_TRAJ_POOL_DIR` | `~/.slidex/trajectories` | 轨迹存储路径 |
 | `SLIDEX_REMOTE_ENABLED` | `1` | 启用远程人工兜底 |
 | `SLIDEX_REMOTE_TIMEOUT` | `180` | 远程兜底超时（秒） |
+| `SLIDEX_TELEMETRY_ENABLED` | `1` | 启用结构化 E2E 埋点 |
+| `SLIDEX_TELEMETRY_DIR` | `~/.slidex/telemetry` | telemetry JSONL 输出目录 |
+
+### 11. E2E 数据监控
+
+真实使用方开始调用后，建议同时接两条数据通道：
+
+```python
+from slidex import SlidexConfig, SliderSolver
+
+def on_risk_log(**payload):
+    # 适合写数据库/消息队列/日志平台
+    db.insert("slidex_runs", payload)
+    return payload["run_id"]
+
+def on_risk_log_update(payload):
+    # 适合实时看事件流
+    stream.publish("slidex-events", payload)
+
+config = SlidexConfig(
+    on_risk_log=on_risk_log,
+    on_risk_log_update=on_risk_log_update,
+)
+
+solver = SliderSolver(cookie_id="user_123", provider="auto", config=config)
+```
+
+监控重点建议直接盯这几项：
+
+- `success` / `status`: 成功率与最终状态
+- `elapsed_ms`: 单次求解耗时
+- `provider_name`: 供应商分布
+- `distance` / `distance_source`: 距离计算来源是否异常漂移
+- `slide_code`: 验证接口返回码
+- `fallback_used`: 人工兜底占比
+- `failure_reason`: 失败原因聚类
+- `cookie_count`: 求解后上下文是否产出有效 cookie
+
+如果你走 CLI/CDP 集成，`python -m slidex.scripts.slide_solve_cdp` 现在也会在 JSON 输出中附带 `telemetry` 字段，可直接上报。
 
 ---
 

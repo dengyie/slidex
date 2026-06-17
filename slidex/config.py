@@ -34,6 +34,8 @@ class SlidexConfig:
     on_risk_log: Optional[Callable[..., Optional[int]]] = None
     on_risk_log_update: Optional[Callable[..., None]] = None
     on_notification: Optional[Callable[..., None]] = None
+    telemetry_enabled: bool = True
+    telemetry_dir: Optional[str] = None
 
     def _default_dir(self, subdir: str) -> str:
         base = self.project_root or os.path.join(os.path.expanduser("~"), ".slidex")
@@ -50,6 +52,9 @@ class SlidexConfig:
 
     def get_calibration_dir(self) -> str:
         return self.calibration_dir or self._default_dir("calibration")
+
+    def get_telemetry_dir(self) -> str:
+        return self.telemetry_dir or self._default_dir("telemetry")
 
     @classmethod
     def _safe_int(cls, value: str, default: int) -> int:
@@ -74,4 +79,6 @@ class SlidexConfig:
             browser_data_dir=os.environ.get("SLIDEX_BROWSER_DATA_DIR") or None,
             debug_screenshot_dir=os.environ.get("SLIDEX_DEBUG_SCREENSHOT_DIR") or None,
             calibration_dir=os.environ.get("SLIDEX_CALIBRATION_DIR") or None,
+            telemetry_enabled=os.environ.get("SLIDEX_TELEMETRY_ENABLED", "1") == "1",
+            telemetry_dir=os.environ.get("SLIDEX_TELEMETRY_DIR") or None,
         )

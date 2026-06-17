@@ -7,6 +7,7 @@ from playwright.async_api import Page, Response
 from loguru import logger
 
 from slidex.providers import CaptchaProvider, ProviderElements, SolveResult
+from slidex.vision.models import ChallengeType, ProviderManifest, VisionContext
 
 
 class GeeTestProvider(CaptchaProvider):
@@ -14,6 +15,14 @@ class GeeTestProvider(CaptchaProvider):
 
     name = "geetest"
     description = "GeeTest slider CAPTCHA (v3/v4)"
+    manifest = ProviderManifest(
+        name=name,
+        version="0.1.0",
+        challenge_types=[ChallengeType.SLIDER_CAPTCHA],
+        contexts=[VisionContext.PLAYWRIGHT_PAGE, VisionContext.CDP],
+        requires_network=False,
+        produces_artifacts=["screenshot", "crop", "trajectory", "telemetry"],
+    )
 
     def __init__(self):
         super().__init__()

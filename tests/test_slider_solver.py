@@ -60,6 +60,72 @@ class TestSliderSolverInit:
         s = SliderSolver(cookie_id="u1", notification_callback=cb)
         assert s._notification_callback is cb
 
+    def test_telemetry_defaults_initialized(self):
+        s = SliderSolver(cookie_id="telemetry_user")
+        assert s._telemetry_run_id
+        assert s._telemetry_events == []
+        assert s._telemetry_summary["cookie_id"] == "telemetry_user"
+        assert s._telemetry_summary["status"] == "running"
+
+    def test_emit_telemetry_event_updates_summary_and_callback(self):
+        captured = []
+        cfg = SlidexConfig(on_risk_log_update=lambda payload: captured.append(payload))
+        s = SliderSolver(cookie_id="telemetry_user", config=cfg)
+
+        s._emit_telemetry_event("distance_detected", distance=132.5, source="js")
+
+        assert len(s._telemetry_events) == 1
+        assert s._telemetry_summary["distance"] == 132.5
+        assert s._telemetry_summary["distance_source"] == "js"
+        assert captured
+        assert captured[0]["event"] == "distance_detected"
+
+    def test_finalize_telemetry_updates_status_and_latency(self):
+        s = SliderSolver(cookie_id="telemetry_user")
+
+        summary = s._finalize_telemetry(
+            success=True,
+            status="success",
+            cookies={"session": "abc"},
+            extra={"fallback_used": "remote"},
+        )
+
+        assert summary["success"] is True
+        assert summary["status"] == "success"
+        assert summary["cookie_count"] == 1
+        assert summary["fallback_used"] == "remote"
+        assert summary["elapsed_ms"] >= 0
+
+    def test_write_telemetry_summary_uses_on_risk_log(self):
+        captured = []
+
+        def on_risk_log(**payload):
+            captured.append(payload)
+            return 123
+
+        cfg = SlidexConfig(on_risk_log=on_risk_log)
+        s = SliderSolver(cookie_id="telemetry_user", config=cfg)
+        s._finalize_telemetry(success=False, status="failed", extra={"failure_reason": "timeout"})
+
+        assert captured
+        assert captured[0]["event"] == "solve_summary"
+        assert captured[0]["status"] == "failed"
+        assert s._telemetry_summary["risk_log_id"] == 123
+
+    def test_write_telemetry_summary_persists_jsonl(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = SlidexConfig(project_root=td)
+            s = SliderSolver(cookie_id="telemetry_user", config=cfg)
+            summary = s._finalize_telemetry(success=True, status="success")
+
+            telemetry_file = Path(td) / "telemetry" / "events.jsonl"
+            assert telemetry_file.exists()
+            lines = telemetry_file.read_text(encoding="utf-8").strip().splitlines()
+            assert lines
+            payload = json.loads(lines[-1])
+            assert payload["event"] == "solve_summary"
+            assert payload["run_id"] == summary["run_id"]
+
 
 # ════════════════════════════════════════════════════════════
 # Calibration paths
@@ -282,6 +348,11 @@ class TestCDPMode:
         sig = inspect.signature(SliderSolver.solve_on_existing_page)
         assert "cdp_endpoint" in sig.parameters
         assert "page_url" in sig.parameters
+
+    def test_solve_on_page_method_exists(self):
+        import inspect
+        assert hasattr(SliderSolver, "solve_on_page")
+        assert inspect.iscoroutinefunction(SliderSolver.solve_on_page)
 
     def test_close_method_exists(self):
         import inspect

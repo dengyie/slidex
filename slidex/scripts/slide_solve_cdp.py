@@ -82,6 +82,12 @@ async def _run(
 ) -> Dict[str, Any]:
     from slidex.solver import SliderSolver
 
+    async def _resolve_telemetry() -> Dict[str, Any]:
+        telemetry = solver.get_telemetry_summary()
+        if asyncio.iscoroutine(telemetry):
+            telemetry = await telemetry
+        return telemetry
+
     start = time.time()
     solver = SliderSolver(
         cookie_id=cookie_id,
@@ -101,6 +107,7 @@ async def _run(
             "cookies": cookies,
             "elapsed_ms": round(elapsed_ms, 1),
             "error": None if success else "solve_failed",
+            "telemetry": await _resolve_telemetry(),
         }
     except Exception as e:
         elapsed_ms = (time.time() - start) * 1000
@@ -109,6 +116,7 @@ async def _run(
             "cookies": None,
             "elapsed_ms": round(elapsed_ms, 1),
             "error": str(e),
+            "telemetry": await _resolve_telemetry(),
         }
     finally:
         await solver.close()

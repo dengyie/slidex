@@ -36,15 +36,19 @@ class ProviderSolverMixin:
             self._provider = await ProviderRegistry.auto_detect(page)
             if not self._provider:
                 logger.warning(f"[{self.pure_user_id}] auto-detect failed, falling back to legacy mode")
+                self._emit_telemetry_event("provider_detect_failed", provider_name="auto")
                 return False
             logger.info(f"[{self.pure_user_id}] detected provider: {self._provider.name}")
+            self._emit_telemetry_event("provider_selected", provider_name=self._provider.name, selected_by="auto")
         else:
             # 手动指定
             try:
                 self._provider = ProviderRegistry.get(self._provider_name)
                 logger.info(f"[{self.pure_user_id}] using provider: {self._provider.name}")
+                self._emit_telemetry_event("provider_selected", provider_name=self._provider.name, selected_by="manual")
             except ValueError as e:
                 logger.error(f"[{self.pure_user_id}] {e}")
+                self._emit_telemetry_event("provider_init_failed", provider_name=self._provider_name, reason=str(e))
                 return False
 
         # 调用 provider 初始化钩子
@@ -52,6 +56,7 @@ class ProviderSolverMixin:
             await self._provider.on_init(page)
         except Exception as e:
             logger.warning(f"[{self.pure_user_id}] provider on_init failed: {e}, falling back to legacy")
+            self._emit_telemetry_event("provider_init_failed", provider_name=self._provider.name, reason=str(e))
             self._provider = None  # 清空 provider，回退到 legacy
             return False  # 初始化失败，回退到 legacy 模式
         return True
@@ -76,13 +81,22 @@ class ProviderSolverMixin:
                 gap_x, confidence = await self._provider.find_gap(bg_bytes, piece_bytes)
             except Exception as e:
                 logger.error(f"[{self.pure_user_id}] find_gap error: {e}")
+                self._emit_telemetry_event("provider_find_gap_failed", provider_name=self._provider.name, reason=str(e))
                 return False, None
 
             if gap_x is None:
                 logger.warning(f"[{self.pure_user_id}] gap not found")
+                self._emit_telemetry_event("provider_gap_not_found", provider_name=self._provider.name)
                 return False, None
 
             logger.info(f"[{self.pure_user_id}] gap detected at x={gap_x}px, confidence={confidence:.2f}")
+            self._emit_telemetry_event(
+                "distance_detected",
+                distance=gap_x,
+                source="provider",
+                provider_name=self._provider.name,
+                confidence=round(confidence, 4),
+            )
 
             # 4. 生成轨迹（优先使用录制轨迹）
             try:
@@ -120,11 +134,19 @@ class ProviderSolverMixin:
                 logger.success(f"[{self.pure_user_id}] provider solve success!")
             else:
                 logger.warning(f"[{self.pure_user_id}] provider solve failed: {result.error}")
+            self._emit_telemetry_event(
+                "provider_result",
+                provider_name=self._provider.name,
+                success=result.success,
+                error=result.error,
+                cookie_count=len(result.cookies or {}),
+            )
 
             return result.success, result.cookies
 
         except Exception as e:
             logger.error(f"[{self.pure_user_id}] provider solve error: {e}", exc_info=True)
+            self._emit_telemetry_event("provider_solve_error", provider_name=self._provider.name, reason=str(e))
             return False, None
 
     @classmethod
