@@ -2048,8 +2048,8 @@ Each phase must end with:
   names while preserving the real E2E limitation.
   Reason: downstream readers need to know that the production-callable helper
   boundary exists, but should not confuse it with target-site/device validation.
-  Risk: remote consumers still need the sibling commits pushed before depending
-  on these helper names.
+  Risk: production rollout still needs one environment-specific smoke run before
+  using these helpers against live targets.
 
 **Verification:**
 
@@ -2064,4 +2064,41 @@ Each phase must end with:
 - Improvement suggestions: keep real browser/device validation opt-in and
   environment-specific.
 - Quality score: 92/100.
+- Pass status: passed.
+
+### 2026-06-18: GitHub Publication Closure
+
+**Completed:**
+
+- Pushed latest commits for `slidex`, `automation-kit`,
+  `automation-app-damai`, and `automation-app-dianping`.
+- Confirmed all ecosystem repositories are public.
+- Confirmed `automation-plugin-ocr` is archived on GitHub and remains public.
+- Confirmed all local repositories are clean and aligned with `origin/main`.
+
+**Decision Record:**
+
+- Problem: the remaining E2E checks require a real target challenge page or a
+  real Android/Appium device workflow.
+  Choice: close the local development baseline and leave those checks as
+  owner-controlled opt-in production validation.
+  Reason: the code-owned helper boundaries are implemented, tested, reviewed,
+  pushed, and documented; live target validation is environment-specific.
+  Risk: production users must still run a smoke test in their own target
+  environment before relying on live automation behavior.
+
+**Verification:**
+
+- GitHub visibility: all five repositories are public.
+- GitHub archive state: `automation-plugin-ocr` is archived; the other four
+  repositories are active.
+- Local git state: all five repositories report `main...origin/main`.
+
+**Production Code Quality Review:**
+
+- Mode: `checkpoint`.
+- Severe issues: none found.
+- Improvement suggestions: keep real browser/device validation opt-in and
+  environment-specific.
+- Quality score: 94/100.
 - Pass status: passed.
