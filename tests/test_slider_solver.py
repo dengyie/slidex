@@ -127,6 +127,45 @@ class TestSliderSolverInit:
             assert payload["run_id"] == summary["run_id"]
 
 
+@pytest.mark.asyncio
+async def test_solve_on_page_removes_response_listener_and_detaches_cdp():
+    class FakeCdp:
+        def __init__(self):
+            self.detach = mock.AsyncMock()
+
+    class FakeContext:
+        def __init__(self):
+            self.cdp = FakeCdp()
+
+        async def new_cdp_session(self, page):
+            return self.cdp
+
+    class FakePage:
+        def __init__(self):
+            self.context = FakeContext()
+            self.handlers = []
+            self.goto = mock.AsyncMock()
+
+        def on(self, event_name, handler):
+            assert event_name == "response"
+            self.handlers.append(handler)
+
+        def remove_listener(self, event_name, handler):
+            assert event_name == "response"
+            self.handlers.remove(handler)
+
+    page = FakePage()
+    solver = SliderSolver()
+    solver._run_solve_loop = mock.AsyncMock(return_value=(True, {"session": "abc"}))
+
+    success, cookies = await solver.solve_on_page(page)
+
+    assert success is True
+    assert cookies == {"session": "abc"}
+    assert page.handlers == []
+    page.context.cdp.detach.assert_awaited_once()
+
+
 # ════════════════════════════════════════════════════════════
 # Calibration paths
 # ════════════════════════════════════════════════════════════

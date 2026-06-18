@@ -54,6 +54,27 @@ async def test_visual_solver_routes_slider_to_existing_page():
 
 
 @pytest.mark.asyncio
+async def test_visual_solver_closes_slider_after_existing_page_route():
+    slider = MagicMock()
+    slider.solve_on_existing_page = AsyncMock(return_value=(True, {"session": "abc"}))
+    slider.get_telemetry_summary.return_value = {"run_id": "r1", "status": "success"}
+    slider.close = AsyncMock()
+
+    solver = VisualChallengeSolver(slider_solver_factory=lambda **_: slider)
+    await solver.solve(
+        VisualChallengeRequest(
+            challenge_type=ChallengeType.SLIDER_CAPTCHA,
+            context=VisionContext.CDP,
+            cdp_endpoint="ws://localhost:9222/devtools/browser/1",
+            page_url="https://example.test",
+            provider="auto",
+        )
+    )
+
+    slider.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_visual_solver_routes_slider_to_playwright_page():
     page = object()
     slider = MagicMock()
@@ -74,3 +95,25 @@ async def test_visual_solver_routes_slider_to_playwright_page():
     assert result.success is True
     assert result.cookies == {"session": "xyz"}
     slider.solve_on_page.assert_called_once_with(page, page_url="https://example.test")
+
+
+@pytest.mark.asyncio
+async def test_visual_solver_closes_slider_after_playwright_page_route():
+    page = object()
+    slider = MagicMock()
+    slider.solve_on_page = AsyncMock(return_value=(True, {"session": "xyz"}))
+    slider.get_telemetry_summary.return_value = {"run_id": "r2", "status": "success"}
+    slider.close = AsyncMock()
+
+    solver = VisualChallengeSolver(slider_solver_factory=lambda **_: slider)
+    await solver.solve(
+        VisualChallengeRequest(
+            challenge_type=ChallengeType.SLIDER_CAPTCHA,
+            context=VisionContext.PLAYWRIGHT_PAGE,
+            page=page,
+            page_url="https://example.test",
+            provider="auto",
+        )
+    )
+
+    slider.close.assert_awaited_once()

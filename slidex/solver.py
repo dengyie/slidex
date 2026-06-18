@@ -272,8 +272,11 @@ class SliderSolver(ProviderSolverMixin):
         self.page = page
         self.context = page.context
         self._emit_telemetry_event("solve_started", mode="playwright_page", page_url=page_url)
+        response_handler = self._on_response
+        listener_registered = False
         try:
-            self.page.on("response", self._on_response)
+            self.page.on("response", response_handler)
+            listener_registered = True
             try:
                 self._cdp = await self.context.new_cdp_session(self.page)
                 logger.debug(f"[{self.pure_user_id}] CDP session ready (provided page)")
@@ -302,6 +305,15 @@ class SliderSolver(ProviderSolverMixin):
                 extra={"failure_reason": str(e)},
             )
             return False, None
+        finally:
+            if listener_registered:
+                remove_listener = getattr(self.page, "remove_listener", None)
+                if remove_listener:
+                    try:
+                        remove_listener("response", response_handler)
+                    except Exception:
+                        pass
+            await self._close_cdp_only()
 
     async def _run_solve_loop(self, verify_url: str):
         """核心求解循环 — Provider 模式 或 Legacy 模式"""

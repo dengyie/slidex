@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,15 @@ def test_to_artifacts_redacts_sensitive_metadata():
     assert artifacts[0]["artifact_type"] == "ocr_result"
     assert artifacts[0]["metadata"]["token"] == "[redacted]"
     assert artifacts[0]["metadata"]["source"] == "unit"
+
+
+def test_to_artifacts_without_native_adapter_is_json_serializable():
+    from slidex.integrations.automation_kit import to_artifacts
+
+    artifacts = to_artifacts(_result())
+
+    assert artifacts[0]["path"] == "artifacts/run-1/ocr/result.json"
+    json.dumps(artifacts)
 
 
 def test_to_events_emits_artifact_and_task_end():

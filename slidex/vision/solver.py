@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -73,42 +74,49 @@ class VisualChallengeSolver:
             cookie_id=str(request.metadata.get("cookie_id", "default")),
             provider=request.provider,
         )
-        if request.context == VisionContext.CDP:
-            success, cookies = await slider.solve_on_existing_page(
-                cdp_endpoint=request.cdp_endpoint or "",
-                page_url=request.page_url,
-            )
-        elif request.context == VisionContext.PLAYWRIGHT_PAGE:
-            success, cookies = await slider.solve_on_page(request.page, page_url=request.page_url)
-        else:
-            return VisualChallengeResult(
-                success=False,
-                challenge_type=request.challenge_type,
-                provider=request.provider,
-                duration_ms=self._duration_ms(started),
-                error_code="unsupported_slider_context",
-                retryable=False,
-            )
-
-        telemetry = slider.get_telemetry_summary()
-        return VisualChallengeResult(
-            success=success,
-            challenge_type=request.challenge_type,
-            provider=str(telemetry.get("provider_name") or request.provider),
-            confidence=float(telemetry.get("confidence") or 0.0),
-            duration_ms=self._duration_ms(started),
-            error_code=None if success else str(telemetry.get("failure_reason") or "solve_failed"),
-            retryable=not success,
-            cookies=cookies,
-            artifacts=[
-                VisionArtifact(
-                    artifact_type="telemetry",
-                    path=Path("telemetry") / f"{telemetry.get('run_id', 'unknown')}.json",
-                    metadata={"run_id": str(telemetry.get("run_id", ""))},
+        try:
+            if request.context == VisionContext.CDP:
+                success, cookies = await slider.solve_on_existing_page(
+                    cdp_endpoint=request.cdp_endpoint or "",
+                    page_url=request.page_url,
                 )
-            ],
-            metadata={"telemetry": telemetry},
-        )
+            elif request.context == VisionContext.PLAYWRIGHT_PAGE:
+                success, cookies = await slider.solve_on_page(request.page, page_url=request.page_url)
+            else:
+                return VisualChallengeResult(
+                    success=False,
+                    challenge_type=request.challenge_type,
+                    provider=request.provider,
+                    duration_ms=self._duration_ms(started),
+                    error_code="unsupported_slider_context",
+                    retryable=False,
+                )
+
+            telemetry = slider.get_telemetry_summary()
+            return VisualChallengeResult(
+                success=success,
+                challenge_type=request.challenge_type,
+                provider=str(telemetry.get("provider_name") or request.provider),
+                confidence=float(telemetry.get("confidence") or 0.0),
+                duration_ms=self._duration_ms(started),
+                error_code=None if success else str(telemetry.get("failure_reason") or "solve_failed"),
+                retryable=not success,
+                cookies=cookies,
+                artifacts=[
+                    VisionArtifact(
+                        artifact_type="telemetry",
+                        path=Path("telemetry") / f"{telemetry.get('run_id', 'unknown')}.json",
+                        metadata={"run_id": str(telemetry.get("run_id", ""))},
+                    )
+                ],
+                metadata={"telemetry": telemetry},
+            )
+        finally:
+            close = getattr(slider, "close", None)
+            if close:
+                close_result = close()
+                if inspect.isawaitable(close_result):
+                    await close_result
 
     @staticmethod
     def _duration_ms(started: float) -> float:

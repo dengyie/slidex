@@ -35,16 +35,15 @@ def to_action_result(result: VisualChallengeResult, *, prefer_native: bool = Fal
 
 
 def to_artifacts(result: VisualChallengeResult, *, prefer_native: bool = False):
-    artifacts: List[Dict[str, Any]] = [
-        {
-            "artifact_type": artifact.artifact_type,
-            "path": artifact.path,
-            "metadata": redact_sensitive(artifact.metadata),
-        }
-        for artifact in result.artifacts
-    ]
     if not prefer_native:
-        return artifacts
+        return [
+            {
+                "artifact_type": artifact.artifact_type,
+                "path": str(artifact.path),
+                "metadata": redact_sensitive(artifact.metadata),
+            }
+            for artifact in result.artifacts
+        ]
 
     try:
         _, ArtifactHandle, _ = _import_automation_kit_types()
@@ -54,11 +53,11 @@ def to_artifacts(result: VisualChallengeResult, *, prefer_native: bool = False):
         ) from exc
     return [
         ArtifactHandle(
-            artifact_type=artifact["artifact_type"],
-            path=artifact["path"],
-            metadata=artifact["metadata"],
+            artifact_type=artifact.artifact_type,
+            path=artifact.path,
+            metadata=redact_sensitive(artifact.metadata),
         )
-        for artifact in artifacts
+        for artifact in result.artifacts
     ]
 
 
