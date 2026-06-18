@@ -4,7 +4,7 @@
 
 `slidex` 是 `automation-kit` 生态唯一推荐的视觉能力平台，统一承接滑块验证码、OCR、截图识别、视觉元素识别、人工兜底、artifact 与 telemetry 协议。`automation-plugin-ocr` 直接进入归档废弃阶段，不再新增功能，不提供兼容 shim，也不再作为生态推荐插件。
 
-这份文档是当前设计准绳。历史执行步骤仍保留在 `docs/superpowers/plans/2026-06-18-automation-kit-vision-platform.md`，用于追溯实现过程。当前代码基线为 `aa48a12 Fix visual solver cleanup and artifacts`，本阶段仅固化与该代码基线一致的开发文档。
+这份文档是当前设计准绳。历史执行步骤仍保留在 `docs/superpowers/plans/2026-06-18-automation-kit-vision-platform.md`，用于追溯实现过程。当前代码基线为 `b5e6521 docs(阶段8): 固化 automation-kit 视觉平台基线`。
 
 ## 背景与目标
 
@@ -42,8 +42,8 @@ flowchart LR
 - 应用层通过依赖注入选择是否使用 `slidex`。
 - `automation-kit` 可以定义通用 action result、event、artifact 形状，但不能知道 `slidex` 的存在。
 - `slidex` 单向适配到 `automation-kit`，适配层位于 `slidex.integrations.automation_kit`。
-- `automation-app-damai` 可以在 app 层构造 `PLAYWRIGHT_PAGE` 滑块请求并转换 slidex 结果。
-- `automation-app-dianping` 可以在 app 层构造 `ANDROID_SCREENSHOT_BYTES` 图片文本请求并转换 slidex 结果。
+- `automation-app-damai` 可以在 app 层构造 `PLAYWRIGHT_PAGE` 滑块请求、调用注入的 slidex solver，并转换 slidex 结果。
+- `automation-app-dianping` 可以在 app 层构造 `ANDROID_SCREENSHOT_BYTES` 图片文本请求、调用注入的 slidex solver，并转换 slidex 结果。
 - 两个应用仓默认离线测试都不依赖 `slidex`、浏览器、设备或网络。
 
 ## 公共 API
@@ -219,8 +219,8 @@ VisionArtifact(
 
 迁移目标：
 
-- `automation-app-damai` 通过 lazy helper 构造 `PLAYWRIGHT_PAGE` 滑块挑战请求，并通过 `slidex.integrations.automation_kit` 转换结果。
-- `automation-app-dianping` 通过 lazy helper 构造 `ANDROID_SCREENSHOT_BYTES` 图片文本请求，并通过 `slidex.integrations.automation_kit` 转换结果。
+- `automation-app-damai` 通过 lazy helper 构造 `PLAYWRIGHT_PAGE` 滑块挑战请求，通过 `solve_slider_visual_challenge(...)` 调用注入的 slidex solver，并通过 `slidex.integrations.automation_kit` 转换结果。
+- `automation-app-dianping` 通过 lazy helper 构造 `ANDROID_SCREENSHOT_BYTES` 图片文本请求，通过 `solve_android_screenshot_visual_challenge(...)` 调用注入的 slidex solver，并通过 `slidex.integrations.automation_kit` 转换结果。
 - `automation-kit` 生态文档从 `automation-plugin-ocr` 改为 `slidex: visual challenge platform for captcha, OCR, screenshot recognition, and manual fallback`。
 - 兼容矩阵增加：
 
@@ -236,8 +236,8 @@ slidex:
 必须满足：
 
 - `automation-plugin-ocr` 不再被任何应用仓引用。
-- `automation-app-damai` 可选安装 `slidex` 后能构造 `PLAYWRIGHT_PAGE` 滑块挑战请求并转换结果。
-- `automation-app-dianping` 可选安装 `slidex` 后能构造 `ANDROID_SCREENSHOT_BYTES` 图片文本请求并转换结果。
+- `automation-app-damai` 可选安装 `slidex` 后能构造 `PLAYWRIGHT_PAGE` 滑块挑战请求、调用 solver 并转换结果。
+- `automation-app-dianping` 可选安装 `slidex` 后能构造 `ANDROID_SCREENSHOT_BYTES` 图片文本请求、调用 solver 并转换结果。
 - `automation-kit` 文档只推荐 `slidex` 作为视觉能力平台。
 - `slidex` 同时支持 `slider_captcha` 和 `ocr_text`。
 - `slidex` 的统一结果可以被 `automation-kit` 转为 action result、artifact、event。
@@ -250,17 +250,19 @@ slidex:
 - `PYTHONPATH=/Users/mango/project/codex/automation-kit pytest -q tests/test_automation_kit_integration.py`: `6 passed`
 - Damai slidex compatibility slice: `2 passed, 4 deselected`
 - Dianping slidex compatibility slice: `2 passed, 4 deselected`
+- Damai live helper slice: `2 passed, 6 deselected`
+- Dianping live helper slice: `3 passed, 6 deselected`
 - `git diff --check`: passed
 
 ## 当前跨仓基线
 
-- `slidex`: `aa48a12 Fix visual solver cleanup and artifacts`
+- `slidex`: `b5e6521 docs(阶段8): 固化 automation-kit 视觉平台基线`
 - `automation-kit`: `83e5169 docs(阶段7): 复核 slidex 最新视觉契约`
-- `automation-app-damai`: `d68c98e feat(阶段4): 接入 slidex 视觉辅助契约`
-- `automation-app-dianping`: `d193aad test(阶段4): 硬化 dianping slidex helper 覆盖率`
+- `automation-app-damai`: `3ccd788 feat(阶段5): 补齐 damai live 视觉调用边界`
+- `automation-app-dianping`: `3a1c94e feat(阶段5): 补齐 dianping 截图视觉调用边界`
 - `automation-plugin-ocr`: `1b44c77 docs: 归档 OCR 插件并指向 slidex`
 
-当前仍未完成的生产接入是 live browser/Appium 视觉执行：Damai/Dianping 已具备请求与结果转换 helper，但尚未在真实 Playwright page 或真实 Android screenshot bytes 的生产 workflow 中执行视觉挑战。
+当前已完成生产可调用 helper 边界：Damai/Dianping 已具备请求构造、solver 调用和结果转换 helper。仍未完成的是依赖目标环境的 opt-in E2E：真实 Damai Playwright challenge page 和真实 Dianping Appium/ADB screenshot capture。
 
 ## 版本线
 

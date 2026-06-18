@@ -2026,3 +2026,42 @@ Each phase must end with:
 - Improvement suggestions: push the sibling repository commits and archive `automation-plugin-ocr` on GitHub once remote repository settings are ready.
 - Quality score: 92/100.
 - Pass status: passed.
+
+### 2026-06-18: Application Live Helper Sync
+
+**Completed:**
+
+- Updated the slidex-side canonical design document after the application live
+  helper phases landed:
+  - `automation-app-damai`: `3ccd788 feat(阶段5): 补齐 damai live 视觉调用边界`
+  - `automation-app-dianping`: `3a1c94e feat(阶段5): 补齐 dianping 截图视觉调用边界`
+- Recorded that the completed boundary now includes request construction,
+  injected solver execution, and automation-kit payload conversion.
+- Kept real target-site Playwright and Appium/ADB E2E validation as opt-in
+  environment work, not part of default tests.
+
+**Decision Record:**
+
+- Problem: the previous slidex docs described Damai/Dianping as request/result
+  helper consumers only.
+  Choice: update the canonical design to include the new app-layer live helper
+  names while preserving the real E2E limitation.
+  Reason: downstream readers need to know that the production-callable helper
+  boundary exists, but should not confuse it with target-site/device validation.
+  Risk: remote consumers still need the sibling commits pushed before depending
+  on these helper names.
+
+**Verification:**
+
+- Damai live helper slice: `2 passed, 6 deselected`.
+- Dianping live helper slice: `3 passed, 6 deselected`.
+- `git diff --check`: passed.
+
+**Production Code Quality Review:**
+
+- Mode: `checkpoint`.
+- Severe issues: none found.
+- Improvement suggestions: keep real browser/device validation opt-in and
+  environment-specific.
+- Quality score: 92/100.
+- Pass status: passed.
