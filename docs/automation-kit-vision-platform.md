@@ -4,7 +4,7 @@
 
 `slidex` 是 `automation-kit` 生态唯一推荐的视觉能力平台，统一承接滑块验证码、OCR、截图识别、视觉元素识别、人工兜底、artifact 与 telemetry 协议。`automation-plugin-ocr` 直接进入归档废弃阶段，不再新增功能，不提供兼容 shim，也不再作为生态推荐插件。
 
-这份文档是当前设计准绳。历史执行步骤仍保留在 `docs/superpowers/plans/2026-06-18-automation-kit-vision-platform.md`，用于追溯实现过程。当前代码基线为 `b5e6521 docs(阶段8): 固化 automation-kit 视觉平台基线`。
+这份文档是当前设计准绳。历史执行步骤仍保留在 `docs/superpowers/plans/2026-06-18-automation-kit-vision-platform.md`，用于追溯实现过程。当前代码基线为 `39d021e docs(阶段10): 记录 github 发布闭环`。
 
 ## 背景与目标
 
@@ -256,8 +256,8 @@ slidex:
 
 ## 当前跨仓基线
 
-- `slidex`: `b5e6521 docs(阶段8): 固化 automation-kit 视觉平台基线`
-- `automation-kit`: `83e5169 docs(阶段7): 复核 slidex 最新视觉契约`
+- `slidex`: `39d021e docs(阶段10): 记录 github 发布闭环`
+- `automation-kit`: `7274725 docs(阶段9): 记录 github 发布闭环`
 - `automation-app-damai`: `3ccd788 feat(阶段5): 补齐 damai live 视觉调用边界`
 - `automation-app-dianping`: `3a1c94e feat(阶段5): 补齐 dianping 截图视觉调用边界`
 - `automation-plugin-ocr`: `1b44c77 docs: 归档 OCR 插件并指向 slidex`
