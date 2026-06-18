@@ -2,7 +2,7 @@
 
 ## 概览
 
-Slidex 当前已经形成四条主路径：
+Slidex 当前定位为 `automation-kit` 生态唯一推荐的视觉能力平台，已经形成四条主路径：
 
 1. `SliderSolver` 主求解流程
 2. `CaptchaProvider` 插件式供应商适配层
@@ -13,9 +13,17 @@ Slidex 当前已经形成四条主路径：
 
 - 自动检测或手动指定验证码供应商
 - 通过统一视觉模型承接 slider、OCR、manual fallback
+- 取代并归档 `automation-plugin-ocr`，不提供兼容 shim
+- 通过可选适配层输出 automation-kit action result、event、artifact
 - 在 provider 模式和 legacy 模式之间平滑切换
 - 自动求解失败时进入远程人工兜底
 - 保持轨迹池、会话状态与安全边界可控
+
+核心边界：
+
+- `automation_core` 不依赖 `slidex`，也不出现 OCR、captcha、厂商名或视觉供应商概念。
+- 业务应用通过依赖注入可选使用 `slidex`。
+- `slidex.integrations.automation_kit` 是单向适配层；`automation-kit` 不反向适配 `slidex`。
 
 ## 核心模块
 

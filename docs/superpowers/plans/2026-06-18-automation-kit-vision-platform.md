@@ -1,10 +1,14 @@
-# Slidex Automation-Kit Vision Platform Implementation Plan
+# 将 slidex 升级为 automation-kit 生态唯一视觉能力平台，并归档 automation-plugin-ocr
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Upgrade `slidex` from a slider CAPTCHA solver into the optional vision capability platform for the `dengyie/automation-kit` ecosystem while preserving existing `SliderSolver` compatibility.
+**Canonical design:** See `docs/automation-kit-vision-platform.md`. This implementation plan is retained as the execution trace and task breakdown.
 
-**Architecture:** Keep `automation_core` business-agnostic and free of `slidex`, OCR, CAPTCHA, vendor, and browser-specific imports. Add platform APIs inside `slidex` (`slidex.vision`, `slidex.ocr`, `slidex.artifacts`) and provide a one-way optional adapter in `slidex.integrations.automation_kit` that maps `VisualChallengeResult` into automation-kit `ActionResult`, `EventEnvelope`, and `ArtifactHandle`-shaped data.
+**Goal:** Upgrade `slidex` from a slider CAPTCHA solver into the only recommended vision capability platform for the `dengyie/automation-kit` ecosystem while preserving existing `SliderSolver` compatibility.
+
+**Architecture:** Keep `automation_core` business-agnostic and free of `slidex`, OCR, CAPTCHA, vendor, and browser-specific imports. Add platform APIs inside `slidex` (`slidex.vision`, `slidex.ocr`, artifact helpers) and provide a one-way optional adapter in `slidex.integrations.automation_kit` that maps `VisualChallengeResult` into automation-kit `ActionResult`, `EventEnvelope`, and `ArtifactHandle`-shaped data.
+
+**Deprecation decision:** `automation-plugin-ocr` is archived/deprecated directly. Do not add a compatibility shim. Do not recommend it in automation-kit ecosystem docs. Applications must migrate OCR tests and fake extractors to `slidex.ocr`.
 
 **Tech Stack:** Python dataclasses, enums, Playwright page reuse, existing CDP solver path, JSON-serializable artifacts, pytest, optional extras for `automation-kit` integration and future OCR backends.
 
@@ -14,20 +18,12 @@
 
 ### Slidex Current State
 
-- Current version is `0.3.0` in `pyproject.toml`.
-- Existing public solver surface is `SliderSolver.solve(...)` and `SliderSolver.solve_on_existing_page(...)`.
-- Existing provider surface is `CaptchaProvider`, `ProviderRegistry`, `ProviderElements`, and `SolveResult`.
+- Package version remains `0.3.0` in `pyproject.toml`; the implemented platform work corresponds to the planned `0.4` through `0.6` capability line.
+- Public solver surface includes `SliderSolver.solve(...)`, `SliderSolver.solve_on_existing_page(...)`, and `SliderSolver.solve_on_page(page, ...)`.
+- Existing provider surface is `CaptchaProvider`, `ProviderRegistry`, `ProviderElements`, `SolveResult`, and `ProviderManifest`.
 - Existing providers are `aliyun-nocaptcha` and `geetest`.
-- Existing execution contexts include self-managed browser, CDP endpoint, remote manual fallback, trajectory pool, and telemetry.
-- Current worktree has uncommitted telemetry edits in:
-  - `README.md`
-  - `slidex/_provider_mixin.py`
-  - `slidex/config.py`
-  - `slidex/remote.py`
-  - `slidex/scripts/slide_solve_cdp.py`
-  - `slidex/solver.py`
-  - `tests/test_cli.py`
-  - `tests/test_slider_solver.py`
+- Existing execution contexts include self-managed browser, CDP endpoint, caller-owned Playwright `Page`, image bytes/path OCR, remote manual fallback, trajectory pool, artifact helpers, and telemetry.
+- Current worktree is expected to be clean after each checkpoint commit.
 
 ### automation-kit Recon
 
@@ -40,8 +36,8 @@ The inspected `dengyie/automation-kit` repository exposes:
 - `automation_runner.reports` redacts sensitive keys containing `authorization`, `cookie`, `password`, `secret`, or `token`
 - `tests/structure/test_boundaries.py` forbids business terms and concrete driver terms inside `automation_core`
 - `docs/artifacts.md` defines artifact storage as `<artifact-root>/<run-id>/<artifact-type>/<artifact-name>`
-- `docs/ecosystem.md` currently lists `automation-plugin-ocr` as the optional OCR plugin
-- `docs/compatibility.md` currently includes `automation-plugin-ocr` in the verification matrix
+- `docs/ecosystem.md` must recommend `slidex` as the visual challenge platform for CAPTCHA, OCR, screenshot recognition, and manual fallback.
+- `docs/compatibility.md` must include `slidex` compatibility coverage and remove `automation-plugin-ocr` from the recommended plugin path.
 
 ### Non-Negotiable Architecture Boundary
 
@@ -49,6 +45,7 @@ The inspected `dengyie/automation-kit` repository exposes:
 - Do not add OCR, CAPTCHA, visual, vendor, `geetest`, `aliyun`, browser, Appium, Selenium, Damai, or Dianping concepts to `automation_core`.
 - Keep application-level usage dependency-injected. Applications choose whether to instantiate `slidex` capabilities.
 - `slidex` maps outward to automation-kit contracts; automation-kit does not map inward to `slidex`.
+- `automation-plugin-ocr` is not a compatibility layer. It is deprecated and archived after downstream references are removed.
 
 ---
 
@@ -1956,18 +1953,20 @@ Each phase must end with:
 
 **Cross-Repository Traceability:**
 
-- `automation-kit`: `c6619d8 docs: 完善 slidex 视觉平台兼容矩阵`
-- `automation-app-damai`: `2826ce7 feat: 使用 slidex 视觉能力测试入口`
-- `automation-app-dianping`: `0d646ca test: 保持 dianping 视觉能力可选`
-- `automation-plugin-ocr`: `0b4f9c1 docs: 明确 OCR 插件归档迁移策略`
+- `slidex`: `aa48a12 Fix visual solver cleanup and artifacts`
+- `automation-kit`: `83e5169 docs(阶段7): 复核 slidex 最新视觉契约`
+- `automation-app-damai`: `d68c98e feat(阶段4): 接入 slidex 视觉辅助契约`
+- `automation-app-dianping`: `d193aad test(阶段4): 硬化 dianping slidex helper 覆盖率`
+- `automation-plugin-ocr`: `1b44c77 docs: 归档 OCR 插件并指向 slidex`
 
 **Requirement Evidence:**
 
-- `automation-plugin-ocr` 不再被应用仓引用: verified by `rg -n "automation-plugin-ocr|automation_plugin_ocr" .` returning no matches in damai and dianping.
-- `automation-app-damai` 使用 `slidex.ocr.FakeOcrExtractor`: covered by `/tmp/slidex-integration/automation-app-damai/tests/test_workflow.py`.
-- `automation-kit` 文档推荐 `slidex` 作为视觉能力平台: covered by `/tmp/slidex-integration/automation-kit/docs/ecosystem.md` and `docs/compatibility.md`.
+- `automation-plugin-ocr` 不再被应用仓代码引用: verified by `rg -n "automation-plugin-ocr|automation_plugin_ocr" automation_app_* tests` returning no matches in Damai and Dianping code/test paths.
+- `automation-app-damai` 使用 app-layer lazy helper 构造 `PLAYWRIGHT_PAGE` slider request and adapter payloads: covered by `/Users/mango/project/codex/automation-app-damai/tests/test_workflow.py`.
+- `automation-app-dianping` 使用 app-layer lazy helper 构造 `ANDROID_SCREENSHOT_BYTES` image-text request and adapter payloads: covered by `/Users/mango/project/codex/automation-app-dianping/tests/test_workflow.py`.
+- `automation-kit` 文档推荐 `slidex` 作为视觉能力平台: covered by `/Users/mango/project/codex/automation-kit/docs/ecosystem.md`, `/Users/mango/project/codex/automation-kit/docs/compatibility.md`, and `/Users/mango/project/codex/automation-kit/docs/slidex-visual-platform.md`.
 - `slidex` 同时支持 `slider_captcha` and `ocr_text`: covered by `tests/test_vision_solver.py`.
-- `VisualChallengeResult` 可映射为 automation-kit action result / artifact / event: covered by `tests/test_automation_kit_integration.py` and native-path verification with `PYTHONPATH=/tmp/slidex-integration/automation-kit`.
+- `VisualChallengeResult` 可映射为 automation-kit action result / artifact / event: covered by `tests/test_automation_kit_integration.py` and native-path verification with `PYTHONPATH=/Users/mango/project/codex/automation-kit`.
 - artifact and metadata redaction helpers: covered by `tests/test_vision_artifacts.py`.
 - manual fallback unified result model and session audit fields: covered by `tests/test_manual_fallback.py` and `tests/test_api_security.py`.
 - CLI/CDP unified visual output while preserving compatibility fields: covered by `tests/test_cli.py`.
@@ -1975,11 +1974,13 @@ Each phase must end with:
 **Final Verification Commands:**
 
 - `pytest -q`
-- `PYTHONPATH=/tmp/slidex-integration/automation-kit pytest -q tests/test_automation_kit_integration.py`
-- `/tmp/slidex-integration/automation-kit`: `PYTHONPATH=/tmp/slidex-integration/automation-kit pytest -q -o addopts=''`
-- `/tmp/slidex-integration/automation-app-damai`: `PYTHONPATH=/Users/mango/project/codex/slidex:/tmp/slidex-integration/automation-kit:/tmp/slidex-integration/automation-app-damai pytest -q -o addopts=''`
-- `/tmp/slidex-integration/automation-app-dianping`: `PYTHONPATH=/tmp/slidex-integration/automation-kit:/tmp/slidex-integration/automation-app-dianping pytest -q -o addopts=''`
-- `/tmp/slidex-integration/automation-plugin-ocr`: `PYTHONPATH=/tmp/slidex-integration/automation-plugin-ocr pytest -q -o addopts=''`
+- `PYTHONPATH=/Users/mango/project/codex/automation-kit pytest -q tests/test_automation_kit_integration.py`
+- `/Users/mango/project/codex/automation-kit`: `.venv/bin/python -m pytest -q`
+- `/Users/mango/project/codex/automation-app-damai`: `.venv/bin/python -m pytest -q`
+- `/Users/mango/project/codex/automation-app-damai`: `PYTHONPATH=/Users/mango/project/codex/automation-app-damai:/Users/mango/project/codex/automation-kit:/Users/mango/project/codex/slidex /opt/homebrew/bin/pytest -q -o addopts='' tests/test_workflow.py -k 'visual_request or visual_result'`
+- `/Users/mango/project/codex/automation-app-dianping`: `.venv/bin/python -m pytest -q`
+- `/Users/mango/project/codex/automation-app-dianping`: `PYTHONPATH=/Users/mango/project/codex/automation-app-dianping:/Users/mango/project/codex/automation-kit:/Users/mango/project/codex/slidex /opt/homebrew/bin/pytest -q -o addopts='' tests/test_workflow.py -k 'visual_request or visual_result'`
+- `/Users/mango/project/codex/automation-plugin-ocr`: `.venv/bin/python -m pytest -q`
 
 **Final Review Status:**
 
@@ -1993,3 +1994,35 @@ Each phase must end with:
 
 - Real target-site E2E validation still depends on a live user-side browser/session and target CAPTCHA availability.
 - `automation-plugin-ocr` can be archived on GitHub after the external commits are pushed.
+
+### 2026-06-18: Documentation Baseline Closure
+
+**Completed:**
+
+- Promoted `docs/automation-kit-vision-platform.md` as the committed slidex-side canonical design document.
+- Updated the design document to reflect the current app-layer helper strategy in Damai and Dianping.
+- Replaced stale `/tmp/slidex-integration` traceability references with the current sibling repository commits and verification commands.
+- Kept live browser/Appium visual execution explicitly out of the completed baseline because application workflows do not yet own real Playwright pages or Android screenshot bytes.
+
+**Decision Record:**
+
+- Problem: earlier execution notes described temporary `/tmp/slidex-integration` repositories and a Damai `FakeOcrExtractor` migration path, but the current ecosystem has moved to app-layer slidex request/result helpers.
+  Choice: preserve the historical execution record but add current baseline evidence and update final audit references to the real sibling repositories.
+  Reason: this keeps the development docs reproducible from the current worktree without hiding how the earlier phase was executed.
+  Risk: once live browser/Appium workflow phases begin, these docs must be updated again with real E2E ownership and verification evidence.
+
+**Verification:**
+
+- `pytest -q`: `243 passed, 1 skipped`.
+- `PYTHONPATH=/Users/mango/project/codex/automation-kit pytest -q tests/test_automation_kit_integration.py`: `6 passed`.
+- Damai slidex compatibility slice: `2 passed, 4 deselected`.
+- Dianping slidex compatibility slice: `2 passed, 4 deselected`.
+- `git diff --check`: passed.
+
+**Production Code Quality Review:**
+
+- Mode: `checkpoint`.
+- Severe issues: none found.
+- Improvement suggestions: push the sibling repository commits and archive `automation-plugin-ocr` on GitHub once remote repository settings are ready.
+- Quality score: 92/100.
+- Pass status: passed.
