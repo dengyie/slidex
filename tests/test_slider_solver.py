@@ -126,6 +126,106 @@ class TestSliderSolverInit:
             assert payload["event"] == "solve_summary"
             assert payload["run_id"] == summary["run_id"]
 
+    def test_emit_solver_step_broadcasts_and_persists_immediately(self):
+        captured = []
+        with tempfile.TemporaryDirectory() as td:
+            cfg = SlidexConfig(project_root=td, on_risk_log_update=lambda payload: captured.append(payload))
+            s = SliderSolver(cookie_id="telemetry_user", config=cfg)
+
+            entry = s._emit_step("page", "page_load", "started", verify_url="https://example.com/punish?x5secdata=secret")
+
+            assert entry["event"] == "solver_step"
+            assert entry["phase"] == "page"
+            assert entry["step"] == "page_load"
+            assert entry["status"] == "started"
+            assert captured[-1] == entry
+            telemetry_file = Path(td) / "telemetry" / "events.jsonl"
+            payload = json.loads(telemetry_file.read_text(encoding="utf-8").strip().splitlines()[-1])
+            assert payload == entry
+
+    def test_emit_solver_step_redacts_sensitive_metadata(self):
+        captured = []
+        cfg = SlidexConfig(on_risk_log_update=lambda payload: captured.append(payload))
+        s = SliderSolver(cookie_id="telemetry_user", config=cfg)
+
+        entry = s._emit_step(
+            "remote",
+            "validation_cookie",
+            "failed",
+            verify_url="https://h5api.m.goofish.com/h5/api/_____tmd_____/punish?x5secdata=SECRET_TICKET&x5step=2&action=captcha&pureCaptcha=",
+            cookies={"x5sec": "SECRET_COOKIE", "session": "abc"},
+            nested={"authorization": "Bearer SECRET", "normal": "safe"},
+        )
+
+        payload_text = json.dumps(entry, ensure_ascii=False)
+        assert "SECRET_TICKET" not in payload_text
+        assert "SECRET_COOKIE" not in payload_text
+        assert "Bearer SECRET" not in payload_text
+        assert entry["verify_url"]["host"] == "h5api.m.goofish.com"
+        assert entry["verify_url"]["path"].endswith("/_____tmd_____/punish")
+        assert "x5secdata" in entry["verify_url"]["query_keys"]
+        assert entry["cookies"] == "[redacted]"
+        assert entry["nested"]["authorization"] == "[redacted]"
+        assert entry["nested"]["normal"] == "safe"
+
+    def test_emit_solver_step_preserves_cookie_names_without_values(self):
+        s = SliderSolver(cookie_id="telemetry_user")
+
+        entry = s._emit_step(
+            "cookies",
+            "cookie_snapshot",
+            "ok",
+            cookie_names=["cookie2", "x5sec"],
+            cookies={"x5sec": "SECRET_COOKIE"},
+            cookie_count=2,
+        )
+
+        payload_text = json.dumps(entry, ensure_ascii=False)
+        assert "SECRET_COOKIE" not in payload_text
+        assert entry["cookie_names"] == ["cookie2", "x5sec"]
+        assert entry["cookie_count"] == 2
+        assert entry["cookies"] == "[redacted]"
+
+    def test_emit_telemetry_event_redacts_url_before_callback(self):
+        captured = []
+        cfg = SlidexConfig(on_risk_log_update=lambda payload: captured.append(payload))
+        s = SliderSolver(cookie_id="telemetry_user", config=cfg)
+
+        entry = s._emit_telemetry_event(
+            "solve_started",
+            verify_url="https://h5api.m.goofish.com/punish?x5secdata=SECRET_TICKET&x5step=2",
+        )
+
+        payload_text = json.dumps(entry, ensure_ascii=False)
+        assert "SECRET_TICKET" not in payload_text
+        assert captured[-1] == entry
+        assert entry["verify_url"]["query_keys"] == ["x5secdata", "x5step"]
+
+    def test_emit_solver_step_redacts_sensitive_values_inside_reason_string(self):
+        captured = []
+        cfg = SlidexConfig(on_risk_log_update=lambda payload: captured.append(payload))
+        s = SliderSolver(cookie_id="telemetry_user", config=cfg)
+
+        entry = s._emit_step(
+            "page",
+            "page_load",
+            "failed",
+            reason=(
+                "Timeout navigating to "
+                "https://h5api.m.goofish.com/punish?x5secdata=SECRET_TICKET"
+                "&x5sec=SECRET_COOKIE&token=SECRET_TOKEN&x5step=2"
+            ),
+        )
+
+        payload_text = json.dumps(entry, ensure_ascii=False)
+        assert "SECRET_TICKET" not in payload_text
+        assert "SECRET_COOKIE" not in payload_text
+        assert "SECRET_TOKEN" not in payload_text
+        assert "x5secdata=[redacted]" in entry["reason"]
+        assert "x5sec=[redacted]" in entry["reason"]
+        assert "token=[redacted]" in entry["reason"]
+        assert captured[-1] == entry
+
     def test_xianyu_punish_url_requires_validation_cookie(self):
         s = SliderSolver(cookie_id="xianyu")
 
@@ -188,9 +288,14 @@ async def test_solve_on_page_removes_response_listener_and_detaches_cdp():
 async def test_remote_fallback_rejects_xianyu_punish_completion_without_validation_cookie(monkeypatch):
     from slidex.remote import captcha_controller
 
+    captured = []
     solver = SliderSolver(
         cookie_id="2638850042",
-        config=SlidexConfig(remote_captcha_timeout=1, remote_captcha_poll_interval=0),
+        config=SlidexConfig(
+            remote_captcha_timeout=1,
+            remote_captcha_poll_interval=0,
+            on_risk_log_update=lambda payload: captured.append(payload),
+        ),
     )
     solver.page = object()
     solver._get_cookies = mock.AsyncMock(return_value={"cookie2": "abc"})
@@ -207,6 +312,13 @@ async def test_remote_fallback_rejects_xianyu_punish_completion_without_validati
     assert success is False
     assert cookies == {"cookie2": "abc"}
     assert solver._telemetry_summary["failure_reason"] == "x5_validation_cookie_missing"
+    assert any(
+        event["event"] == "solver_step"
+        and event["phase"] == "remote"
+        and event["step"] == "validation_cookie"
+        and event["status"] == "failed"
+        for event in captured
+    )
 
 
 @pytest.mark.asyncio

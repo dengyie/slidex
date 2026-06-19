@@ -20,3 +20,24 @@
 - Results: `python -m pytest tests/test_slider_solver.py -q` passed 48 tests; focused related suite passed 73 tests.
 - Next: Live-test against the original Xianyu verification URL/session.
 - Blockers: Same live validation/manual secret requirement remains.
+
+## 2026-06-20 00:11
+- Task: Record real Xianyu token-refresh validation result.
+- Actions: User reported live tests against latest GitHub commit `7aa77a8eb7ba8bc05fd33092717f0e37c5f27652` with accounts `1926782908` and `2638850042`.
+- Results: Both accounts triggered official `FAIL_SYS_USER_VALIDATE` and punish URLs under `h5api.m.goofish.com/.../pc.login.token/1.0/_____tmd_____/punish?...&x5step=2&action=captcha&pureCaptcha=`. Latest Slidex executed and correctly did not misreport success; it logged `remote completion missing validation cookie; treating as unresolved`. The page state was a blank CAPTCHA shell (`all_divs=0`, `all_imgs=0`, `scripts=14`) with white screenshots and no `x5sec`/`x5secdata`.
+- Next: Treat remaining work as browser/environment/page-rendering investigation, not success-gate repair.
+- Blockers: Need controlled probes comparing browser profile, headers, cookies, init scripts, and Playwright launch context against an environment where the official punish page renders.
+
+## 2026-06-20 00:55
+- Task: Add step-level logging/broadcasting for every important `SliderSolver` operation after live testing showed diagnostics were still too thin.
+- Actions: Added `docs/solver-step-logging.md`; wrote red tests for `_emit_step()`, immediate JSONL persistence, callback broadcasting, sensitive URL/cookie/token redaction, safe `cookie_names`, and Xianyu missing-validation-cookie step reporting. Implemented structured `solver_step` events through existing telemetry, immediate event persistence, loguru step lines, and critical path instrumentation for solve entry, browser init, page load/state, legacy slider/distance/slide attempts, remote fallback/session/completion/validation-cookie checks, and cookie snapshots.
+- Results: `python -m pytest tests/test_slider_solver.py -q` passed 52 tests; `python -m pytest tests/test_slider_solver.py tests/test_api_security.py tests/test_vision_solver.py tests/test_cli.py -q` passed 77 tests.
+- Next: User can rerun the successful live Xianyu flow and inspect `solver_step` callback payloads / telemetry JSONL to locate future stalls.
+- Blockers: Live end-to-end verification still requires the user's local Xianyu session and real non-redacted validation URL.
+
+## 2026-06-20 01:05
+- Task: Fix production review finding that `solver_step` exception `reason` strings could leak sensitive URL query values.
+- Actions: Added a red regression test with `reason` containing a Xianyu punish URL plus `x5secdata`, `x5sec`, and `token` secrets; implemented string-level sensitive parameter redaction in `_redact_step_metadata()`.
+- Results: `python -m pytest tests/test_slider_solver.py -q` passed 53 tests; `python -m pytest tests/test_slider_solver.py tests/test_api_security.py tests/test_vision_solver.py tests/test_cli.py -q` passed 78 tests.
+- Next: Ready for another review or commit/push.
+- Blockers: None for the logging redaction fix.

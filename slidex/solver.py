@@ -1,6 +1,6 @@
-import asyncio, json, os, time, random, shutil, psutil, uuid
+import asyncio, json, os, re, time, random, shutil, psutil, uuid
 from pathlib import Path
-from typing import Dict, Optional, Tuple, List, Callable
+from typing import Any, Dict, Optional, Tuple, List, Callable
 from urllib.parse import urlparse, parse_qs
 from loguru import logger
 from playwright.async_api import async_playwright
@@ -109,9 +109,109 @@ class SliderSolver(ProviderSolverMixin):
             "risk_log_id": None,
         }
 
+    def _emit_step(self, phase: str, step: str, status: str = "started", **metadata):
+        safe_metadata = self._redact_step_metadata(metadata)
+        entry = self._emit_telemetry_event(
+            "solver_step",
+            phase=phase,
+            step=step,
+            status=status,
+            **safe_metadata,
+        )
+        if entry:
+            self._write_telemetry_record(entry)
+            log_method = logger.info
+            if status == "failed":
+                log_method = logger.warning
+            elif status == "skipped":
+                log_method = logger.debug
+            details = " ".join(f"{key}={value}" for key, value in safe_metadata.items() if value is not None)
+            suffix = f" {details}" if details else ""
+            log_method(f"[{self.pure_user_id}] step {phase}.{step} {status}{suffix}")
+        return entry
+
+    @classmethod
+    def _redact_step_metadata(cls, value: Any):
+        if isinstance(value, dict):
+            safe = {}
+            for key, item in value.items():
+                key_text = str(key)
+                lowered = key_text.lower()
+                if key_text.endswith("_url") or lowered in {"url", "verify_url", "page_url", "response_url"}:
+                    safe[key] = cls._sanitize_url(item)
+                elif lowered in {"cookie_names", "cookie_count"}:
+                    safe[key] = cls._redact_step_metadata(item)
+                elif cls._is_sensitive_key(key_text):
+                    safe[key] = "[redacted]"
+                else:
+                    safe[key] = cls._redact_step_metadata(item)
+            return safe
+        if isinstance(value, (list, tuple, set)):
+            return [cls._redact_step_metadata(item) for item in value]
+        if isinstance(value, str):
+            return cls._redact_sensitive_string(value)
+        return value
+
+    @staticmethod
+    def _is_sensitive_key(key: str) -> bool:
+        lowered = key.lower()
+        return any(
+            token in lowered
+            for token in (
+                "cookie",
+                "token",
+                "secret",
+                "password",
+                "authorization",
+                "x5sec",
+                "x5secdata",
+            )
+        )
+
+    @staticmethod
+    def _sanitize_url(url_value: Any):
+        if not isinstance(url_value, str):
+            return url_value
+        try:
+            parsed = urlparse(url_value)
+            query = parse_qs(parsed.query or "", keep_blank_values=True)
+            return {
+                "scheme": parsed.scheme,
+                "host": parsed.netloc,
+                "path": parsed.path,
+                "query_keys": sorted(query.keys()),
+            }
+        except Exception:
+            return "[redacted-url]"
+
+    @staticmethod
+    def _redact_sensitive_string(value: str) -> str:
+        if not value:
+            return value
+        sensitive_names = (
+            "x5secdata",
+            "x5sec",
+            "token",
+            "access_token",
+            "refresh_token",
+            "authorization",
+            "password",
+            "secret",
+            "cookie",
+        )
+        redacted = value
+        for name in sensitive_names:
+            redacted = re.sub(
+                rf"(?i)({re.escape(name)}\s*[:=]\s*)([^&\s,;]+)",
+                r"\1[redacted]",
+                redacted,
+            )
+        return redacted
+
     def _emit_telemetry_event(self, event: str, **payload):
         if not self._config.telemetry_enabled:
             return None
+        payload = self._redact_step_metadata(payload)
 
         entry = {
             "event": event,
@@ -200,6 +300,7 @@ class SliderSolver(ProviderSolverMixin):
         self.last_fallback_used = None
         self._is_cdp_mode = False
         self._emit_telemetry_event("solve_started", mode="browser", verify_url=verify_url)
+        self._emit_step("solve", "solve_started", "started", mode="browser", verify_url=verify_url)
         logger.info(f"[{self.pure_user_id}] solving (mode={self.trajectory_mode})...")
         try:
             await self._init_browser()
@@ -214,6 +315,7 @@ class SliderSolver(ProviderSolverMixin):
             return success, cookies
         except Exception as e:
             logger.error(f"[{self.pure_user_id}] error: {e}")
+            self._emit_step("solve", "solve_exception", "failed", reason=str(e))
             success, cookies = await self._fallback_or_fail(verify_url)
             self._finalize_telemetry(
                 success=success,
@@ -242,6 +344,7 @@ class SliderSolver(ProviderSolverMixin):
         self.last_fallback_used = None
         self._is_cdp_mode = True
         self._emit_telemetry_event("solve_started", mode="cdp", page_url=page_url)
+        self._emit_step("solve", "solve_started", "started", mode="cdp", page_url=page_url)
         logger.info(f"[{self.pure_user_id}] solving on existing page "
                     f"(cdp={cdp_endpoint[:60]}, mode={self.trajectory_mode})...")
         try:
@@ -256,6 +359,7 @@ class SliderSolver(ProviderSolverMixin):
             return success, cookies
         except Exception as e:
             logger.error(f"[{self.pure_user_id}] CDP solve error: {e}")
+            self._emit_step("solve", "solve_exception", "failed", reason=str(e))
             self._finalize_telemetry(
                 success=False,
                 status="exception",
@@ -273,6 +377,7 @@ class SliderSolver(ProviderSolverMixin):
         self.page = page
         self.context = page.context
         self._emit_telemetry_event("solve_started", mode="playwright_page", page_url=page_url)
+        self._emit_step("solve", "solve_started", "started", mode="playwright_page", page_url=page_url)
         response_handler = self._on_response
         listener_registered = False
         try:
@@ -286,8 +391,10 @@ class SliderSolver(ProviderSolverMixin):
                 logger.warning(f"[{self.pure_user_id}] CDP session failed (provided page)")
 
             if page_url:
+                self._emit_step("page", "page_load", "started", page_url=page_url)
                 await self.page.goto(page_url, wait_until="networkidle", timeout=45000)
                 await asyncio.sleep(3)
+                self._emit_step("page", "page_load", "ok", page_url=page_url)
 
             success, cookies = await self._run_solve_loop(page_url)
             self._finalize_telemetry(
@@ -299,6 +406,7 @@ class SliderSolver(ProviderSolverMixin):
             return success, cookies
         except Exception as e:
             logger.error(f"[{self.pure_user_id}] Playwright page solve error: {e}")
+            self._emit_step("solve", "solve_exception", "failed", reason=str(e))
             self._finalize_telemetry(
                 success=False,
                 status="exception",
@@ -320,6 +428,7 @@ class SliderSolver(ProviderSolverMixin):
         """核心求解循环 — Provider 模式 或 Legacy 模式"""
 
         # ── Provider 模式：尝试自动检测并使用 provider ──
+        self._emit_step("solve", "solve_loop", "started", verify_url=verify_url)
         if self._use_provider_mode:
             if await self._detect_and_init_provider(self.page):
                 logger.info(f"[{self.pure_user_id}] using provider mode: {self._provider.name}")
@@ -336,15 +445,21 @@ class SliderSolver(ProviderSolverMixin):
 
     async def _run_legacy_solve_loop(self, verify_url: str):
         """Legacy 求解循环 — 录制回放 + 数学生成 + 重试"""
+        self._emit_step("legacy", "slider_wait", "started", timeout_s=15.0)
         if not await self._wait_slider():
             logger.warning(f"[{self.pure_user_id}] slider not found on page")
+            self._emit_step("legacy", "slider_wait", "failed", reason="slider_not_found")
             await self._save_debug_screenshot("slider_not_found")
             return await self._fallback_or_fail(verify_url)
+        self._emit_step("legacy", "slider_wait", "ok")
 
+        self._emit_step("legacy", "distance_detection", "started")
         distance = await self._calc_distance_multi_source()
         if distance is None or distance <= 0:
             logger.warning(f"[{self.pure_user_id}] cannot determine distance")
+            self._emit_step("legacy", "distance_detection", "failed", distance=distance)
             return await self._fallback_or_fail(verify_url)
+        self._emit_step("legacy", "distance_detection", "ok", distance=distance)
 
         success_code = self.selectors["success_code"]
 
@@ -356,9 +471,18 @@ class SliderSolver(ProviderSolverMixin):
                 logger.info(f"[{self.pure_user_id}] using recorded trajectory "
                             f"(dist={recorded['distance']:.0f}px, {len(recorded['points'])} points)")
                 for attempt in range(1, self.MAX_RETRIES + 1):
+                    self._emit_step("legacy", "slide_attempt", "started", mode="recorded", attempt=attempt, distance=distance)
                     await self._do_slide(distance, attempt, recorded_trajectory=recorded)
                     code = await self._wait_result(6.0)
                     logger.info(f"[{self.pure_user_id}] recorded replay attempt {attempt}: code={code}")
+                    self._emit_step(
+                        "legacy",
+                        "slide_attempt",
+                        "ok" if code == success_code else "failed",
+                        mode="recorded",
+                        attempt=attempt,
+                        slide_code=code,
+                    )
                     if code == success_code:
                         cookies = await self._get_cookies()
                         logger.success(f"[{self.pure_user_id}] pass! (recorded, attempt={attempt})")
@@ -375,9 +499,18 @@ class SliderSolver(ProviderSolverMixin):
         # ── Phase B: 数学模型生成的轨迹 ──
         logger.info(f"[{self.pure_user_id}] trying generated trajectories...")
         for attempt in range(1, self.MAX_RETRIES + 1):
+            self._emit_step("legacy", "slide_attempt", "started", mode="generated", attempt=attempt, distance=distance)
             await self._do_slide(distance, attempt)
             code = await self._wait_result(6.0)
             logger.info(f"[{self.pure_user_id}] generated attempt {attempt}: code={code}")
+            self._emit_step(
+                "legacy",
+                "slide_attempt",
+                "ok" if code == success_code else "failed",
+                mode="generated",
+                attempt=attempt,
+                slide_code=code,
+            )
             if code == success_code:
                 cookies = await self._get_cookies()
                 logger.success(f"[{self.pure_user_id}] pass! (generated, attempt={attempt})")
@@ -395,6 +528,7 @@ class SliderSolver(ProviderSolverMixin):
         if self._is_cdp_mode:
             logger.warning(f"[{self.pure_user_id}] CDP mode: skipping remote fallback")
             self._emit_telemetry_event("fallback_skipped", reason="cdp_mode")
+            self._emit_step("remote", "remote_fallback", "skipped", reason="cdp_mode")
             return False, None
         if self.trajectory_mode in ("auto", "recorded"):
             try:
@@ -405,6 +539,7 @@ class SliderSolver(ProviderSolverMixin):
                     return result
             except Exception as e:
                 logger.error(f"[{self.pure_user_id}] remote fallback failed: {e}")
+                self._emit_step("remote", "remote_fallback", "failed", reason=str(e))
         return False, None
 
     # ════════════════════════════════════════════════════════════
@@ -415,15 +550,18 @@ class SliderSolver(ProviderSolverMixin):
             from slidex.remote import captcha_controller
         except ImportError:
             logger.warning(f"[{self.pure_user_id}] captcha_remote_control not available")
+            self._emit_step("remote", "remote_fallback", "skipped", reason="remote_controller_unavailable")
             return False, None
 
         session_id = f"slider_fallback_{self.pure_user_id}_{int(time.time())}"
         logger.info(f"[{self.pure_user_id}] starting remote fallback session: {session_id}")
         self._emit_telemetry_event("fallback_started", fallback="remote", session_id=session_id)
+        self._emit_step("remote", "remote_fallback", "started", session_id=session_id, verify_url=verify_url)
 
         if not self.page:
             if self._is_cdp_mode:
                 logger.warning(f"[{self.pure_user_id}] CDP mode: cannot fallback without a page")
+                self._emit_step("remote", "remote_fallback", "skipped", reason="cdp_without_page")
                 return False, None
             try:
                 await self._init_browser()
@@ -431,14 +569,17 @@ class SliderSolver(ProviderSolverMixin):
                 await self._wait_slider()
             except Exception as e:
                 logger.error(f"[{self.pure_user_id}] failed to init browser for remote: {e}")
+                self._emit_step("remote", "remote_fallback", "failed", reason=str(e))
                 return False, None
 
         try:
             session_info = await captcha_controller.create_session(
                 session_id, self.page, cookie_id=self.pure_user_id
             )
+            self._emit_step("remote", "session_created", "ok", session_id=session_id)
         except Exception as e:
             logger.error(f"[{self.pure_user_id}] create remote session failed: {e}")
+            self._emit_step("remote", "session_created", "failed", session_id=session_id, reason=str(e))
             return False, None
 
         # 发送通知（通过注入的回调）
@@ -468,6 +609,7 @@ class SliderSolver(ProviderSolverMixin):
                 completed = await captcha_controller.check_completion(session_id)
                 if completed:
                     logger.success(f"[{self.pure_user_id}] remote solve completed!")
+                    self._emit_step("remote", "remote_completion", "ok", session_id=session_id)
                     cookies = await self._get_cookies()
                     if self._requires_validation_cookie(verify_url) and not self._has_validation_cookie(cookies):
                         logger.warning(
@@ -480,6 +622,14 @@ class SliderSolver(ProviderSolverMixin):
                             session_id=session_id,
                             cookie_names=sorted((cookies or {}).keys()),
                         )
+                        self._emit_step(
+                            "remote",
+                            "validation_cookie",
+                            "failed",
+                            session_id=session_id,
+                            cookie_names=sorted((cookies or {}).keys()),
+                            verify_url=verify_url,
+                        )
                         self._telemetry_summary["failure_reason"] = "x5_validation_cookie_missing"
                         try:
                             await captcha_controller.close_session(session_id)
@@ -487,6 +637,13 @@ class SliderSolver(ProviderSolverMixin):
                             pass
                         return False, cookies
                     self._emit_telemetry_event("fallback_completed", fallback="remote", session_id=session_id)
+                    self._emit_step(
+                        "remote",
+                        "validation_cookie",
+                        "ok",
+                        session_id=session_id,
+                        cookie_names=sorted((cookies or {}).keys()),
+                    )
                     try:
                         recording = captcha_controller.finish_recording(session_id)
                         if recording and recording.get("points"):
@@ -502,10 +659,12 @@ class SliderSolver(ProviderSolverMixin):
                 await asyncio.sleep(poll_interval)
             except Exception as e:
                 logger.warning(f"[{self.pure_user_id}] poll error: {e}")
+                self._emit_step("remote", "poll", "failed", session_id=session_id, reason=str(e))
                 await asyncio.sleep(poll_interval)
 
         logger.warning(f"[{self.pure_user_id}] remote fallback timed out after {timeout}s")
         self._emit_telemetry_event("fallback_timeout", fallback="remote", session_id=session_id, timeout_s=timeout)
+        self._emit_step("remote", "remote_fallback", "failed", session_id=session_id, reason="timeout", timeout_s=timeout)
         try:
             await captcha_controller.close_session(session_id)
         except Exception:
@@ -714,6 +873,7 @@ class SliderSolver(ProviderSolverMixin):
     #  浏览器初始化与页面加载
     # ════════════════════════════════════════════════════════════
     async def _init_browser(self):
+        self._emit_step("browser", "browser_init", "started", headless=self.headless, proxy_enabled=bool(self.proxy))
         await ensure_previous_chromium_closed()
         self.profile_dir.mkdir(parents=True, exist_ok=True)
 
@@ -748,9 +908,12 @@ class SliderSolver(ProviderSolverMixin):
         try:
             self._cdp = await self.page.context.new_cdp_session(self.page)
             logger.debug(f"[{self.pure_user_id}] CDP session ready")
+            self._emit_step("browser", "cdp_session", "ok")
         except Exception:
             self._cdp = None
             logger.warning(f"[{self.pure_user_id}] CDP session failed")
+            self._emit_step("browser", "cdp_session", "failed")
+        self._emit_step("browser", "browser_init", "ok", profile_dir=str(self.profile_dir))
 
     async def _connect_existing_browser(self, cdp_endpoint: str, page_url: str = ""):
         """连接已有浏览器（CDP 模式）— 不启动新浏览器"""
@@ -796,6 +959,7 @@ class SliderSolver(ProviderSolverMixin):
             await self.context.add_cookies(cl)
 
     async def _load_page(self, url):
+        self._emit_step("page", "page_load", "started", verify_url=url)
         await self.page.goto(url, wait_until="networkidle", timeout=45000)
         await asyncio.sleep(3)
         try:
@@ -808,8 +972,11 @@ class SliderSolver(ProviderSolverMixin):
                 scripts: document.querySelectorAll("script").length,
             })""", self.selectors["slider_btn"])
             logger.info(f"[{self.pure_user_id}] page state: {info}")
+            self._emit_step("page", "page_state", "ok", **info)
         except Exception:
+            self._emit_step("page", "page_state", "failed")
             pass
+        self._emit_step("page", "page_load", "ok", verify_url=url)
 
     async def _wait_slider(self, timeout=15.0):
         logger.debug(f"[{self.pure_user_id}] waiting for slider (timeout={timeout}s)")
@@ -1003,6 +1170,7 @@ class SliderSolver(ProviderSolverMixin):
             logger.warning("[{}] screenshot failed: {}".format(self.pure_user_id, e))
 
     async def _get_cookies(self):
+        self._emit_step("cookies", "cookie_snapshot", "started", context_available=bool(self.context), cdp_available=bool(getattr(self, "_cdp", None)))
         try:
             cookies = {}
             if self.context:
@@ -1018,8 +1186,11 @@ class SliderSolver(ProviderSolverMixin):
                             cookies[name] = c.get("value", "")
                 except Exception as e:
                     logger.debug(f"[{self.pure_user_id}] CDP cookie snapshot failed: {e}")
+                    self._emit_step("cookies", "cdp_cookie_snapshot", "failed", reason=str(e))
+            self._emit_step("cookies", "cookie_snapshot", "ok", cookie_names=sorted(cookies.keys()))
             return cookies
-        except Exception:
+        except Exception as e:
+            self._emit_step("cookies", "cookie_snapshot", "failed", reason=str(e))
             return {}
 
     def _requires_validation_cookie(self, verify_url: str) -> bool:
