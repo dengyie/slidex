@@ -1,6 +1,7 @@
 import asyncio, json, os, time, random, shutil, psutil, uuid
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List, Callable
+from urllib.parse import urlparse, parse_qs
 from loguru import logger
 from playwright.async_api import async_playwright
 
@@ -400,6 +401,8 @@ class SliderSolver(ProviderSolverMixin):
                 result = await self._fallback_to_remote(verify_url)
                 if result[0]:
                     return result
+                if result[1] is not None:
+                    return result
             except Exception as e:
                 logger.error(f"[{self.pure_user_id}] remote fallback failed: {e}")
         return False, None
@@ -466,6 +469,23 @@ class SliderSolver(ProviderSolverMixin):
                 if completed:
                     logger.success(f"[{self.pure_user_id}] remote solve completed!")
                     cookies = await self._get_cookies()
+                    if self._requires_validation_cookie(verify_url) and not self._has_validation_cookie(cookies):
+                        logger.warning(
+                            f"[{self.pure_user_id}] remote completion missing validation cookie; "
+                            "treating as unresolved"
+                        )
+                        self._emit_telemetry_event(
+                            "fallback_validation_cookie_missing",
+                            fallback="remote",
+                            session_id=session_id,
+                            cookie_names=sorted((cookies or {}).keys()),
+                        )
+                        self._telemetry_summary["failure_reason"] = "x5_validation_cookie_missing"
+                        try:
+                            await captcha_controller.close_session(session_id)
+                        except Exception:
+                            pass
+                        return False, cookies
                     self._emit_telemetry_event("fallback_completed", fallback="remote", session_id=session_id)
                     try:
                         recording = captcha_controller.finish_recording(session_id)
@@ -984,10 +1004,44 @@ class SliderSolver(ProviderSolverMixin):
 
     async def _get_cookies(self):
         try:
-            all_c = await self.context.cookies()
-            return {c["name"]: c["value"] for c in all_c}
+            cookies = {}
+            if self.context:
+                all_c = await self.context.cookies()
+                cookies.update({c["name"]: c["value"] for c in all_c if c.get("name")})
+            cdp = getattr(self, "_cdp", None)
+            if cdp:
+                try:
+                    response = await cdp.send("Network.getAllCookies")
+                    for c in response.get("cookies", []) if isinstance(response, dict) else []:
+                        name = c.get("name")
+                        if name:
+                            cookies[name] = c.get("value", "")
+                except Exception as e:
+                    logger.debug(f"[{self.pure_user_id}] CDP cookie snapshot failed: {e}")
+            return cookies
         except Exception:
             return {}
+
+    def _requires_validation_cookie(self, verify_url: str) -> bool:
+        try:
+            parsed = urlparse(verify_url or "")
+            text = f"{parsed.netloc}{parsed.path}".lower()
+            query = parse_qs(parsed.query or "", keep_blank_values=True)
+        except Exception:
+            lowered = (verify_url or "").lower()
+            return "punish" in lowered and any(
+                token in lowered for token in ("x5secdata", "x5step", "action=captcha", "purecaptcha")
+            )
+
+        if "goofish.com" not in text and "taobao" not in text:
+            return False
+        if "punish" not in text:
+            return False
+        return any(key.lower() in {"x5secdata", "x5step", "action", "purecaptcha"} for key in query)
+
+    @staticmethod
+    def _has_validation_cookie(cookies: Optional[Dict[str, str]]) -> bool:
+        return any(bool((cookies or {}).get(key)) for key in ("x5sec", "x5secdata"))
 
     # ════════════════════════════════════════════════════════════
     #  清理

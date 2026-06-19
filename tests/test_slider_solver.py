@@ -126,6 +126,24 @@ class TestSliderSolverInit:
             assert payload["event"] == "solve_summary"
             assert payload["run_id"] == summary["run_id"]
 
+    def test_xianyu_punish_url_requires_validation_cookie(self):
+        s = SliderSolver(cookie_id="xianyu")
+
+        assert s._requires_validation_cookie(
+            "https://h5api.m.goofish.com/h5/api/_____tmd_____/punish?x5step=2&action=captcha&pureCaptcha="
+        )
+        assert s._requires_validation_cookie(
+            "https://h5api.m.goofish.com/h5/api/_____tmd_____/punish?pureCaptcha="
+        )
+        assert not s._requires_validation_cookie("https://example.com/normal-slider")
+
+    def test_validation_cookie_accepts_x5_ticket(self):
+        s = SliderSolver(cookie_id="xianyu")
+
+        assert s._has_validation_cookie({"x5sec": "ticket"})
+        assert s._has_validation_cookie({"x5secdata": "ticket"})
+        assert not s._has_validation_cookie({"cookie2": "abc"})
+
 
 @pytest.mark.asyncio
 async def test_solve_on_page_removes_response_listener_and_detaches_cdp():
@@ -164,6 +182,89 @@ async def test_solve_on_page_removes_response_listener_and_detaches_cdp():
     assert cookies == {"session": "abc"}
     assert page.handlers == []
     page.context.cdp.detach.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_remote_fallback_rejects_xianyu_punish_completion_without_validation_cookie(monkeypatch):
+    from slidex.remote import captcha_controller
+
+    solver = SliderSolver(
+        cookie_id="2638850042",
+        config=SlidexConfig(remote_captcha_timeout=1, remote_captcha_poll_interval=0),
+    )
+    solver.page = object()
+    solver._get_cookies = mock.AsyncMock(return_value={"cookie2": "abc"})
+
+    monkeypatch.setattr(captcha_controller, "create_session", mock.AsyncMock(return_value={"token": "token"}))
+    monkeypatch.setattr(captcha_controller, "check_completion", mock.AsyncMock(return_value=True))
+    monkeypatch.setattr(captcha_controller, "finish_recording", mock.Mock(return_value=None))
+    monkeypatch.setattr(captcha_controller, "close_session", mock.AsyncMock())
+
+    success, cookies = await solver._fallback_to_remote(
+        "https://h5api.m.goofish.com/h5/api/_____tmd_____/punish?x5step=2&action=captcha&pureCaptcha="
+    )
+
+    assert success is False
+    assert cookies == {"cookie2": "abc"}
+    assert solver._telemetry_summary["failure_reason"] == "x5_validation_cookie_missing"
+
+
+@pytest.mark.asyncio
+async def test_fallback_or_fail_preserves_diagnostic_cookies_from_remote_failure():
+    solver = SliderSolver(cookie_id="2638850042")
+    solver._fallback_to_remote = mock.AsyncMock(return_value=(False, {"cookie2": "abc"}))
+
+    success, cookies = await solver._fallback_or_fail("https://example.com/punish?action=captcha")
+
+    assert success is False
+    assert cookies == {"cookie2": "abc"}
+
+
+@pytest.mark.asyncio
+async def test_remote_fallback_accepts_xianyu_punish_completion_with_validation_cookie(monkeypatch):
+    from slidex.remote import captcha_controller
+
+    solver = SliderSolver(
+        cookie_id="2638850042",
+        config=SlidexConfig(remote_captcha_timeout=1, remote_captcha_poll_interval=0),
+    )
+    solver.page = object()
+    solver._get_cookies = mock.AsyncMock(return_value={"cookie2": "abc", "x5sec": "ticket"})
+
+    monkeypatch.setattr(captcha_controller, "create_session", mock.AsyncMock(return_value={"token": "token"}))
+    monkeypatch.setattr(captcha_controller, "check_completion", mock.AsyncMock(return_value=True))
+    monkeypatch.setattr(captcha_controller, "finish_recording", mock.Mock(return_value=None))
+    monkeypatch.setattr(captcha_controller, "close_session", mock.AsyncMock())
+
+    success, cookies = await solver._fallback_to_remote(
+        "https://h5api.m.goofish.com/h5/api/_____tmd_____/punish?x5step=2&action=captcha&pureCaptcha="
+    )
+
+    assert success is True
+    assert cookies["x5sec"] == "ticket"
+
+
+@pytest.mark.asyncio
+async def test_get_cookies_merges_cdp_all_cookies():
+    class FakeContext:
+        async def cookies(self):
+            return [{"name": "cookie2", "value": "abc"}]
+
+    class FakeCdp:
+        async def send(self, method):
+            assert method == "Network.getAllCookies"
+            return {
+                "cookies": [
+                    {"name": "x5sec", "value": "ticket"},
+                    {"name": "cookie2", "value": "from-cdp"},
+                ]
+            }
+
+    solver = SliderSolver(cookie_id="xianyu")
+    solver.context = FakeContext()
+    solver._cdp = FakeCdp()
+
+    assert await solver._get_cookies() == {"cookie2": "from-cdp", "x5sec": "ticket"}
 
 
 # ════════════════════════════════════════════════════════════
