@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.0] - 2026-07-19
+
+### Changed
+- `SlidexVisualCapability` now implements Provider V2:
+  `execution_profile(request)` and async `execute(request, context)`.
+- automation-kit optional dependency now requires
+  `automation-kit>=0.3.0,<0.4.0`.
+- Runtime owns timeout/retry/lifecycle events; the adapter no longer emits
+  workflow lifecycle events or owns retry policy.
+
+### Removed
+- V1 `aexecute(request)` dual-entry adapter path.
+
 ## [0.4.0] - 2026-07-18
 
 ### Added
