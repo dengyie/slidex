@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import asyncio
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -29,7 +30,9 @@ class VisualChallengeSolver:
     async def solve(self, request: VisualChallengeRequest) -> VisualChallengeResult:
         started = time.time()
         if request.challenge_type in {ChallengeType.OCR_TEXT, ChallengeType.IMAGE_TEXT}:
-            return self._solve_ocr(request, started)
+            # OCR extractors are synchronous/CPU-bound. Isolate them so the
+            # caller event loop remains responsive under Provider V2 runtime.
+            return await asyncio.to_thread(self._solve_ocr, request, started)
         if request.challenge_type == ChallengeType.SLIDER_CAPTCHA:
             return await self._solve_slider(request, started)
         return VisualChallengeResult(

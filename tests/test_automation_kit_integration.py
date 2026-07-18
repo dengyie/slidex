@@ -132,6 +132,49 @@ def test_slidex_visual_capability_profile_marks_ocr_as_unsupported_cancellation(
     assert profile.blocking is True
 
 
+def test_ocr_execution_does_not_block_event_loop_scheduling():
+    pytest.importorskip("automation_core")
+    from automation_core.execution import ExecutionContext
+    from slidex.integrations.automation_kit import SlidexVisualCapability
+    from slidex.vision.solver import VisualChallengeSolver
+
+    progress = []
+
+    class SlowOcr:
+        def extract(self, **kwargs):
+            import time
+
+            time.sleep(0.05)
+            from slidex.ocr import OcrResult
+
+            return OcrResult(text="ok", provider="slow", confidence=1.0, language="en", boxes=[], metadata={})
+
+    async def run():
+        async def marker():
+            await asyncio.sleep(0.01)
+            progress.append("tick")
+
+        provider = SlidexVisualCapability(
+            visual_solver=VisualChallengeSolver(ocr_extractor=SlowOcr())
+        )
+        marker_task = asyncio.create_task(marker())
+        result = await provider.execute(
+            _request(
+                __import__("automation_core").capabilities,
+                challenge_type="ocr_text",
+                context="image_bytes",
+                image_bytes=b"fake",
+            ),
+            ExecutionContext(run_id="run-1", task_id="step-1", workflow_name="ocr"),
+        )
+        await marker_task
+        return result
+
+    result = asyncio.run(run())
+    assert result.success is True
+    assert progress == ["tick"]
+
+
 @pytest.mark.parametrize(
     ("parameters", "message"),
     [
