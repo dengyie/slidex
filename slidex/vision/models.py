@@ -6,7 +6,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
-SENSITIVE_TERMS = ("authorization", "cookie", "password", "secret", "token")
+SENSITIVE_TERMS = (
+    "authorization",
+    "cookie",
+    "password",
+    "secret",
+    "token",
+    "x5sec",
+    "x5secdata",
+)
 
 
 class ChallengeType(str, Enum):

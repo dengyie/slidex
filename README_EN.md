@@ -16,7 +16,6 @@
 
 Slidex has evolved from a slider CAPTCHA solver into the visual capability platform for the `automation-kit` ecosystem. The current revision unifies slider CAPTCHA solving, OCR, screenshot evidence, manual fallback sessions, and telemetry/artifact contracts, while keeping `SliderSolver` compatible for existing integrations.
 
-> Delivery status: the current revision passes repository-level automated verification and is ready for integration handoff; perform one real browser smoke test against the target site before production rollout.
 > Ecosystem development baseline: see [`automation-kit/docs/development.md`](https://github.com/dengyie/automation-kit/blob/main/docs/development.md).
 
 **Features**:
@@ -321,7 +320,7 @@ config = SlidexConfig(
 ### 11. Artifacts and automation-kit adapters
 
 ```python
-from slidex.integrations.automation_kit import to_action_result, to_artifacts, to_events
+from slidex.integrations.automation_kit import SlidexVisualCapability
 from slidex.vision import build_artifact_path, safe_artifact_metadata
 ```
 

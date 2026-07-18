@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.4.0] - 2026-07-18
+
+### Added
+- `SlidexVisualCapability`, the single automation-kit integration surface for
+  `visual.challenge` requests.
+- Strict validation for capability names, operations, contexts, required input,
+  provider names, metadata, ROI, page URLs, and positive `timeout_ms` values.
+- Cancellable timeout handling and a dedicated `capability.end` event.
+- Cross-repository contract CI against automation-kit `0.2.x` on Python 3.10
+  and 3.12, including dependencies required by the default remote API tests.
+
+### Changed
+- The automation-kit optional dependency now requires
+  `automation-kit>=0.2.0,<0.3.0`.
+- Sensitive metadata redaction now includes `x5sec` and `x5secdata` keys.
+
+### Removed
+- Legacy action, artifact, and task-event conversion helpers. Consumers now use
+  `CapabilityResult` directly through `SlidexVisualCapability`.
+
 ## [0.3.0] - 2026-06-13
 
 ### Added - Provider 系统重构 🎯

@@ -16,7 +16,6 @@
 
 Slidex 已从滑块验证码求解库升级为 `automation-kit` 生态的视觉能力平台。当前版本统一承接滑块验证码、OCR、截图识别证据、人工兜底会话和相关 telemetry/artifact 契约，同时保持 `SliderSolver` 对旧接入方式的兼容。
 
-> 交付状态：当前版本已经通过仓库级自动化测试，可用于集成与验收交付；上线前仍建议在目标站点完成一次真实浏览器冒烟验证。
 > 生态开发基线：见 [`automation-kit/docs/development.md`](https://github.com/dengyie/automation-kit/blob/main/docs/development.md)。
 
 **特性**：
@@ -415,10 +414,11 @@ artifact_path = build_artifact_path(
 metadata = safe_artifact_metadata({"token": "secret", "source": "unit"})
 ```
 
-安装 `automation-kit` extra 后，还可以把统一视觉结果直接转成 action result / artifact / event：
+安装 `automation-kit` extra 后，通过唯一的 capability provider 适配器返回
+`CapabilityResult`、artifact 和 `capability.end` 事件：
 
 ```python
-from slidex.integrations.automation_kit import to_action_result, to_artifacts, to_events
+from slidex.integrations.automation_kit import SlidexVisualCapability
 ```
 
 ---
@@ -426,21 +426,3 @@ from slidex.integrations.automation_kit import to_action_result, to_artifacts, t
 ## License
 
 MIT
-
----
-
-## 阶段总结
-
-### 阶段 1：生产交付收口
-
-- 完成情况：修复远程人工兜底安全边界、Provider 结果监听竞态、轨迹目录逃逸；补齐安全与回归测试；同步更新中英文 README 与 Provider 文档。
-- 决策记录：
-  - 问题：仓库内没有独立 `todo` 或阶段计划文件，但目标要求按阶段闭环推进。
-  - 选择：将“代码契约与交付文档一致性”定义为当前收口阶段，优先修复会直接影响交付可信度的文档失配。
-  - 理由：当前代码已具备可验证行为，最大的交付风险来自接口文档与实际实现不一致。
-  - 风险：尚未在真实第三方验证码站点执行端到端人工验收，首次上线仍需目标环境冒烟验证。
-- 审查问题与修复：
-  - 已修复：远程控制 session token 缺失鉴权、轨迹 `cookie_id` 路径穿越、控制页 token 日志泄漏、Provider 监听器过早卸载与异常路径未清理。
-  - 已修复：Provider 文档仍使用旧的同步 `validate_response()` / 旧监听生命周期示例。
-- todo 状态：仓库内未发现独立 todo 文件；已按现有开发文档完成当前可验证收口项。
-- 下一阶段风险：真实站点兼容性、部署环境依赖安装、人工兜底链路的浏览器级冒烟尚需目标环境确认。
