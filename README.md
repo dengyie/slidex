@@ -164,7 +164,7 @@ success, cookies = await solver.solve("https://...verification_url...")
 | 极验 GeeTest v3/v4 | `geetest` | ✅ 内置 |
 | 数美 Shumei | `shumei` | 📝 待实现 |
 | 顶象 Dingxiang | `dingxiang` | 📝 待实现 |
-| 自定义 | 你的 Provider | 🔌 [10 分钟实现](docs/PROVIDER_GUIDE.md) |
+| 自定义 | 你的 Provider | 🔌 [按生态总纲实现](https://github.com/dengyie/automation-kit/blob/main/docs/development.md) |
 
 ---
 
@@ -241,7 +241,8 @@ SliderSolver.register_provider("my-custom", MyProvider)
 solver = SliderSolver(provider="my-custom")
 ```
 
-详见 [Provider 开发指南](docs/PROVIDER_GUIDE.md)。
+Provider 的公共边界、取消能力、资源所有权和 automation-kit 接入规范统一维护在
+[生态开发总纲](https://github.com/dengyie/automation-kit/blob/main/docs/development.md)。
 
 ### 5. CLI 调用（适合 TypeScript/Node 子进程调用）
 

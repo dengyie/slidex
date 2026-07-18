@@ -15,6 +15,9 @@
 - The automation-kit optional dependency now requires
   `automation-kit>=0.2.0,<0.3.0`.
 - Sensitive metadata redaction now includes `x5sec` and `x5secdata` keys.
+- Provider architecture and authoring rules are now maintained in the
+  automation-kit ecosystem development baseline; standalone duplicate guides
+  are retired.
 
 ### Removed
 - Legacy action, artifact, and task-event conversion helpers. Consumers now use
@@ -51,8 +54,7 @@
 - Legacy 模式（`selectors=`）保持完全向后兼容
 
 ### Documentation
-- 新增 `docs/ARCHITECTURE.md` — Provider 架构设计文档
-- 新增 `docs/PROVIDER_GUIDE.md` — Provider 开发指南（8 步实现 + 调试技巧）
+- 新增 Provider 架构与开发指南（现已并入 automation-kit 生态开发总纲）
 - README 更新：Provider 快速开始、供应商支持表、自定义 Provider 示例
 - 新增 `tests/test_providers.py` — Provider 系统测试（10 个测试用例）
 

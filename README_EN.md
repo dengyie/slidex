@@ -139,7 +139,7 @@ result = await executor.aexecute(
 | GeeTest v3/v4 | `geetest` | ✅ Built-in |
 | Shumei | `shumei` | 📝 TODO |
 | Dingxiang | `dingxiang` | 📝 TODO |
-| Custom | Your provider | 🔌 [10-min guide](docs/PROVIDER_GUIDE.md) |
+| Custom | Your provider | 🔌 [Use the ecosystem baseline](https://github.com/dengyie/automation-kit/blob/main/docs/development.md) |
 
 ---
 
@@ -212,7 +212,9 @@ SliderSolver.register_provider("my-custom", MyProvider)
 solver = SliderSolver(provider="my-custom")
 ```
 
-See [Provider Guide](docs/PROVIDER_GUIDE.md) for details.
+The ecosystem baseline documents the public provider boundary, cancellation,
+resource ownership, and automation-kit integration contract:
+[development guide](https://github.com/dengyie/automation-kit/blob/main/docs/development.md).
 
 ### 5. CLI (for TypeScript/Node subprocess)
 
