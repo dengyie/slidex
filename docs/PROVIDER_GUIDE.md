@@ -557,7 +557,7 @@ print(f"Detected: {provider.name if provider else 'None'}")
 
 ## 参考资料
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) — Provider 架构设计
+- [automation-kit 平台开发总纲](https://github.com/dengyie/automation-kit/blob/main/docs/development.md) — 跨仓架构、能力协议与开发门禁
 - [slidex/providers/__init__.py](../slidex/providers/__init__.py) — Provider 基类
 - [slidex/providers/aliyun.py](../slidex/providers/aliyun.py) — Aliyun 参考实现
 - [slidex/providers/geetest.py](../slidex/providers/geetest.py) — GeeTest 参考实现

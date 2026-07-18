@@ -17,7 +17,7 @@
 Slidex has evolved from a slider CAPTCHA solver into the visual capability platform for the `automation-kit` ecosystem. The current revision unifies slider CAPTCHA solving, OCR, screenshot evidence, manual fallback sessions, and telemetry/artifact contracts, while keeping `SliderSolver` compatible for existing integrations.
 
 > Delivery status: the current revision passes repository-level automated verification and is ready for integration handoff; perform one real browser smoke test against the target site before production rollout.
-> Design doc: see [automation-kit vision platform design](docs/automation-kit-vision-platform.md).
+> Ecosystem development baseline: see [`automation-kit/docs/development.md`](https://github.com/dengyie/automation-kit/blob/main/docs/development.md).
 
 **Features**:
 - 🎯 **Multi-provider support** — Built-in Aliyun NoCaptcha, GeeTest adapters with auto-detection
@@ -92,6 +92,34 @@ extractor = FakeOcrExtractor(text="seat-a12", confidence=0.95, language="en")
 result = extractor.extract(
     image_path="captcha.png",
     roi={"x": 10, "y": 20, "width": 100, "height": 32},
+)
+```
+
+### automation-kit Capability Adapter
+
+```python
+from automation_core.capabilities import (
+    CapabilityExecutor,
+    CapabilityRegistry,
+    CapabilityRequest,
+)
+from slidex.integrations.automation_kit import SlidexVisualCapability
+
+registry = CapabilityRegistry()
+registry.register(SlidexVisualCapability())
+executor = CapabilityExecutor(registry)
+
+result = await executor.aexecute(
+    CapabilityRequest(
+        capability="visual.challenge",
+        operation="solve",
+        parameters={
+            "challenge_type": "ocr_text",
+            "context": "image_bytes",
+            "image_bytes": b"...png bytes...",
+        },
+        metadata={"run_id": "run-1", "task_id": "visual-1"},
+    )
 )
 ```
 

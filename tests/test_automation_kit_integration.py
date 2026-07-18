@@ -88,3 +88,77 @@ def test_import_error_helper_message(monkeypatch):
         module.to_action_result(_result(), prefer_native=True)
 
     monkeypatch.setattr(module, "_import_automation_kit_types", original)
+
+
+def test_slidex_visual_capability_maps_generic_request_to_visual_solver():
+    pytest.importorskip("automation_core")
+    from automation_core import capabilities
+    from slidex.integrations.automation_kit import SlidexVisualCapability
+
+    class FakeVisualSolver:
+        def __init__(self):
+            self.requests = []
+
+        async def solve(self, request):
+            self.requests.append(request)
+            return VisualChallengeResult(
+                success=True,
+                challenge_type=request.challenge_type,
+                provider="fake-ocr",
+                confidence=0.95,
+                metadata={"text": "dianping"},
+            )
+
+    solver = FakeVisualSolver()
+    provider = SlidexVisualCapability(visual_solver=solver)
+    request = capabilities.CapabilityRequest(
+        capability="visual.challenge",
+        operation="solve",
+        parameters={
+            "challenge_type": "image_text",
+            "context": "android_screenshot_bytes",
+            "image_bytes": b"fake-png",
+            "provider": "auto",
+        },
+        metadata={"run_id": "run-1", "task_id": "task-1"},
+    )
+
+    result = __import__("asyncio").run(provider.aexecute(request))
+
+    assert provider.manifest.name == "visual.challenge"
+    assert solver.requests[0].challenge_type == ChallengeType.IMAGE_TEXT
+    assert solver.requests[0].image_bytes == b"fake-png"
+    assert result.success is True
+    assert result.provider == "slidex"
+    assert result.data["metadata"]["text"] == "dianping"
+    assert result.metadata["visual_provider"] == "fake-ocr"
+
+
+def test_slidex_visual_capability_preserves_artifacts_and_events():
+    pytest.importorskip("automation_core")
+    from automation_core import capabilities
+    from slidex.integrations.automation_kit import SlidexVisualCapability
+
+    class FakeVisualSolver:
+        async def solve(self, request):
+            return _result()
+
+    request = capabilities.CapabilityRequest(
+        capability="visual.challenge",
+        operation="solve",
+        parameters={
+            "challenge_type": "ocr_text",
+            "context": "image_bytes",
+            "image_bytes": b"fake",
+        },
+        metadata={"task_id": "task-1"},
+    )
+
+    result = __import__("asyncio").run(
+        SlidexVisualCapability(visual_solver=FakeVisualSolver()).aexecute(request)
+    )
+
+    assert result.artifacts[0].artifact_type == "ocr_result"
+    assert result.artifacts[0].metadata["token"] == "[redacted]"
+    assert result.events[-1].event_type == "task.end"
+    assert result.events[-1].task_id == "task-1"

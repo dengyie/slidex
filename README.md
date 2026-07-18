@@ -17,7 +17,7 @@
 Slidex 已从滑块验证码求解库升级为 `automation-kit` 生态的视觉能力平台。当前版本统一承接滑块验证码、OCR、截图识别证据、人工兜底会话和相关 telemetry/artifact 契约，同时保持 `SliderSolver` 对旧接入方式的兼容。
 
 > 交付状态：当前版本已经通过仓库级自动化测试，可用于集成与验收交付；上线前仍建议在目标站点完成一次真实浏览器冒烟验证。
-> 设计文档：见 [automation-kit 视觉平台设计](docs/automation-kit-vision-platform.md)。
+> 生态开发基线：见 [`automation-kit/docs/development.md`](https://github.com/dengyie/automation-kit/blob/main/docs/development.md)。
 
 **特性**：
 - 🎯 **多供应商支持** — 内置 Aliyun NoCaptcha、GeeTest 适配器，自动检测
@@ -102,6 +102,34 @@ extractor = FakeOcrExtractor(text="A12", confidence=0.95, language="zh-CN")
 result = extractor.extract(
     image_bytes=b"...png bytes...",
     roi={"x": 10, "y": 20, "width": 100, "height": 32},
+)
+```
+
+### automation-kit 能力适配
+
+```python
+from automation_core.capabilities import (
+    CapabilityExecutor,
+    CapabilityRegistry,
+    CapabilityRequest,
+)
+from slidex.integrations.automation_kit import SlidexVisualCapability
+
+registry = CapabilityRegistry()
+registry.register(SlidexVisualCapability())
+executor = CapabilityExecutor(registry)
+
+result = await executor.aexecute(
+    CapabilityRequest(
+        capability="visual.challenge",
+        operation="solve",
+        parameters={
+            "challenge_type": "ocr_text",
+            "context": "image_bytes",
+            "image_bytes": b"...png bytes...",
+        },
+        metadata={"run_id": "run-1", "task_id": "visual-1"},
+    )
 )
 ```
 
