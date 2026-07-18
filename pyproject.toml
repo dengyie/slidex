@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "slidex"
-version = "0.4.0"
+version = "0.5.0"
 description = "专业滑块验证码求解库 | Professional Slider CAPTCHA Solver — Multi-provider auto-detection, CDP mode, plugin-extensible"
 requires-python = ">=3.10"
 license = "MIT"
@@ -30,7 +30,7 @@ dependencies = [
 
 [project.optional-dependencies]
 automation-kit = [
-    "automation-kit>=0.2.0,<0.3.0",
+    "automation-kit>=0.3.0,<0.4.0",
 ]
 remote = [
     "fastapi>=0.111.0",

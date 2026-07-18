@@ -19,12 +19,12 @@ def _import_automation_kit_types() -> Tuple[Any, Any, Any, Any, Any]:
             CapabilityManifest,
             CapabilityProtocolError,
             CapabilityResult,
+            CapabilityExecutionProfile,
         )
         from automation_core.drivers import ArtifactHandle
-        from automation_core.events import CapabilityEndEvent
     except ImportError as exc:
         raise ImportError(
-            "automation-kit>=0.2.0 is required. Install slidex[automation-kit] "
+            "automation-kit>=0.3.0 is required. Install slidex[automation-kit] "
             "to use SlidexVisualCapability."
         ) from exc
     return (
@@ -32,7 +32,7 @@ def _import_automation_kit_types() -> Tuple[Any, Any, Any, Any, Any]:
         CapabilityProtocolError,
         CapabilityResult,
         ArtifactHandle,
-        CapabilityEndEvent,
+        CapabilityExecutionProfile,
     )
 
 
@@ -61,17 +61,38 @@ class SlidexVisualCapability:
             version="1.0.0",
             operations=("solve",),
             platforms=("web", "android", "image"),
+            default_cancellation="cooperative",
             metadata={"implementation": "slidex"},
         )
         self.visual_solver = visual_solver or VisualChallengeSolver()
 
-    async def aexecute(self, request):
+    def execution_profile(self, request):
+        (
+            _,
+            CapabilityProtocolError,
+            _,
+            _,
+            CapabilityExecutionProfile,
+        ) = _import_automation_kit_types()
+        parameters = dict(getattr(request, "parameters", {}) or {})
+        context_name = parameters.get("context")
+        challenge_type = parameters.get("challenge_type")
+        if context_name in {"image_bytes", "android_screenshot_bytes", "image_path"} or (
+            challenge_type in {"ocr_text", "image_text"}
+        ):
+            return CapabilityExecutionProfile(
+                cancellation="unsupported",
+                blocking=True,
+            )
+        return CapabilityExecutionProfile(cancellation="cooperative")
+
+    async def execute(self, request, context):
         (
             _,
             CapabilityProtocolError,
             CapabilityResult,
             ArtifactHandle,
-            CapabilityEndEvent,
+            _,
         ) = _import_automation_kit_types()
 
         if request.capability != self.manifest.name:
@@ -90,7 +111,7 @@ class SlidexVisualCapability:
             "challenge_type",
             CapabilityProtocolError,
         )
-        context = _enum_parameter(
+        vision_context = _enum_parameter(
             VisionContext,
             parameters,
             "context",
@@ -113,16 +134,18 @@ class SlidexVisualCapability:
         if not isinstance(visual_metadata, dict):
             raise CapabilityProtocolError("metadata must be a dictionary")
         visual_metadata = dict(visual_metadata)
-        for key in ("run_id", "task_id", "correlation_id"):
-            if request.metadata.get(key) is not None:
-                visual_metadata[key] = request.metadata[key]
+        visual_metadata["run_id"] = context.run_id
+        if context.task_id is not None:
+            visual_metadata["task_id"] = context.task_id
+        if context.correlation_id is not None:
+            visual_metadata["correlation_id"] = context.correlation_id
 
         image_bytes = parameters.get("image_bytes")
         image_path = parameters.get("image_path")
         page = parameters.get("page")
         cdp_endpoint = parameters.get("cdp_endpoint")
 
-        if context in {
+        if vision_context in {
             VisionContext.IMAGE_BYTES,
             VisionContext.ANDROID_SCREENSHOT_BYTES,
         }:
@@ -131,17 +154,17 @@ class SlidexVisualCapability:
                     "image_bytes must be non-empty bytes for the selected context"
                 )
             image_bytes = bytes(image_bytes)
-        elif context == VisionContext.IMAGE_PATH:
+        elif vision_context == VisionContext.IMAGE_PATH:
             if not isinstance(image_path, (str, Path)) or not str(image_path).strip():
                 raise CapabilityProtocolError(
                     "image_path is required for image_path context"
                 )
             image_path = Path(image_path)
-        elif context == VisionContext.PLAYWRIGHT_PAGE and page is None:
+        elif vision_context == VisionContext.PLAYWRIGHT_PAGE and page is None:
             raise CapabilityProtocolError(
                 "page is required for playwright_page context"
             )
-        elif context == VisionContext.CDP:
+        elif vision_context == VisionContext.CDP:
             cdp_endpoint = _non_blank_string(
                 cdp_endpoint,
                 "cdp_endpoint",
@@ -157,7 +180,7 @@ class SlidexVisualCapability:
 
         visual_request = VisualChallengeRequest(
             challenge_type=challenge_type,
-            context=context,
+            context=vision_context,
             page=page,
             cdp_endpoint=cdp_endpoint,
             page_url=page_url,
@@ -170,54 +193,26 @@ class SlidexVisualCapability:
         )
 
         try:
-            visual_result = await asyncio.wait_for(
-                self.visual_solver.solve(visual_request),
-                timeout=timeout_ms / 1000,
-            )
-        except asyncio.TimeoutError:
-            result = CapabilityResult(
-                success=False,
-                provider="slidex",
-                error_code="timeout",
-                retryable=True,
-                metadata={"capability_version": self.manifest.version},
-            )
-        else:
-            result = CapabilityResult(
-                success=visual_result.success,
-                provider="slidex",
-                data=visual_result.to_dict(),
-                error_code=visual_result.error_code,
-                retryable=visual_result.retryable,
-                artifacts=[
-                    ArtifactHandle(
-                        artifact_type=artifact.artifact_type,
-                        path=artifact.path,
-                        metadata=redact_sensitive(artifact.metadata),
-                    )
-                    for artifact in visual_result.artifacts
-                ],
-                metadata={
-                    "capability_version": self.manifest.version,
-                    "visual_provider": visual_result.provider,
-                },
-            )
+            visual_result = await self.visual_solver.solve(visual_request)
+        except asyncio.CancelledError:
+            raise
 
-        capability_event = CapabilityEndEvent(
-            capability=request.capability,
-            operation=request.operation,
-            provider=result.provider,
-            success=result.success,
-            task_id=request.metadata.get("task_id"),
-            error_code=result.error_code,
-        ).to_envelope()
         return CapabilityResult(
-            success=result.success,
-            provider=result.provider,
-            data=result.data,
-            error_code=result.error_code,
-            retryable=result.retryable,
-            artifacts=result.artifacts,
-            events=[capability_event],
-            metadata=result.metadata,
+            success=visual_result.success,
+            provider="slidex",
+            data=visual_result.to_dict(),
+            error_code=visual_result.error_code,
+            retryable=visual_result.retryable,
+            artifacts=[
+                ArtifactHandle(
+                    artifact_type=artifact.artifact_type,
+                    path=artifact.path,
+                    metadata=redact_sensitive(artifact.metadata),
+                )
+                for artifact in visual_result.artifacts
+            ],
+            metadata={
+                "capability_version": self.manifest.version,
+                "visual_provider": visual_result.provider,
+            },
         )

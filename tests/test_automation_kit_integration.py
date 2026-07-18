@@ -28,7 +28,17 @@ def _request(capabilities, **parameters):
         capability="visual.challenge",
         operation="solve",
         parameters=parameters,
-        metadata={"run_id": "run-1", "task_id": "task-1"},
+    )
+
+
+def _context():
+    from automation_core.execution import ExecutionContext
+
+    return ExecutionContext(
+        run_id="run-1",
+        task_id="task-1",
+        workflow_name="slidex-contract",
+        correlation_id="trace-1",
     )
 
 
@@ -54,7 +64,7 @@ def test_slidex_visual_capability_maps_generic_request_to_visual_solver():
     solver = FakeVisualSolver()
     provider = SlidexVisualCapability(visual_solver=solver)
     result = asyncio.run(
-        provider.aexecute(
+        provider.execute(
             _request(
                 capabilities,
                 challenge_type="image_text",
@@ -62,6 +72,8 @@ def test_slidex_visual_capability_maps_generic_request_to_visual_solver():
                 image_bytes=b"fake-png",
                 provider="auto",
             )
+            ,
+            _context(),
         )
     )
 
@@ -74,7 +86,7 @@ def test_slidex_visual_capability_maps_generic_request_to_visual_solver():
     assert result.data["metadata"]["text"] == "dianping"
 
 
-def test_slidex_visual_capability_preserves_artifacts_and_emits_capability_end():
+def test_slidex_visual_capability_preserves_artifacts_and_redacts_sensitive_fields():
     pytest.importorskip("automation_core")
     from automation_core import capabilities
     from slidex.integrations.automation_kit import SlidexVisualCapability
@@ -84,54 +96,40 @@ def test_slidex_visual_capability_preserves_artifacts_and_emits_capability_end()
             return _result()
 
     result = asyncio.run(
-        SlidexVisualCapability(visual_solver=FakeVisualSolver()).aexecute(
+        SlidexVisualCapability(visual_solver=FakeVisualSolver()).execute(
             _request(
                 capabilities,
                 challenge_type="ocr_text",
                 context="image_bytes",
                 image_bytes=b"fake",
             )
+            ,
+            _context(),
         )
     )
 
     assert result.artifacts[0].artifact_type == "ocr_result"
     assert result.artifacts[0].metadata["token"] == "[redacted]"
     assert result.data["metadata"]["x5sec"] == "[redacted]"
-    assert result.events[-1].event_type == "capability.end"
-    assert result.events[-1].task_id == "task-1"
-    assert result.events[-1].payload["capability"] == "visual.challenge"
 
 
-def test_slidex_visual_capability_timeout_cancels_solver():
+def test_slidex_visual_capability_profile_marks_ocr_as_unsupported_cancellation():
     pytest.importorskip("automation_core")
     from automation_core import capabilities
     from slidex.integrations.automation_kit import SlidexVisualCapability
 
-    cancelled = []
-
-    class SlowVisualSolver:
-        async def solve(self, request):
-            try:
-                await asyncio.sleep(1)
-            finally:
-                cancelled.append(True)
-
-    result = asyncio.run(
-        SlidexVisualCapability(visual_solver=SlowVisualSolver()).aexecute(
-            _request(
-                capabilities,
-                challenge_type="ocr_text",
-                context="image_bytes",
-                image_bytes=b"fake",
-                timeout_ms=1,
-            )
+    provider = SlidexVisualCapability()
+    profile = provider.execution_profile(
+        _request(
+            capabilities,
+            challenge_type="ocr_text",
+            context="image_bytes",
+            image_bytes=b"fake",
         )
     )
 
-    assert result.success is False
-    assert result.error_code == "timeout"
-    assert result.retryable is True
-    assert cancelled == [True]
+    assert profile.cancellation == "unsupported"
+    assert profile.blocking is True
 
 
 @pytest.mark.parametrize(
@@ -167,46 +165,9 @@ def test_slidex_visual_capability_rejects_invalid_requests(parameters, message):
     from slidex.integrations.automation_kit import SlidexVisualCapability
 
     with pytest.raises(capabilities.CapabilityProtocolError, match=message):
-        asyncio.run(SlidexVisualCapability().aexecute(_request(capabilities, **parameters)))
-
-
-def test_capability_events_do_not_duplicate_managed_workflow_task_end():
-    pytest.importorskip("automation_core")
-    from automation_core import capabilities
-    from automation_core.drivers import SessionInfo
-    from automation_runner.workflows import ManagedWorkflow, WorkflowResult
-    from slidex.integrations.automation_kit import SlidexVisualCapability
-
-    class FakeSession:
-        info = SessionInfo(driver_name="fake", platform="web", identifier="task-1")
-
-    class FakeVisualSolver:
-        async def solve(self, request):
-            return _result()
-
-    capability_result = asyncio.run(
-        SlidexVisualCapability(visual_solver=FakeVisualSolver()).aexecute(
-            _request(
-                capabilities,
-                challenge_type="ocr_text",
-                context="image_bytes",
-                image_bytes=b"fake",
+        asyncio.run(
+            SlidexVisualCapability().execute(
+                _request(capabilities, **parameters),
+                _context(),
             )
         )
-    )
-    workflow = ManagedWorkflow(
-        name="demo",
-        session_factory=FakeSession,
-        run_fn=lambda session: WorkflowResult(
-            session=session.info,
-            success=True,
-            actions=[],
-            artifacts=capability_result.artifacts,
-            events=capability_result.events,
-        ),
-    )
-
-    result = workflow.run()
-
-    assert [event.event_type for event in result.events].count("task.end") == 1
-    assert [event.event_type for event in result.events].count("capability.end") == 1
