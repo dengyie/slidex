@@ -23,6 +23,13 @@ class ChallengeType(str, Enum):
     IMAGE_TEXT = "image_text"
     VISUAL_ELEMENT = "visual_element"
     MANUAL_FALLBACK = "manual_fallback"
+    # HOLD — a "press-and-hold" human-presence challenge (e.g. Outlook
+    # signup's iframe[title="验证质询"]). Bridged through slidex as a
+    # CDP/Playwright-page challenge so the main register context is not
+    # restarted. The default VisualChallengeSolver returns
+    # unsupported_challenge_type for HOLD; providers that handle HOLD
+    # register a dedicated hold solver. See outlook_captcha.py.
+    HOLD = "hold"
 
 
 class VisionContext(str, Enum):
