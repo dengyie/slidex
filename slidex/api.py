@@ -12,10 +12,13 @@ import json
 import os
 from loguru import logger
 
+from slidex.config import SlidexConfig
 from slidex.remote import captcha_controller
 from slidex._trajectory_pool import SliderTrajectoryPool
 
-trajectory_pool = SliderTrajectoryPool()
+# 与 solver 同源：轨迹池目录跟随 SlidexConfig（含 SLIDEX_TRAJ_POOL_DIR 等环境变量），
+# 避免人工面板提交的轨迹落到与 solver 读取不一致的目录。
+trajectory_pool = SliderTrajectoryPool(SlidexConfig.from_env().get_trajectory_dir())
 
 # 创建路由器
 router = APIRouter(prefix="/api/captcha", tags=["captcha"])

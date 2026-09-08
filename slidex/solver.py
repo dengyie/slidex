@@ -1,4 +1,4 @@
-import asyncio, json, os, re, time, random, shutil, psutil, uuid
+import asyncio, json, os, re, threading, time, random, shutil, psutil, uuid
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List, Callable
 from urllib.parse import urlparse, parse_qs
@@ -12,7 +12,7 @@ from slidex._trajectory_pool import SliderTrajectoryPool
 from slidex.config import SlidexConfig
 from slidex._provider_mixin import ProviderSolverMixin
 from slidex._chromium_lifecycle import (
-    ensure_previous_chromium_closed,
+    ensure_profile_chromium_closed,
     record_chromium_pid,
     find_chromium_pid_by_user_data_dir,
 )
@@ -47,6 +47,14 @@ class SliderSolver(ProviderSolverMixin):
     """
 
     MAX_RETRIES = 3
+    OFFSET_CORRECTION_DEFAULT = -35
+    OFFSET_CORRECTION_LIMITS = (-100, 100)
+    OFFSET_CONFIRM_TOLERANCE = 5
+    PROFILE_LOCK_POLL_INTERVAL = 0.2
+
+    # 同 profile（同账号浏览器目录）互斥：进程内串行化，防止并发求解互踩
+    _profile_locks: Dict[str, asyncio.Lock] = {}
+    _profile_locks_guard = threading.Lock()
 
     def __init__(self, cookie_id="default", cookies_str="", headless=True, proxy=None,
                  trajectory_mode: str = "auto",
@@ -86,6 +94,7 @@ class SliderSolver(ProviderSolverMixin):
         self._result_event = asyncio.Event()
         self._slide_code = None
         self._calibration = self._load_calibration()
+        self._pending_offset_correction: Optional[int] = None
         self._telemetry_run_id = uuid.uuid4().hex
         self._telemetry_events: List[Dict] = []
         self._telemetry_summary: Dict[str, object] = {
@@ -254,6 +263,17 @@ class SliderSolver(ProviderSolverMixin):
         except Exception as e:
             logger.debug(f"[{self.pure_user_id}] telemetry persist failed: {e}")
 
+    def _write_telemetry_summary_file(self, payload: Dict[str, object]):
+        """per-run 摘要落盘，使 VisionArtifact(artifacts=telemetry/{run_id}.json) 契约成立"""
+        try:
+            telemetry_dir = Path(self._config.get_telemetry_dir())
+            telemetry_dir.mkdir(parents=True, exist_ok=True)
+            path = telemetry_dir / f"{self._telemetry_run_id}.json"
+            with path.open("w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.debug(f"[{self.pure_user_id}] telemetry summary persist failed: {e}")
+
     def _finalize_telemetry(
         self,
         *,
@@ -287,10 +307,39 @@ class SliderSolver(ProviderSolverMixin):
                 logger.debug(f"[{self.pure_user_id}] summary callback error: {e}")
 
         self._write_telemetry_record(payload)
+        self._write_telemetry_summary_file(payload)
         return dict(self._telemetry_summary)
 
     def get_telemetry_summary(self) -> Dict[str, object]:
         return dict(self._telemetry_summary)
+
+    # ════════════════════════════════════════════════════════════
+    #  同 profile 并发治理
+    # ════════════════════════════════════════════════════════════
+    @classmethod
+    def _get_profile_lock(cls, profile_dir: str) -> asyncio.Lock:
+        with cls._profile_locks_guard:
+            lock = cls._profile_locks.get(profile_dir)
+            if lock is None:
+                lock = asyncio.Lock()
+                cls._profile_locks[profile_dir] = lock
+            return lock
+
+    async def _acquire_profile_lock(self, profile_dir: str) -> bool:
+        """有界等待同 profile 互斥锁；超时返回 False（与 concurrency_manager.wait_for_slot 同语义）。"""
+        lock = self._get_profile_lock(profile_dir)
+        deadline = time.monotonic() + max(1.0, float(self._config.wait_timeout))
+        while lock.locked() and time.monotonic() < deadline:
+            await asyncio.sleep(self.PROFILE_LOCK_POLL_INTERVAL)
+        if lock.locked():
+            return False
+        await lock.acquire()
+        return True
+
+    def _release_profile_lock(self, profile_dir: str) -> None:
+        lock = self._get_profile_lock(profile_dir)
+        if lock.locked():
+            lock.release()
 
     # ════════════════════════════════════════════════════════════
     #  主求解入口
@@ -302,6 +351,19 @@ class SliderSolver(ProviderSolverMixin):
         self._emit_telemetry_event("solve_started", mode="browser", verify_url=verify_url)
         self._emit_step("solve", "solve_started", "started", mode="browser", verify_url=verify_url)
         logger.info(f"[{self.pure_user_id}] solving (mode={self.trajectory_mode})...")
+        if not await self._acquire_profile_lock(str(self.profile_dir)):
+            logger.warning(
+                f"[{self.pure_user_id}] same-profile solve still running, "
+                f"gave up after {self._config.wait_timeout}s"
+            )
+            self._emit_step("solve", "profile_lock", "failed", reason="same_profile_busy")
+            self._finalize_telemetry(
+                success=False,
+                status="profile_lock_timeout",
+                cookies=None,
+                extra={"failure_reason": "profile_lock_timeout"},
+            )
+            return False, None
         try:
             await self._init_browser()
             await self._load_page(verify_url)
@@ -326,6 +388,7 @@ class SliderSolver(ProviderSolverMixin):
             return success, cookies
         finally:
             await self._close()
+            self._release_profile_lock(str(self.profile_dir))
 
     async def solve_on_existing_page(
         self,
@@ -685,11 +748,7 @@ class SliderSolver(ProviderSolverMixin):
                 logger.info(f"[{self.pure_user_id}] image match ok: {img_dist:.0f}px (ratio={ratio:.2f})")
                 return img_dist
             else:
-                new_offset = int(img_dist - js_dist)
-                self._calibration["offset_correction"] = new_offset
-                self._save_calibration()
-                logger.warning(f"[{self.pure_user_id}] image ({img_dist:.0f}) vs JS ({js_dist:.0f}) "
-                               f"mismatch (ratio={ratio:.2f}), calibrated offset={new_offset}, using JS")
+                self._register_offset_mismatch(img_dist, js_dist, ratio)
                 self._emit_telemetry_event(
                     "distance_detected",
                     distance=js_dist,
@@ -772,6 +831,26 @@ class SliderSolver(ProviderSolverMixin):
     # ════════════════════════════════════════════════════════════
     #  校准管理
     # ════════════════════════════════════════════════════════════
+    def _register_offset_mismatch(self, img_dist: float, js_dist: float, ratio: float) -> None:
+        """图像/JS 距离失配时学习 offset：连续两次一致才持久化，且限制在合理带宽内，
+        防止单次异常（布局变体/DPR 抖动）把落盘校准永久带歪。"""
+        low, high = self.OFFSET_CORRECTION_LIMITS
+        candidate = max(low, min(high, int(img_dist - js_dist)))
+        if (
+            self._pending_offset_correction is not None
+            and abs(candidate - self._pending_offset_correction) <= self.OFFSET_CONFIRM_TOLERANCE
+        ):
+            self._calibration["offset_correction"] = candidate
+            self._save_calibration()
+            self._pending_offset_correction = None
+            logger.warning(f"[{self.pure_user_id}] image ({img_dist:.0f}) vs JS ({js_dist:.0f}) "
+                           f"mismatch (ratio={ratio:.2f}), calibrated offset={candidate}, using JS")
+        else:
+            self._pending_offset_correction = candidate
+            logger.warning(f"[{self.pure_user_id}] image ({img_dist:.0f}) vs JS ({js_dist:.0f}) "
+                           f"mismatch (ratio={ratio:.2f}), offset candidate={candidate} "
+                           "pending confirmation, using JS")
+
     def _calibration_path(self):
         return Path(self._config.get_calibration_dir()) / self.pure_user_id / "calibration.json"
 
@@ -780,10 +859,19 @@ class SliderSolver(ProviderSolverMixin):
         if p.exists():
             try:
                 with open(p, "r") as f:
-                    return json.load(f)
+                    data = json.load(f)
+                raw = int(data.get("offset_correction", self.OFFSET_CORRECTION_DEFAULT))
+                low, high = self.OFFSET_CORRECTION_LIMITS
+                if not (low <= raw <= high):
+                    logger.warning(
+                        f"[{self.pure_user_id}] calibration offset {raw} out of "
+                        f"{self.OFFSET_CORRECTION_LIMITS}, resetting to default"
+                    )
+                    data["offset_correction"] = self.OFFSET_CORRECTION_DEFAULT
+                return data
             except Exception:
                 pass
-        return {"offset_correction": -35}
+        return {"offset_correction": self.OFFSET_CORRECTION_DEFAULT}
 
     def _save_calibration(self):
         p = self._calibration_path()
@@ -807,30 +895,18 @@ class SliderSolver(ProviderSolverMixin):
         except Exception:
             base_ts = int(time.time() * 1000)
 
+        if not points:
+            return False
+
         try:
-            total_ms = 0
-            px, py = sx, sy
-            for i, (dx, dy, delay_ms) in enumerate(points):
-                tx, ty = sx + dx, sy + dy
-                mx, my = tx - px, ty - py
-                total_ms += delay_ms
-
-                event_type = "mouseMoved"
-                if i == 0 and abs(dx) < 0.5 and abs(dy) < 0.5:
-                    event_type = "mouseMoved"
-                elif i == len(points) - 1:
-                    continue
-
-                await cdp.send("Input.dispatchMouseEvent", {
-                    "type": event_type, "x": tx, "y": ty,
-                    "movementX": mx, "movementY": my,
-                    "pointerType": "mouse",
-                    "timestamp": base_ts + int(total_ms),
-                })
-                px, py = tx, ty
-                if delay_ms > 0:
-                    await asyncio.sleep(delay_ms / 1000.0)
-
+            # 事件顺序必须与真实拖拽一致：hover → pressed → moved×N → released；
+            # 末点录制自 up 事件，是释放位，不当 move 派发。
+            await cdp.send("Input.dispatchMouseEvent", {
+                "type": "mouseMoved", "x": sx, "y": sy,
+                "movementX": 0, "movementY": 0,
+                "pointerType": "mouse",
+                "timestamp": base_ts,
+            })
             await cdp.send("Input.dispatchMouseEvent", {
                 "type": "mousePressed", "x": sx, "y": sy,
                 "button": "left", "clickCount": 1,
@@ -838,8 +914,27 @@ class SliderSolver(ProviderSolverMixin):
                 "timestamp": base_ts,
             })
 
+            total_ms = 0
+            px, py = sx, sy
+            for i, (dx, dy, delay_ms) in enumerate(points):
+                if delay_ms > 0:
+                    await asyncio.sleep(delay_ms / 1000.0)
+                total_ms += delay_ms
+                if i == len(points) - 1:
+                    break
+                tx, ty = sx + dx, sy + dy
+                if abs(tx - px) < 0.5 and abs(ty - py) < 0.5:
+                    continue
+                await cdp.send("Input.dispatchMouseEvent", {
+                    "type": "mouseMoved", "x": tx, "y": ty,
+                    "movementX": tx - px, "movementY": ty - py,
+                    "pointerType": "mouse",
+                    "timestamp": base_ts + int(total_ms),
+                })
+                px, py = tx, ty
+
             await cdp.send("Input.dispatchMouseEvent", {
-                "type": "mouseReleased", "x": px, "y": py,
+                "type": "mouseReleased", "x": sx + points[-1][0], "y": sy + points[-1][1],
                 "button": "left", "clickCount": 1,
                 "pointerType": "mouse",
                 "timestamp": base_ts + int(total_ms),
@@ -874,7 +969,7 @@ class SliderSolver(ProviderSolverMixin):
     # ════════════════════════════════════════════════════════════
     async def _init_browser(self):
         self._emit_step("browser", "browser_init", "started", headless=self.headless, proxy_enabled=bool(self.proxy))
-        await ensure_previous_chromium_closed()
+        await ensure_profile_chromium_closed(str(self.profile_dir))
         self.profile_dir.mkdir(parents=True, exist_ok=True)
 
         pw = await async_playwright().start()

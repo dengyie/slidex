@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.5.1] - 2026-09-06
+
+Production code review fixes (full-review pass, 2026-09-06).
+
+### Fixed
+- `_replay_recorded_cdp` dispatched `mouseMoved` events before `mousePressed`,
+  so recorded-trajectory replay over CDP never produced a drag. Replay now
+  dispatches hover → press → moves → release at the recorded final position.
+- Chromium cleanup before browser launch is scoped to the solver's own
+  `user_data_dir` via the new `ensure_profile_chromium_closed()`. Concurrent
+  solvers no longer kill each other's browser through the global last-PID
+  registry (`ensure_previous_chromium_closed()` kept for backward compat).
+- Chromium process-name matching now normalizes the Windows `.exe` suffix
+  (`chrome.exe` previously never matched `CHROMIUM_NAMES`).
+- `SliderTrajectoryPool._touch_last_used` no longer raises on unwritable pool
+  directories, restoring the documented degrade-to-generated fallback.
+- Distance calibration (`offset_correction`) can no longer be poisoned by a
+  single image/JS mismatch: updates persist only after two consecutive
+  agreeing candidates and are clamped to ±100px; out-of-band values loaded
+  from disk reset to the default.
+- `slidex.api` trajectory pool now follows `SlidexConfig.from_env()`
+  (incl. `SLIDEX_TRAJ_POOL_DIR`) instead of always using the default path.
+- `SliderSolver.solve()` serializes same-profile launches with a bounded
+  in-process lock: a second concurrent solve for the same account fails fast
+  with `profile_lock_timeout` (after `wait_timeout`) instead of fighting over
+  the same browser profile / killing the running one.
+
+### Changed
+- automation-kit extra tracks `automation-kit>=0.4.0,<0.5.0` (introduced in
+  `83c9d5d`, previously reflected only in pyproject).
+- `SolverSolver._finalize_telemetry` writes a per-run
+  `telemetry/{run_id}.json` summary, making the telemetry artifact path
+  declared by `VisualChallengeSolver` and the CDP script real.
+- Removed the shadowed duplicate `_get_stealth_script` definition (~330 dead
+  lines) and the unused `_run_in_thread` closure in `async_run`.
+
 ## [0.5.0] - 2026-07-19
 
 ### Changed

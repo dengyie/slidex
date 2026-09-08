@@ -166,10 +166,13 @@ class SliderTrajectoryPool:
         return {}
 
     def _touch_last_used(self, cookie_id: str, filepath: str):
-        lu = self._read_last_used(cookie_id)
-        lu[os.path.basename(filepath)] = time.time()
-        with open(self._last_used_path(cookie_id), "w") as f:
-            json.dump(lu, f)
+        try:
+            lu = self._read_last_used(cookie_id)
+            lu[os.path.basename(filepath)] = time.time()
+            with open(self._last_used_path(cookie_id), "w") as f:
+                json.dump(lu, f)
+        except (OSError, IOError, PermissionError) as e:
+            logger.debug(f"[TrajectoryPool] cannot update last_used: {e}")
 
     def rotate_trajectory(self, cookie_id: str, target_distance: float) -> Optional[dict]:
         """LRU 轮转：选最久未用 + 距离匹配"""
