@@ -108,7 +108,7 @@ class VisualChallengeSolver:
                 artifacts=[
                     VisionArtifact(
                         artifact_type="telemetry",
-                        path=Path("telemetry") / f"{telemetry.get('run_id', 'unknown')}.json",
+                        path=Path(slider.get_telemetry_dir()) / f"{telemetry.get('run_id', 'unknown')}.json",
                         metadata={"run_id": str(telemetry.get("run_id", ""))},
                     )
                 ],

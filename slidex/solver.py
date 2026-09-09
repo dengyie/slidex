@@ -313,6 +313,14 @@ class SliderSolver(ProviderSolverMixin):
     def get_telemetry_summary(self) -> Dict[str, object]:
         return dict(self._telemetry_summary)
 
+    def get_telemetry_dir(self) -> str:
+        """telemetry 摘要的实际落盘目录（与 _write_telemetry_summary_file 一致）。
+
+        声明给外层的 per-run 摘要 artifact 路径必须与这里对齐，否则报告里的
+        telemetry/{run_id}.json 是 CWD 相对的幽灵路径、指向不存在的文件。
+        """
+        return self._config.get_telemetry_dir()
+
     # ════════════════════════════════════════════════════════════
     #  同 profile 并发治理
     # ════════════════════════════════════════════════════════════

@@ -96,6 +96,12 @@ async def _run(
             telemetry = await telemetry
         return telemetry if isinstance(telemetry, dict) else {}
 
+    async def _resolve_telemetry_dir() -> str:
+        value = solver.get_telemetry_dir()
+        if asyncio.iscoroutine(value):
+            value = await value
+        return str(value)
+
     def _serialize_result(
         *,
         success: bool,
@@ -103,6 +109,7 @@ async def _run(
         elapsed_ms: float,
         error_code: Optional[str],
         telemetry: Dict[str, Any],
+        telemetry_dir: str,
     ) -> Dict[str, Any]:
         run_id = str(telemetry.get("run_id") or "unknown")
         result = VisualChallengeResult(
@@ -117,7 +124,7 @@ async def _run(
             artifacts=[
                 VisionArtifact(
                     artifact_type="telemetry",
-                    path=Path("telemetry") / f"{run_id}.json",
+                    path=Path(telemetry_dir) / f"{run_id}.json",
                     metadata={"run_id": run_id},
                 )
             ],
@@ -153,6 +160,7 @@ async def _run(
             elapsed_ms=elapsed_ms,
             error_code=None if success else "solve_failed",
             telemetry=telemetry,
+            telemetry_dir=await _resolve_telemetry_dir(),
         )
     except Exception as e:
         elapsed_ms = (time.time() - start) * 1000
@@ -163,6 +171,7 @@ async def _run(
             elapsed_ms=elapsed_ms,
             error_code=str(e),
             telemetry=telemetry,
+            telemetry_dir=await _resolve_telemetry_dir(),
         )
     finally:
         await solver.close()

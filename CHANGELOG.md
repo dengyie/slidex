@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.3] - 2026-09-10
+
+### Fixed
+- The telemetry artifact declared by `VisualChallengeSolver` and the CDP CLI
+  (`Path("telemetry") / "{run_id}.json"`) was a CWD-relative path that never
+  pointed at the real file: `SliderSolver._write_telemetry_summary_file` writes
+  to `SlidexConfig.get_telemetry_dir()` (`~/.slidex/telemetry/` by default), so
+  reports referenced a ghost path. Both declarations now resolve through a new
+  `SliderSolver.get_telemetry_dir()` accessor and point at the file that is
+  actually written, independent of the process working directory.
+
 ## [0.5.2] - 2026-09-10
 
 Production code review follow-up (2026-09-09/10): the remaining P3 findings
