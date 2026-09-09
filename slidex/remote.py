@@ -16,6 +16,9 @@ from slidex.vision import ChallengeType
 class CaptchaRemoteController:
     """刮刮乐远程控制器"""
 
+    # 未兑换一次性控制票的上限；超过后 FIFO 淘汰最旧，防止异常路径无限累积
+    MAX_CONTROL_TICKETS = 1000
+
     def __init__(self):
         self.active_sessions: Dict[str, Dict[str, Any]] = {}
         self.websocket_connections: Dict[str, Any] = {}
@@ -29,6 +32,9 @@ class CaptchaRemoteController:
     def issue_control_ticket(self, session_id: str) -> str:
         """为会话签发一次性控制页 ticket（64 位随机，单次有效）"""
         ticket = secrets.token_urlsafe(32)
+        if len(self.control_tickets) >= self.MAX_CONTROL_TICKETS:
+            # 淘汰最旧的未兑换票据（dict 保持插入序）
+            self.control_tickets.pop(next(iter(self.control_tickets)))
         self.control_tickets[ticket] = session_id
         return ticket
 

@@ -61,6 +61,10 @@ class SessionCheckRequest(BaseModel):
 # WebSocket 端点 - 实时通信
 # =============================================================================
 
+# 首条消息鉴权等待上限（测试可替换）；恶意/异常客户端不持住连接
+_WS_AUTH_TIMEOUT = 10.0
+
+
 @router.websocket("/ws/{session_id}")
 async def websocket_endpoint(websocket: WebSocket, session_id: str):
     await websocket.accept()
@@ -68,9 +72,12 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
     # token 不再从 URL query 传入（会进访问日志），改由客户端建立连接后
     # 通过首条消息 {"type":"auth","token":...} 鉴权。
+    # 首条消息必须是合法 JSON：receive_json 对文本解析失败抛 JSONDecodeError
+    # (ValueError)、对二进制消息抛 KeyError，一并按非法输入 1008 关闭，避免
+    # 未认证客户端在公开端点上制造未处理异常。
     try:
-        first = await asyncio.wait_for(websocket.receive_json(), timeout=10.0)
-    except (asyncio.TimeoutError, WebSocketDisconnect):
+        first = await asyncio.wait_for(websocket.receive_json(), timeout=_WS_AUTH_TIMEOUT)
+    except (asyncio.TimeoutError, WebSocketDisconnect, ValueError, KeyError):
         await websocket.close(code=1008)
         return
 

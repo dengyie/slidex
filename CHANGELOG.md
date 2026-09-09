@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.5.4] - 2026-09-10
+
+Production review of the 0.5.2/0.5.3 follow-up round: all remaining findings
+fixed at root cause.
+
+### Fixed
+- The control-page WebSocket closed with an unhandled exception when the first
+  message was not valid JSON text (`JSONDecodeError`) or a binary frame
+  (`KeyError`) — any unauthenticated client could raise an exception on a
+  public endpoint. Non-JSON, binary, non-`auth` and wrong-token first messages
+  now all close with policy code `1008`; the auth wait timeout is exposed as
+  `api._WS_AUTH_TIMEOUT`.
+- `GeeTestProvider` no longer accepts `/ajax.php` or `/api/v4/slider` on any
+  host: the non-geetest-host fallback path whitelist was the same over-broad
+  class as the original `/verify` finding. Responses are recognized only on
+  geetest-marker hosts (still configurable for private deployments via the new
+  `host_markers=` argument) or on the official domains
+  `geetest.com` / `geetest.cn` / `geevisit.com`.
+- Account ids flowing into `trajectory_history/{id}_*.json` filenames are now
+  sanitized through `sanitize_pure_user_id()` at the single extraction point
+  (`SliderConcurrencyManager._extract_pure_user_id`): `/`, `\` and `..`
+  sequences are stripped so a caller-supplied id can no longer escape the
+  history directory (previously possible with both the old CWD-relative and the
+  new anchored path).
+- Unredeemed control tickets are now bounded (`MAX_CONTROL_TICKETS`, FIFO
+  eviction of the oldest) instead of accumulating without limit.
+
+### Tests
+- `tests/test_ws_auth.py`: first-message auth behavior — non-JSON text, binary,
+  non-auth JSON, wrong token, timeout and valid-token paths.
+- `tests/test_review_fixes.py`: geetest official-domain / unrelated-`/ajax.php`
+  / host-marker-extension cases; `sanitize_pure_user_id` traversal cases;
+  bounded-ticket FIFO case.
+
 ## [0.5.3] - 2026-09-10
 
 ### Fixed

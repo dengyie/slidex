@@ -2,7 +2,7 @@
 
 import json
 import asyncio
-from typing import List, Optional, Tuple
+from typing import Iterable, List, Optional, Tuple
 from urllib.parse import urlparse
 from playwright.async_api import Page, Response
 from loguru import logger
@@ -25,11 +25,13 @@ class GeeTestProvider(CaptchaProvider):
         produces_artifacts=["screenshot", "crop", "trajectory", "telemetry"],
     )
 
-    def __init__(self):
+    def __init__(self, host_markers: Optional[Iterable[str]] = None):
         super().__init__()
         self._result: Optional[bool] = None
         self._version: Optional[str] = None  # "v3" or "v4"
         self._response_handler = None
+        # 私有化部署自定义域（不含 geetest 字样）的 host 特征扩展点
+        self._extra_host_markers = tuple(host_markers or ())
 
     async def detect(self, page: Page) -> bool:
         """检测是否是 GeeTest"""
@@ -170,12 +172,14 @@ class GeeTestProvider(CaptchaProvider):
 
     # GeeTest 验证响应的 URL 特征：host 属于 geetest 域（含私有化部署的自定义域），
     # 且路径是已知端点。host 匹配是根因约束——旧逻辑对任意站点的 /verify 都会
-    # 抢答，导致同页其他验证码的结果被误读为 GeeTest 的成败。
+    # 抢答，导致同页其他验证码的结果被误读为 GeeTest 的成败。官方域（geetest.com/
+    # geetest.cn/geevisit.com）单独白名单；其余任意站点的 /verify /ajax.php /
+    # slider 一律不认，私有化部署的 CDN/代理域通过 host_markers 参数注入。
     _GEETEST_HOST_MARKERS = ("geetest", "gee-test", "gt4.")
+    _GEETEST_OFFICIAL_HOST_SUFFIXES = ("geetest.com", "geetest.cn", "geevisit.com")
     _GEETEST_VERIFY_PATHS = ("/ajax.php", "/api/v4/slider", "/verify")
 
-    @classmethod
-    def _is_geetest_response_url(cls, url: str) -> bool:
+    def _is_geetest_response_url(self, url: str) -> bool:
         try:
             parsed = urlparse(url)
         except Exception:
@@ -184,11 +188,17 @@ class GeeTestProvider(CaptchaProvider):
         if not host:
             return False
         # /verify 是很多站点自己的校验端点，仅当 host 带 geetest 特征时才认
-        if any(marker in host for marker in cls._GEETEST_HOST_MARKERS):
-            return parsed.path in cls._GEETEST_VERIFY_PATHS
-        # 官方域 ajax.php / v4 slider 端点（host 不含 geetest 字样的场景几乎不存在，
-        # 保留路径白名单以防 CDN/代理域名变化）
-        return parsed.path in ("/ajax.php", "/api/v4/slider")
+        markers = self._GEETEST_HOST_MARKERS + self._extra_host_markers
+        if any(marker in host for marker in markers):
+            return parsed.path in self._GEETEST_VERIFY_PATHS
+        # 官方域（geetest.com/cn、geevisit.com，含子域）的已知端点
+        if any(
+            host == suffix or host.endswith("." + suffix)
+            for suffix in self._GEETEST_OFFICIAL_HOST_SUFFIXES
+        ):
+            return parsed.path in self._GEETEST_VERIFY_PATHS
+        # 其余主机一律不算 GeeTest 结果（旧逻辑对任意站点 /ajax.php 也会抢答）
+        return False
 
     async def validate_response(self, response: Response) -> Optional[bool]:
         """验证响应"""

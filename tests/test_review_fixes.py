@@ -323,48 +323,73 @@ class _FakeResponse:
 class TestGeetestResponseUrlScoping:
     """P3: validate_response must not claim unrelated /verify URLs."""
 
-    def test_geetest_ajax_php_is_matched(self):
+    @staticmethod
+    def _provider(**kwargs):
         from slidex.providers.geetest import GeeTestProvider
 
-        assert GeeTestProvider._is_geetest_response_url(
+        return GeeTestProvider(**kwargs)
+
+    def test_geetest_ajax_php_is_matched(self):
+        assert self._provider()._is_geetest_response_url(
             "https://api.geetest.com/ajax.php?gt=abc"
         ) is True
 
     def test_geetest_v4_slider_is_matched(self):
-        from slidex.providers.geetest import GeeTestProvider
-
-        assert GeeTestProvider._is_geetest_response_url(
+        assert self._provider()._is_geetest_response_url(
             "https://api.geetest.com/api/v4/slider?captcha_id=x"
         ) is True
 
     def test_geetest_host_verify_path_is_matched(self):
-        from slidex.providers.geetest import GeeTestProvider
-
-        assert GeeTestProvider._is_geetest_response_url(
+        assert self._provider()._is_geetest_response_url(
             "https://gcaptcha4.geetest.com/verify?lot_number=1"
         ) is True
 
-    def test_unrelated_verify_url_is_rejected(self):
-        from slidex.providers.geetest import GeeTestProvider
+    def test_official_geevisit_host_is_matched(self):
+        # geevisit.com 不含 geetest 字样，走官方域白名单
+        assert self._provider()._is_geetest_response_url(
+            "https://gcaptcha4.geevisit.com/api/v4/slider"
+        ) is True
 
-        assert GeeTestProvider._is_geetest_response_url(
+    def test_unrelated_verify_url_is_rejected(self):
+        assert self._provider()._is_geetest_response_url(
             "https://h5api.m.goofish.com/mtop.taobao.idlemessage.pc.login.token/verify"
         ) is False
 
     def test_unrelated_host_verify_path_rejected(self):
-        from slidex.providers.geetest import GeeTestProvider
-
         # 非 geetest 域的 /verify 路径不应被认作 GeeTest 结果
-        assert GeeTestProvider._is_geetest_response_url(
+        assert self._provider()._is_geetest_response_url(
             "https://example.com/verify"
         ) is False
 
-    async def test_validate_unrelated_verify_returns_none(self):
-        from slidex.providers.geetest import GeeTestProvider
+    def test_unrelated_host_ajax_php_rejected(self):
+        # 任意站点的 /ajax.php 也不应抢答（旧逻辑会命中）
+        assert self._provider()._is_geetest_response_url(
+            "https://example.com/ajax.php"
+        ) is False
 
-        provider = GeeTestProvider()
+    def test_unrelated_host_v4_slider_rejected(self):
+        assert self._provider()._is_geetest_response_url(
+            "https://example.com/api/v4/slider"
+        ) is False
+
+    def test_custom_host_marker_extension(self):
+        # 私有化部署自定域：注入 host 特征后即可识别
+        provider = self._provider(host_markers=["mycaptcha-edge"])
+        assert provider._is_geetest_response_url(
+            "https://mycaptcha-edge.internal.example.net/verify"
+        ) is True
+
+    async def test_validate_unrelated_verify_returns_none(self):
+        provider = self._provider()
         resp = _FakeResponse(
             "https://example.com/verify", b'{"success": 1}'
+        )
+        assert await provider.validate_response(resp) is None
+
+    async def test_validate_unrelated_ajax_php_returns_none(self):
+        provider = self._provider()
+        resp = _FakeResponse(
+            "https://example.com/ajax.php", b'{"success": 1}'
         )
         assert await provider.validate_response(resp) is None
 
@@ -389,6 +414,33 @@ class TestStealthHistoryStableDir:
         p = stealth._history_file("strategy_stats.json")
         assert Path(p).is_absolute()
         assert p.endswith("strategy_stats.json")
+
+
+class TestPureUserIdSanitization:
+    """P3: user-controlled ids must never escape the history dir."""
+
+    def test_plain_ids_unchanged(self):
+        from slidex._concurrency import sanitize_pure_user_id
+
+        assert sanitize_pure_user_id("user123") == "user123"
+        assert sanitize_pure_user_id("user_abc") == "user_abc"
+
+    def test_slash_and_dotdot_removed(self):
+        from slidex._concurrency import sanitize_pure_user_id
+
+        assert "/" not in sanitize_pure_user_id("/../../etc/passwd")
+        assert "\\" not in sanitize_pure_user_id("..\\..\\evil")
+        assert sanitize_pure_user_id("..") == "default"
+
+    def test_extractor_sanitizes(self):
+        from slidex._concurrency import SliderConcurrencyManager
+
+        manager = SliderConcurrencyManager()
+        assert "/" not in manager._extract_pure_user_id("../../x")
+        # 带时间戳的 id 仍按原逻辑裁掉长数字后缀，且清洗后安全
+        assert manager._extract_pure_user_id("user123_1234567890") == "user123"
+        # 反斜杠与 .. 前缀被清洗，不能逃出历史目录
+        assert manager._extract_pure_user_id("..\\user") == "user"
 
 
 class TestControlTicketFlow:
@@ -433,6 +485,24 @@ class TestControlTicketFlow:
 
         _aio.run(captcha_controller.close_session("s1"))
         assert ticket not in captcha_controller.control_tickets
+
+    def test_control_tickets_bounded_fifo(self):
+        from slidex.remote import captcha_controller
+
+        captcha_controller.active_sessions.clear()
+        captcha_controller.control_tickets.clear()
+        original_cap = captcha_controller.MAX_CONTROL_TICKETS
+        captcha_controller.MAX_CONTROL_TICKETS = 3
+        try:
+            issued = [captcha_controller.issue_control_ticket(f"s{i}") for i in range(6)]
+            # 容量封顶：最旧的两张被 FIFO 淘汰，最新的 3 张保留
+            assert len(captcha_controller.control_tickets) == 3
+            assert issued[0] not in captcha_controller.control_tickets
+            assert issued[1] not in captcha_controller.control_tickets
+            assert issued[-1] in captcha_controller.control_tickets
+        finally:
+            captcha_controller.MAX_CONTROL_TICKETS = original_cap
+            captcha_controller.control_tickets.clear()
 
     async def test_notification_url_uses_ticket_not_token(self, tmp_path, monkeypatch):
         from slidex.remote import captcha_controller

@@ -109,7 +109,7 @@ class TestProviderClasses:
     @pytest.mark.asyncio
     async def test_geetest_validate_response_awaits_body(self):
         response = type("Response", (), {})()
-        response.url = "https://example.com/api/v4/slider"
+        response.url = "https://api.geetest.com/api/v4/slider"
 
         async def body():
             return b'{"status": "success"}'
