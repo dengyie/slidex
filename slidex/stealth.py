@@ -2086,11 +2086,36 @@ class XianyuSliderStealth:
         return bool(getattr(self, "use_account_persistent_profile", False))
 
     def _resolve_account_persistent_profile_dir(self) -> str:
-        profile_dir = str(getattr(self, "account_persistent_profile_dir", None) or "").strip()
-        if not profile_dir:
-            profile_dir = os.path.join(os.getcwd(), 'browser_data', f'user_{self.pure_user_id}')
-        os.makedirs(profile_dir, exist_ok=True)
-        return profile_dir
+        return self._resolve_account_profile_dir()
+
+    def _resolve_account_profile_dir(self) -> str:
+        """账号级浏览器数据目录（跨运行持久，保存登录态）。
+
+        优先返回显式配置的 account_persistent_profile_dir；否则用 SlidexConfig
+        的稳定 browser_data 目录（默认 ~/.slidex/browser_data，可经
+        SLIDEX_BROWSER_DATA_DIR 覆盖）。历史实现默认 CWD 相对
+        browser_data/user_{id}：若该账号在 CWD 下已有累积的登录态目录，仍沿用
+        之（保证升级后不静默掉登录），新账号一律落到稳定目录。
+        """
+        explicit = str(getattr(self, "account_persistent_profile_dir", None) or "").strip()
+        if explicit:
+            os.makedirs(explicit, exist_ok=True)
+            return explicit
+        cfg = getattr(self, "_slidex_config", None)
+        if cfg is not None:
+            stable_base = cfg.get_browser_data_dir()
+        else:
+            stable_base = os.path.join(os.path.expanduser("~"), ".slidex", "browser_data")
+        stable_dir = os.path.join(stable_base, f"user_{self.pure_user_id}")
+        legacy_dir = os.path.join(os.getcwd(), "browser_data", f"user_{self.pure_user_id}")
+        if os.path.isdir(legacy_dir):
+            logger.info(
+                f"【{self.pure_user_id}】沿用历史浏览器目录: {legacy_dir}"
+                f"（新目录为 {stable_dir}，可用 SLIDEX_BROWSER_DATA_DIR 统一）"
+            )
+            return legacy_dir
+        os.makedirs(stable_dir, exist_ok=True)
+        return stable_dir
 
     def _build_playwright_context_options(self, browser_features: Dict[str, Any]) -> Dict[str, Any]:
         context_options: Dict[str, Any] = {
@@ -2760,10 +2785,19 @@ class XianyuSliderStealth:
         except Exception as e:
             logger.error(f"【{self.pure_user_id}】保存失败记录失败: {e}")
 
+    def _debug_snapshot_dir(self) -> str:
+        """失败现场快照稳定目录（~/.slidex/debug_screenshots，可经
+        SLIDEX_DEBUG_SCREENSHOT_DIR 覆盖），不再用 CWD 相对 logs/slider_debug
+        （服务化部署启动目录会漂移）。"""
+        cfg = getattr(self, "_slidex_config", None)
+        if cfg is not None:
+            return cfg.get_debug_screenshot_dir()
+        return os.path.join(os.path.expanduser("~"), ".slidex", "debug_screenshots")
+
     def _save_debug_snapshot(self, reason: str, search_target=None):
         """保存失败现场，方便比对页面状态和风控返回。"""
         try:
-            debug_dir = os.path.join("logs", "slider_debug")
+            debug_dir = self._debug_snapshot_dir()
             os.makedirs(debug_dir, exist_ok=True)
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -10259,8 +10293,7 @@ class XianyuSliderStealth:
             if force_clean_context:
                 logger.warning(f"【{self.pure_user_id}】刷新模式启用干净上下文，不复用历史浏览器会话")
             else:
-                user_data_dir = os.path.join(os.getcwd(), 'browser_data', f'user_{self.pure_user_id}')
-                os.makedirs(user_data_dir, exist_ok=True)
+                user_data_dir = self._resolve_account_profile_dir()
                 logger.info(f"【{self.pure_user_id}】使用用户数据目录: {user_data_dir}")
             
             # 在启动Playwright之前，重新检查和设置浏览器路径

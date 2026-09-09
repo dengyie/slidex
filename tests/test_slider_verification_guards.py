@@ -5,6 +5,7 @@ import tempfile
 import pytest
 from unittest import mock
 
+from slidex.config import SlidexConfig
 from slidex.stealth import XianyuSliderStealth
 
 
@@ -576,7 +577,7 @@ class TestSliderVerificationGuards:
 
         assert trajectory
         assert slider.current_trajectory_data["random_params"]["steps"] >= 39
-    def test_init_browser_uses_account_persistent_profile_when_enabled(self):
+    def test_init_browser_uses_account_persistent_profile_when_enabled(self, tmp_path, monkeypatch):
         class _FakeBrowser:
             def is_connected(self):
                 return True
@@ -634,6 +635,8 @@ class TestSliderVerificationGuards:
 
         slider = XianyuSliderStealth.__new__(XianyuSliderStealth)
         slider.pure_user_id = "persistent_profile_unit_test"
+        slider._slidex_config = SlidexConfig(browser_data_dir=str(tmp_path))
+        monkeypatch.chdir(tmp_path)  # CWD 隔离：仓库根历史 browser_data/ 不应影响解析
         slider.headless = True
         slider.browser_channel = None
         slider.executable_path = None
@@ -677,9 +680,9 @@ class TestSliderVerificationGuards:
 
         assert not fake_chromium.launch_called
         assert len(fake_chromium.persistent_calls) == 1
-        assert fake_chromium.persistent_calls[0]["user_data_dir"] == os.path.join(os.getcwd(), "browser_data", f"user_{slider.pure_user_id}")
+        assert fake_chromium.persistent_calls[0]["user_data_dir"] == os.path.join(str(tmp_path), f"user_{slider.pure_user_id}")
         assert slider.page is fake_context.page
-    def test_init_browser_retries_persistent_profile_after_stale_singleton_cleanup(self):
+    def test_init_browser_retries_persistent_profile_after_stale_singleton_cleanup(self, tmp_path):
         class _FakeBrowser:
             def is_connected(self):
                 return True
@@ -736,6 +739,7 @@ class TestSliderVerificationGuards:
 
         slider = XianyuSliderStealth.__new__(XianyuSliderStealth)
         slider.pure_user_id = "persistent_profile_retry_unit_test"
+        slider._slidex_config = SlidexConfig(browser_data_dir=str(tmp_path))
         slider.headless = True
         slider.browser_channel = None
         slider.executable_path = None
@@ -784,7 +788,7 @@ class TestSliderVerificationGuards:
         assert slider.page is fake_context.page
         assert page is fake_context.page
         assert slider.browser is None
-    def test_init_browser_falls_back_when_stale_singleton_cleanup_not_allowed(self):
+    def test_init_browser_falls_back_when_stale_singleton_cleanup_not_allowed(self, tmp_path):
         class _FakePageForInit:
             pass
 
@@ -849,6 +853,7 @@ class TestSliderVerificationGuards:
 
         slider = XianyuSliderStealth.__new__(XianyuSliderStealth)
         slider.pure_user_id = "persistent_profile_fallback_unit_test"
+        slider._slidex_config = SlidexConfig(browser_data_dir=str(tmp_path))
         slider.headless = True
         slider.browser_channel = None
         slider.executable_path = None

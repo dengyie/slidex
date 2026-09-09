@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.5.6] - 2026-09-10
+
+Final CWD-drift cleanup across the stealth stack.
+
+### Fixed
+- The persistent account browser profile directory defaulted to
+  CWD-relative `browser_data/user_{id}` (two sites: persistent-profile
+  launch and the password-login reuse path). Service deployments that
+  change their start directory would silently keep writing profiles to
+  the new CWD. Profiles now resolve to the stable
+  `SlidexConfig.get_browser_data_dir()` (`~/.slidex/browser_data`,
+  `SLIDEX_BROWSER_DATA_DIR` overrides). To avoid silent logouts on
+  upgrade, if the account already has a profile in the legacy CWD
+  `browser_data/`, that directory is still used (with a log notice) —
+  new accounts go to the stable location.
+- The failure debug snapshot wrote to CWD-relative `logs/slider_debug`.
+  It now writes to `SlidexConfig.get_debug_screenshot_dir()`
+  (`~/.slidex/debug_screenshots`, `SLIDEX_DEBUG_SCREENSHOT_DIR`
+  overrides), matching the existing solver debug-screenshot location.
+- Full sweep found no remaining CWD-relative directory writes in the
+  library.
+- Tests: new `tests/test_stealth_dirs.py` (profile/snapshot dir
+  resolution incl. legacy-honoring and no-config fallback); three
+  `test_slider_verification_guards` cases that had pinned the old
+  CWD-relative behavior now assert the stable tmp-backed directory.
+  304 passed / 9 skipped.
+
 ## [0.5.5] - 2026-09-10
 
 Follow-up hardening from the 0.5.4 re-review.
