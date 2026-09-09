@@ -28,6 +28,7 @@ class SlidexConfig:
     browser_data_dir: Optional[str] = None
     debug_screenshot_dir: Optional[str] = None
     calibration_dir: Optional[str] = None
+    trajectory_history_dir: Optional[str] = None
     project_root: Optional[str] = None
 
     # ── callback slots ──
@@ -43,6 +44,9 @@ class SlidexConfig:
 
     def get_trajectory_dir(self) -> str:
         return self.trajectory_pool_base_dir or self._default_dir("trajectories")
+
+    def get_trajectory_history_dir(self) -> str:
+        return self.trajectory_history_dir or self._default_dir("trajectory_history")
 
     def get_browser_data_dir(self) -> str:
         return self.browser_data_dir or self._default_dir("browser_data")
@@ -79,6 +83,7 @@ class SlidexConfig:
             browser_data_dir=os.environ.get("SLIDEX_BROWSER_DATA_DIR") or None,
             debug_screenshot_dir=os.environ.get("SLIDEX_DEBUG_SCREENSHOT_DIR") or None,
             calibration_dir=os.environ.get("SLIDEX_CALIBRATION_DIR") or None,
+            trajectory_history_dir=os.environ.get("SLIDEX_TRAJ_HISTORY_DIR") or None,
             telemetry_enabled=os.environ.get("SLIDEX_TELEMETRY_ENABLED", "1") == "1",
             telemetry_dir=os.environ.get("SLIDEX_TELEMETRY_DIR") or None,
         )

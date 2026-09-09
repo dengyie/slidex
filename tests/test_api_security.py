@@ -57,7 +57,8 @@ async def test_session_info_exposes_visual_challenge_audit_metadata():
 def test_control_page_does_not_log_raw_token():
     html = Path("slidex/_html/captcha_control.html").read_text(encoding="utf-8")
 
-    assert "token=<redacted>" in html
+    assert "token=<redacted>" not in html
+    assert "?token=" not in html
     assert "log(`WebSocket URL: ${wsUrl}`" not in html
 
 
@@ -66,15 +67,50 @@ async def test_control_page_escapes_initial_session_script_values():
     session_id = "s1</script><script>alert(1)</script>"
     token = "tok</script>"
     captcha_controller.active_sessions.clear()
+    captcha_controller.control_tickets.clear()
     captcha_controller.active_sessions[session_id] = {"token": token}
+    ticket = captcha_controller.issue_control_ticket(session_id)
 
-    response = await api.captcha_control_page_with_session(session_id, token=token)
+    response = await api.captcha_control_page_with_session(session_id, ticket=ticket)
     body = response.body.decode("utf-8")
 
     assert session_id not in body
     assert token not in body
     assert "s1<\\/script><script>alert(1)<\\/script>" in body
     assert "tok<\\/script>" in body
+
+
+@pytest.mark.asyncio
+async def test_control_page_rejects_invalid_or_reused_ticket():
+    captcha_controller.active_sessions.clear()
+    captcha_controller.control_tickets.clear()
+    captcha_controller.active_sessions["s1"] = {"token": "secret"}
+
+    # 无 ticket
+    with pytest.raises(HTTPException) as exc:
+        await api.captcha_control_page_with_session("s1")
+    assert exc.value.status_code == 403
+
+    # 一次性：兑换后复用应失败
+    ticket = captcha_controller.issue_control_ticket("s1")
+    await api.captcha_control_page_with_session("s1", ticket=ticket)
+    with pytest.raises(HTTPException) as exc:
+        await api.captcha_control_page_with_session("s1", ticket=ticket)
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_control_page_ticket_bound_to_session():
+    captcha_controller.active_sessions.clear()
+    captcha_controller.control_tickets.clear()
+    captcha_controller.active_sessions["s1"] = {"token": "secret"}
+
+    # ticket 属于 s1，却用于请求 s2 → 拒绝
+    ticket = captcha_controller.issue_control_ticket("s1")
+    captcha_controller.active_sessions["s2"] = {"token": "other"}
+    with pytest.raises(HTTPException) as exc:
+        await api.captcha_control_page_with_session("s2", ticket=ticket)
+    assert exc.value.status_code == 403
 
 
 @pytest.mark.asyncio

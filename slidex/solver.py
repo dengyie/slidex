@@ -649,8 +649,10 @@ class SliderSolver(ProviderSolverMixin):
         if self._notification_callback:
             try:
                 import asyncio as _asyncio
-                session_token = session_info.get("token", "")
-                control_path = f"/api/captcha/control/{session_id}?token={session_token}"
+                # 控制 URL 携带一次性 ticket 而非长期 token：token 不落入访问日志/
+                # Referer/浏览器历史，页面 GET 时由服务端换 ticket 入页面内存。
+                control_ticket = captcha_controller.issue_control_ticket(session_id)
+                control_path = f"/api/captcha/control/{session_id}?ticket={control_ticket}"
                 _asyncio.ensure_future(
                     self._notification_callback(
                         self.cookie_id,

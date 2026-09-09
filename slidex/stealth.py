@@ -283,6 +283,23 @@ except ImportError:
 SLIDER_MAX_CONCURRENT = 3
 SLIDER_WAIT_TIMEOUT = 60
 
+
+def _trajectory_history_dir() -> str:
+    """策略统计/学习历史的存放目录。
+
+    历史上这些文件硬编码为相对路径 `trajectory_history/`，实际位置随进程 CWD
+    漂移（服务化部署时落到启动目录、定时任务里落到别处）。现在统一解析到
+    SlidexConfig 的稳定目录（默认 ~/.slidex/trajectory_history，可用
+    SLIDEX_TRAJ_HISTORY_DIR / project_root 覆盖）。
+    """
+    if SlidexConfig is None:
+        return os.path.join(os.path.expanduser("~"), ".slidex", "trajectory_history")
+    return SlidexConfig.from_env().get_trajectory_history_dir()
+
+
+def _history_file(name: str) -> str:
+    return os.path.join(_trajectory_history_dir(), name)
+
 # ============================================================================
 # 分析来源：trajectory_history/*.json 成功记录
 # 分析时间：2026-01-28 优化版本
@@ -435,7 +452,7 @@ class AdaptiveStrategyManager:
                 "aggressive": 0.35,
             }
             # 统计文件路径
-            self.stats_file = "trajectory_history/adaptive_strategy_stats.json"
+            self.stats_file = _history_file("adaptive_strategy_stats.json")
             # 加载历史统计
             self._load_stats()
             self._initialized = True
@@ -746,7 +763,7 @@ class RetryStrategyStats:
                 'attempt_3_fast': {'total': 0, 'success': 0, 'fail': 0},
                 'attempt_3_slow': {'total': 0, 'success': 0, 'fail': 0},
             }
-            self.stats_file = 'trajectory_history/strategy_stats.json'
+            self.stats_file = _history_file('strategy_stats.json')
             self._load_stats()
             self._initialized = True
             logger.info("策略统计管理器初始化完成")
@@ -936,11 +953,10 @@ class XianyuSliderStealth:
         stats = concurrency_manager.get_stats()
         logger.info(f"【{self.pure_user_id}】实例已注册，当前并发: {stats['active_count']}/{stats['max_concurrent']}")
         
-        # 轨迹学习相关属性
-        
-        self.success_history_file = f"trajectory_history/{self.pure_user_id}_success.json"
-        self.failure_history_file = f"trajectory_history/{self.pure_user_id}_failure.json"
-        self.browser_profile_file = f"trajectory_history/{self.pure_user_id}_browser_profile.json"
+        # 轨迹学习相关属性（路径统一走稳定目录，见 _trajectory_history_dir）
+        self.success_history_file = _history_file(f"{self.pure_user_id}_success.json")
+        self.failure_history_file = _history_file(f"{self.pure_user_id}_failure.json")
+        self.browser_profile_file = _history_file(f"{self.pure_user_id}_browser_profile.json")
         self.last_verification_feedback = {}
         self.last_login_error = ""
         self.last_browser_cookie_warmup_verification_hint = None
@@ -2387,7 +2403,7 @@ class XianyuSliderStealth:
             return history
 
         try:
-            history_dir = os.path.dirname(self.success_history_file) or "trajectory_history"
+            history_dir = os.path.dirname(self.success_history_file) or _trajectory_history_dir()
             current_file = os.path.abspath(self.success_history_file)
             matched_records = []
             relaxed_records = []

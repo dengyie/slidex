@@ -344,11 +344,9 @@
                 document.body.style.padding = '0';
             }
 
-            // 检查是否有预设的会话ID
+            // 检查是否有预设的会话ID（token 由服务端兑换 ticket 后注入，或用户手动填入）
             if (window.INITIAL_SESSION_TOKEN) {
                 document.getElementById('sessionTokenInput').value = window.INITIAL_SESSION_TOKEN;
-            } else if (urlParams.get('token')) {
-                document.getElementById('sessionTokenInput').value = urlParams.get('token');
             }
 
             if (window.INITIAL_SESSION_ID) {
@@ -400,14 +398,16 @@
             log(`正在连接会话: ${sessionId}`, 'info');
 
             try {
-                // 建立 WebSocket 连接
+                // 建立 WebSocket 连接：URL 不携带 token（避免进日志），
+                // 连接建立后通过首条 auth 消息鉴权。
                 const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                const wsUrl = `${wsProtocol}//${window.location.host}/api/captcha/ws/${encodeURIComponent(sessionId)}?token=${encodeURIComponent(sessionToken)}`;
-                log(`WebSocket URL: /api/captcha/ws/${sessionId}?token=<redacted>`, 'info');
+                const wsUrl = `${wsProtocol}//${window.location.host}/api/captcha/ws/${encodeURIComponent(sessionId)}`;
+                log(`WebSocket URL: /api/captcha/ws/${sessionId}`, 'info');
                 
                 ws = new WebSocket(wsUrl);
 
                 ws.onopen = () => {
+                    ws.send(JSON.stringify({ type: 'auth', token: sessionToken }));
                     log('WebSocket 连接成功', 'success');
                     updateStatus('connected', '已连接');
                 };

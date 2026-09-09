@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.5.2] - 2026-09-10
+
+Production code review follow-up (2026-09-09/10): the remaining P3 findings
+are fixed at root-cause level.
+
+### Fixed
+- `stealth.py` strategy-statistics and learning-history files no longer use
+  CWD-relative `trajectory_history/` paths. They now resolve through
+  `SlidexConfig.get_trajectory_history_dir()` (default
+  `~/.slidex/trajectory_history`, override via `SLIDEX_TRAJ_HISTORY_DIR` or
+  `project_root`), so the location no longer drifts with the process working
+  directory.
+- The remote-control URL now carries a one-time ticket instead of the session
+  token: `issue_control_ticket()` / `redeem_control_ticket()` are single-use
+  and session-bound, and `captcha_control_page_with_session` exchanges the
+  ticket server-side before injecting the token into the page. The session
+  token no longer appears in the URL (access log / Referer / browser history).
+- The control-page WebSocket authenticates via the first message
+  (`{"type":"auth","token":...}`) instead of a `?token=` query parameter.
+- `GeeTestProvider.validate_response` now requires the URL to look like a
+  GeeTest endpoint (geetest host marker + known path, or the official
+  `/ajax.php` / `/api/v4/slider` paths) before reading a result. Unrelated
+  `/verify` URLs no longer leak other endpoints' status into the solver.
+- `_chromium_lifecycle._iter_chromium_pids_for_user_data_dir` cleanly
+  re-raises `GeneratorExit` so early generator closure never touches mocked
+  (non-exception) psutil names.
+
 ## [0.5.1] - 2026-09-06
 
 Production code review fixes (full-review pass, 2026-09-06).

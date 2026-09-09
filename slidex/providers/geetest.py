@@ -3,6 +3,7 @@
 import json
 import asyncio
 from typing import List, Optional, Tuple
+from urllib.parse import urlparse
 from playwright.async_api import Page, Response
 from loguru import logger
 
@@ -167,13 +168,35 @@ class GeeTestProvider(CaptchaProvider):
             page.remove_listener("response", self._response_handler)
             self._response_handler = None
 
+    # GeeTest 验证响应的 URL 特征：host 属于 geetest 域（含私有化部署的自定义域），
+    # 且路径是已知端点。host 匹配是根因约束——旧逻辑对任意站点的 /verify 都会
+    # 抢答，导致同页其他验证码的结果被误读为 GeeTest 的成败。
+    _GEETEST_HOST_MARKERS = ("geetest", "gee-test", "gt4.")
+    _GEETEST_VERIFY_PATHS = ("/ajax.php", "/api/v4/slider", "/verify")
+
+    @classmethod
+    def _is_geetest_response_url(cls, url: str) -> bool:
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return False
+        host = (parsed.hostname or "").lower()
+        if not host:
+            return False
+        # /verify 是很多站点自己的校验端点，仅当 host 带 geetest 特征时才认
+        if any(marker in host for marker in cls._GEETEST_HOST_MARKERS):
+            return parsed.path in cls._GEETEST_VERIFY_PATHS
+        # 官方域 ajax.php / v4 slider 端点（host 不含 geetest 字样的场景几乎不存在，
+        # 保留路径白名单以防 CDN/代理域名变化）
+        return parsed.path in ("/ajax.php", "/api/v4/slider")
+
     async def validate_response(self, response: Response) -> Optional[bool]:
         """验证响应"""
         url = response.url
 
         # GeeTest v3: /ajax.php?gt=...
         # GeeTest v4: /api/v4/slider
-        if "/ajax.php" not in url and "/api/v4/slider" not in url and "/verify" not in url:
+        if not self._is_geetest_response_url(url):
             return None
 
         try:

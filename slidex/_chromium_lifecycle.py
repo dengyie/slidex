@@ -106,6 +106,10 @@ def _iter_chromium_pids_for_user_data_dir(normalized_target):
                     if os.path.normpath(arg_path) == normalized_target:
                         yield proc.info["pid"]
                         break
+        except GeneratorExit:
+            # 消费者提前退出时，不要在 finally/except 里触达被 mock 替换过的
+            # psutil 异常名（避免 TypeError），直接透传让生成器干净关闭。
+            raise
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
 

@@ -309,3 +309,161 @@ class TestProfileLock:
 
         assert r1[0] is True and r2[0] is True
         assert order.index("s1:init") < order.index("s2:init")
+
+
+class _FakeResponse:
+    def __init__(self, url, body=b"{}"):
+        self.url = url
+        self._body = body
+
+    async def body(self):
+        return self._body
+
+
+class TestGeetestResponseUrlScoping:
+    """P3: validate_response must not claim unrelated /verify URLs."""
+
+    def test_geetest_ajax_php_is_matched(self):
+        from slidex.providers.geetest import GeeTestProvider
+
+        assert GeeTestProvider._is_geetest_response_url(
+            "https://api.geetest.com/ajax.php?gt=abc"
+        ) is True
+
+    def test_geetest_v4_slider_is_matched(self):
+        from slidex.providers.geetest import GeeTestProvider
+
+        assert GeeTestProvider._is_geetest_response_url(
+            "https://api.geetest.com/api/v4/slider?captcha_id=x"
+        ) is True
+
+    def test_geetest_host_verify_path_is_matched(self):
+        from slidex.providers.geetest import GeeTestProvider
+
+        assert GeeTestProvider._is_geetest_response_url(
+            "https://gcaptcha4.geetest.com/verify?lot_number=1"
+        ) is True
+
+    def test_unrelated_verify_url_is_rejected(self):
+        from slidex.providers.geetest import GeeTestProvider
+
+        assert GeeTestProvider._is_geetest_response_url(
+            "https://h5api.m.goofish.com/mtop.taobao.idlemessage.pc.login.token/verify"
+        ) is False
+
+    def test_unrelated_host_verify_path_rejected(self):
+        from slidex.providers.geetest import GeeTestProvider
+
+        # 非 geetest 域的 /verify 路径不应被认作 GeeTest 结果
+        assert GeeTestProvider._is_geetest_response_url(
+            "https://example.com/verify"
+        ) is False
+
+    async def test_validate_unrelated_verify_returns_none(self):
+        from slidex.providers.geetest import GeeTestProvider
+
+        provider = GeeTestProvider()
+        resp = _FakeResponse(
+            "https://example.com/verify", b'{"success": 1}'
+        )
+        assert await provider.validate_response(resp) is None
+
+
+class TestStealthHistoryStableDir:
+    """P3: trajectory_history files must resolve to config dir, not CWD."""
+
+    def test_history_dir_follows_config(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SLIDEX_TRAJ_HISTORY_DIR", str(tmp_path / "hist"))
+        from slidex import stealth
+
+        assert stealth._trajectory_history_dir() == str(tmp_path / "hist")
+
+    def test_history_dir_defaults_under_project_root(self, tmp_path):
+        # direct config path: project_root anchors the history dir
+        cfg = SlidexConfig(project_root=str(tmp_path))
+        assert cfg.get_trajectory_history_dir() == str(tmp_path / "trajectory_history")
+
+    def test_history_file_is_absolute(self):
+        from slidex import stealth
+
+        p = stealth._history_file("strategy_stats.json")
+        assert Path(p).is_absolute()
+        assert p.endswith("strategy_stats.json")
+
+
+class TestControlTicketFlow:
+    """P3: control URL carries a one-time ticket, never the session token."""
+
+    def test_issue_and_redeem_is_single_use(self):
+        from slidex.remote import captcha_controller
+
+        captcha_controller.active_sessions.clear()
+        captcha_controller.control_tickets.clear()
+        captcha_controller.active_sessions["s1"] = {"token": "secret"}
+
+        ticket = captcha_controller.issue_control_ticket("s1")
+        assert captcha_controller.redeem_control_ticket(ticket) == "s1"
+        assert captcha_controller.redeem_control_ticket(ticket) is None
+
+    def test_redeem_bogus_ticket_returns_none(self):
+        from slidex.remote import captcha_controller
+
+        captcha_controller.control_tickets.clear()
+        assert captcha_controller.redeem_control_ticket("nope") is None
+
+    def test_redeem_ticket_for_closed_session_returns_none(self):
+        from slidex.remote import captcha_controller
+
+        captcha_controller.active_sessions.clear()
+        captcha_controller.control_tickets.clear()
+        captcha_controller.active_sessions["s1"] = {"token": "secret"}
+        ticket = captcha_controller.issue_control_ticket("s1")
+        del captcha_controller.active_sessions["s1"]
+        assert captcha_controller.redeem_control_ticket(ticket) is None
+
+    def test_close_session_clears_related_tickets(self):
+        from slidex.remote import captcha_controller
+
+        captcha_controller.active_sessions.clear()
+        captcha_controller.control_tickets.clear()
+        captcha_controller.active_sessions["s1"] = {"token": "secret"}
+        ticket = captcha_controller.issue_control_ticket("s1")
+
+        import asyncio as _aio
+
+        _aio.run(captcha_controller.close_session("s1"))
+        assert ticket not in captcha_controller.control_tickets
+
+    async def test_notification_url_uses_ticket_not_token(self, tmp_path, monkeypatch):
+        from slidex.remote import captcha_controller
+
+        solver = _make_solver(tmp_path)
+        solver.page = object()
+        solver._get_cookies = mock.AsyncMock(return_value={"c": "v"})
+        captured = {}
+
+        async def notif(cookie_id, message, title):
+            captured["message"] = message
+
+        solver._notification_callback = notif
+        captcha_controller.active_sessions.clear()
+        captcha_controller.control_tickets.clear()
+
+        monkeypatch.setattr(
+            captcha_controller, "create_session",
+            mock.AsyncMock(
+                return_value={"token": "long-lived-token", "session_id": "sid1"}
+            ),
+        )
+        monkeypatch.setattr(captcha_controller, "check_completion", mock.AsyncMock(return_value=True))
+        monkeypatch.setattr(captcha_controller, "finish_recording", mock.Mock(return_value=None))
+        monkeypatch.setattr(captcha_controller, "close_session", mock.AsyncMock())
+
+        await solver._fallback_to_remote("https://example.com/punish")
+        # 通知是通过 ensure_future 异步派发的，让出事件循环等它执行完
+        for _ in range(10):
+            await asyncio.sleep(0)
+
+        assert "ticket=" in captured["message"]
+        assert "token=" not in captured["message"]
+        assert "long-lived-token" not in captured["message"]

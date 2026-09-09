@@ -21,6 +21,26 @@ class CaptchaRemoteController:
         self.websocket_connections: Dict[str, Any] = {}
         self.recording_enabled: bool = True
         self.session_recordings: Dict[str, list] = {}
+        # 一次性控制页票据：ticket -> session_id。控制 URL 携带 ticket 而非长期
+        # token，服务端在页面 GET 时兑换成 token 注入页面内存并立即作废 ticket，
+        # 长期 token 不再进入 URL（会进访问日志/Referer/浏览器历史）。
+        self.control_tickets: Dict[str, str] = {}
+
+    def issue_control_ticket(self, session_id: str) -> str:
+        """为会话签发一次性控制页 ticket（64 位随机，单次有效）"""
+        ticket = secrets.token_urlsafe(32)
+        self.control_tickets[ticket] = session_id
+        return ticket
+
+    def redeem_control_ticket(self, ticket: str) -> Optional[str]:
+        """兑换 ticket → session_id，成功即作废（一次性）"""
+        session_id = self.control_tickets.pop(ticket, None)
+        if session_id is None:
+            return None
+        # 会话可能已结束：ticket 一并失效
+        if session_id not in self.active_sessions:
+            return None
+        return session_id
 
     async def create_session(
         self,
@@ -364,6 +384,10 @@ class CaptchaRemoteController:
     async def close_session(self, session_id: str):
         if session_id in self.active_sessions:
             del self.active_sessions[session_id]
+            # 一并清理关联的一次性控制票
+            stale = [t for t, s in self.control_tickets.items() if s == session_id]
+            for t in stale:
+                self.control_tickets.pop(t, None)
             logger.info(f"关闭远程控制会话: {session_id}")
 
     async def auto_refresh_screenshot(self, session_id: str, interval: float = 1.0):

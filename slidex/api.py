@@ -62,9 +62,21 @@ class SessionCheckRequest(BaseModel):
 # =============================================================================
 
 @router.websocket("/ws/{session_id}")
-async def websocket_endpoint(websocket: WebSocket, session_id: str, token: Optional[str] = Query(default=None)):
+async def websocket_endpoint(websocket: WebSocket, session_id: str):
     await websocket.accept()
     logger.info(f"WebSocket 连接建立: {session_id}")
+
+    # token 不再从 URL query 传入（会进访问日志），改由客户端建立连接后
+    # 通过首条消息 {"type":"auth","token":...} 鉴权。
+    try:
+        first = await asyncio.wait_for(websocket.receive_json(), timeout=10.0)
+    except (asyncio.TimeoutError, WebSocketDisconnect):
+        await websocket.close(code=1008)
+        return
+
+    token = None
+    if isinstance(first, dict) and first.get("type") == "auth":
+        token = first.get("token")
 
     if not captcha_controller.verify_session_token(session_id, token):
         await websocket.send_json({
@@ -313,8 +325,12 @@ async def captcha_control_page():
 
 
 @router.get("/control/{session_id}", response_class=HTMLResponse)
-async def captcha_control_page_with_session(session_id: str, token: Optional[str] = Query(default=None)):
-    _verify_session_or_404(session_id, token)
+async def captcha_control_page_with_session(session_id: str, ticket: Optional[str] = Query(default=None)):
+    # 一次性 ticket 兑换：长期 token 不进 URL（URL 会进访问日志/Referer/浏览器历史），
+    # ticket 换取成功后即失效，token 由服务端会话存储取出注入页面内存。
+    if not ticket or captcha_controller.redeem_control_ticket(ticket) != session_id:
+        raise HTTPException(status_code=403, detail="无效或已失效的控制票")
+    token = captcha_controller.get_session_token(session_id)
     if os.path.exists(_HTML_FILE):
         with open(_HTML_FILE, 'r', encoding='utf-8') as f:
             html_content = f.read()
