@@ -9,6 +9,7 @@ from slidex._stealth_patch import STEALTH_LAUNCH_ARGS, STEALTH_INIT_SCRIPT
 from slidex._trajectory import generate_trajectory, trajectory_to_points
 from slidex._image_match import SliderImageMatcher
 from slidex._trajectory_pool import SliderTrajectoryPool
+from slidex._sanitize import sanitize_pure_user_id
 from slidex.config import SlidexConfig
 from slidex._provider_mixin import ProviderSolverMixin
 from slidex._chromium_lifecycle import (
@@ -67,9 +68,7 @@ class SliderSolver(ProviderSolverMixin):
 
         self.cookie_id = cookie_id
         raw_id = cookie_id.split("_")[0] if "_" in cookie_id else cookie_id
-        sanitized = "".join(c for c in raw_id if c.isalnum() or c in "-_.")
-        sanitized = sanitized.strip(".").replace("..", ".")
-        self.pure_user_id = sanitized or "default"
+        self.pure_user_id = sanitize_pure_user_id(raw_id)
         self.cookies_str = str(cookies_str or "").strip()
         self.headless = headless
         self.proxy = dict(proxy or {})

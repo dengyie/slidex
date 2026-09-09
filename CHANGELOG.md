@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.5] - 2026-09-10
+
+Follow-up hardening from the 0.5.4 re-review.
+
+### Fixed
+- The user/cookie account id sanitizer existed as three near-identical copies
+  (`_concurrency` slot identity, `solver` profile dir, trajectory pool cookie
+  subdir) that could drift apart. Consolidated into a single
+  `slidex/_sanitize.sanitize_pure_user_id()` helper; all three call sites now
+  delegate to it.
+- Windows reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`,
+  `LPT1-9`, case-insensitive) passed the sanitizer verbatim and failed as a
+  trajectory cookie subdirectory on NTFS (OSError, silently swallowed). They
+  are now escaped with a trailing underscore (`CON` → `CON_`), verified on
+  Windows with a live save/load round-trip.
+
 ## [0.5.4] - 2026-09-10
 
 Production review of the 0.5.2/0.5.3 follow-up round: all remaining findings

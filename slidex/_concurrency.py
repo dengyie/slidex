@@ -5,23 +5,11 @@
 import threading
 import time
 from loguru import logger
+from slidex._sanitize import sanitize_pure_user_id
 
 # 默认值，可被 SlidexConfig 覆盖
 DEFAULT_MAX_CONCURRENT = 3
 DEFAULT_WAIT_TIMEOUT = 60
-
-
-def sanitize_pure_user_id(user_id: str) -> str:
-    """把账号标识清洗成只能作为单一路径段的安全文件名基调。
-
-    账号标识会被用于并发槽位身份、日志与 per-账号历史文件（trajectory_history/
-    {id}_*.json）。若原样进入文件名，含 `/`、`\\`、`..` 的 id 可穿越出历史目录
-    （历史上 relative 路径时代同样可逃逸到 CWD 任意处）。清洗只保留字母数字与
-    `-_ .`，并收敛 `..` 片段，结果不含任何路径分隔符。
-    """
-    cleaned = "".join(c for c in str(user_id) if c.isalnum() or c in "-_.")
-    cleaned = cleaned.strip(".").replace("..", ".")
-    return cleaned or "default"
 
 
 class SliderConcurrencyManager:

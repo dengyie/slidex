@@ -442,6 +442,45 @@ class TestPureUserIdSanitization:
         # 反斜杠与 .. 前缀被清洗，不能逃出历史目录
         assert manager._extract_pure_user_id("..\\user") == "user"
 
+    def test_windows_reserved_names_are_escaped(self):
+        from slidex._concurrency import sanitize_pure_user_id
+
+        # NTFS 保留设备名：直接当目录名会 OSError，必须转义且不再命中保留名
+        for name in ("CON", "con", "PrN", "AUX", "NUL", "COM1", "COM9", "LPT1", "LPT9"):
+            escaped = sanitize_pure_user_id(name)
+            assert escaped != name, f"{name!r} must not pass through verbatim"
+            assert escaped.endswith("_")
+            # 转义只是追加下划线，不改变原有身份拼写（大小写不敏感匹配）
+            assert escaped[:-1].upper() == name.upper()
+
+        # 非保留名不受影响
+        assert sanitize_pure_user_id("console") == "console"
+        assert sanitize_pure_user_id("com1x") == "com1x"
+
+    def test_trajectory_pool_delegates_to_shared_sanitizer(self):
+        from slidex._sanitize import sanitize_pure_user_id
+        from slidex._trajectory_pool import SliderTrajectoryPool
+
+        for raw in ("..\\..\\evil", "CON", "user123", "", None):
+            assert (
+                SliderTrajectoryPool._sanitize_cookie_id(raw)
+                == sanitize_pure_user_id(raw)
+            )
+
+    def test_solver_profile_dir_uses_sanitized_id(self):
+        from pathlib import Path
+        from slidex.config import SlidexConfig
+        from slidex.solver import SliderSolver
+
+        cfg = SlidexConfig()
+        solver = SliderSolver(cookie_id="CON", config=cfg)
+        assert solver.pure_user_id == "CON_"
+        # profile 目录必须是基准目录下的单段路径
+        assert solver.profile_dir.is_relative_to(
+            Path(cfg.get_browser_data_dir())
+        )
+        assert "/" not in solver.pure_user_id and "\\" not in solver.pure_user_id
+
 
 class TestControlTicketFlow:
     """P3: control URL carries a one-time ticket, never the session token."""

@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from loguru import logger
+from slidex._sanitize import sanitize_pure_user_id
 
 
 class SliderTrajectoryPool:
@@ -33,9 +34,8 @@ class SliderTrajectoryPool:
     # ── cookie 子目录 ──────────────────────────────────────────
     @staticmethod
     def _sanitize_cookie_id(cookie_id: str) -> str:
-        safe = "".join(c for c in str(cookie_id or "") if c.isalnum() or c in "-_.")
-        safe = safe.strip(".").replace("..", ".")
-        return safe or "default"
+        """委托共享清洗：保留名转义、.. 收敛、分隔符剔除"""
+        return sanitize_pure_user_id(cookie_id)
 
     def _cookie_dir(self, cookie_id: str) -> Path:
         base = self.base_dir.resolve()
