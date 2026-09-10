@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.5.8] - 2026-09-10
+
+Dependency governance: bound the floating majors that broke CI, and restore
+green CI after the starlette 1.x TestClient change.
+
+### Fixed
+- CI was red since 0.5.4: starlette 1.x's `TestClient` requires the `httpx2`
+  package, so `tests/test_ws_auth.py` failed at collection time. `httpx2` is
+  now part of the `dev` extra.
+- `test_ws_accepts_valid_token` asserted the websocket registration *after*
+  the `with` block; starlette 1.6 delivers the disconnect before the block
+  exits, so the endpoint's `finally` (the intended cleanup) had already
+  removed it. The assertion now runs while the connection is alive.
+
+### Changed
+- The `remote` extra bounds the majors an unpinned install was free to cross
+  (`fastapi<2.0.0`, explicit `starlette<2.0.0`, `uvicorn[standard]<1.0.0`,
+  `pydantic<3.0.0`); the `dev` extra bounds the pytest family and
+  `httpx2<3.0.0`. Starlette is declared explicitly because fastapi's own
+  range allows starlette majors, and a starlette major is what broke CI.
+
 ## [0.5.7] - 2026-09-10
 
 Review follow-up: explicit browser-data configuration takes precedence over

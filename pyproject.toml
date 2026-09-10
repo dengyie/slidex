@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "slidex"
-version = "0.5.7"
+version = "0.5.8"
 description = "专业滑块验证码求解库 | Professional Slider CAPTCHA Solver — Multi-provider auto-detection, CDP mode, plugin-extensible"
 requires-python = ">=3.10"
 license = "MIT"
@@ -33,18 +33,20 @@ automation-kit = [
     "automation-kit>=0.4.0,<0.5.0",
 ]
 remote = [
-    "fastapi>=0.111.0",
-    "uvicorn[standard]>=0.29.0",
-    "pydantic>=2.7.0",
+    "fastapi>=0.111.0,<2.0.0",
+    # fastapi 自身的范围允许 starlette 跨 major，而其 major 会改 TestClient / WS
+    # 行为（1.0 起 TestClient 改依赖 httpx2，曾让 CI 自 0.5.4 起全红），显式锁 major。
+    "starlette<2.0.0",
+    "uvicorn[standard]>=0.29.0,<1.0.0",
+    "pydantic>=2.7.0,<3.0.0",
 ]
 dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.24",
-    "pytest-timeout>=2.0",
-    "pytest-mock>=3.12",
-    # starlette>=1.0 的 TestClient 依赖 httpx2（httpx 的继任包），
-    # 仅测试用（fastapi.testclient / tests/test_ws_auth.py）
-    "httpx2>=2.0.0",
+    "pytest>=8.0,<10.0",
+    "pytest-asyncio>=0.24,<2.0",
+    "pytest-timeout>=2.0,<3.0",
+    "pytest-mock>=3.12,<4.0",
+    # starlette>=1.0 的 TestClient 需要 httpx2（httpx 的继任包），仅测试用
+    "httpx2>=2.0.0,<3.0.0",
 ]
 all = [
     "slidex[automation-kit,remote,dev]",
