@@ -95,6 +95,7 @@ def test_ws_accepts_valid_token(ws_client):
     with ws_client.websocket_connect("/api/captcha/ws/s1") as ws:
         ws.send_json({"type": "auth", "token": "right"})
         msg = ws.receive_json()
+        # 连接活跃期间应已注册；断开后 endpoint 的 finally 会清理
+        assert captcha_controller.websocket_connections.get("s1") is not None
 
     assert msg["type"] == "session_info"
-    assert captcha_controller.websocket_connections.get("s1") is not None

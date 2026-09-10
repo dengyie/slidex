@@ -42,6 +42,9 @@ dev = [
     "pytest-asyncio>=0.24",
     "pytest-timeout>=2.0",
     "pytest-mock>=3.12",
+    # starlette>=1.0 的 TestClient 依赖 httpx2（httpx 的继任包），
+    # 仅测试用（fastapi.testclient / tests/test_ws_auth.py）
+    "httpx2>=2.0.0",
 ]
 all = [
     "slidex[automation-kit,remote,dev]",
