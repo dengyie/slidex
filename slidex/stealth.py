@@ -2091,17 +2091,23 @@ class XianyuSliderStealth:
     def _resolve_account_profile_dir(self) -> str:
         """账号级浏览器数据目录（跨运行持久，保存登录态）。
 
-        优先返回显式配置的 account_persistent_profile_dir；否则用 SlidexConfig
-        的稳定 browser_data 目录（默认 ~/.slidex/browser_data，可经
-        SLIDEX_BROWSER_DATA_DIR 覆盖）。历史实现默认 CWD 相对
-        browser_data/user_{id}：若该账号在 CWD 下已有累积的登录态目录，仍沿用
-        之（保证升级后不静默掉登录），新账号一律落到稳定目录。
+        优先级：显式 account_persistent_profile_dir > 显式 browser_data_dir
+        （构造参数或 SLIDEX_BROWSER_DATA_DIR）> 历史 CWD 目录沿用 > 默认稳定
+        目录（~/.slidex/browser_data）。历史实现默认 CWD 相对
+        browser_data/user_{id}：仅在无任何显式配置且该账号的 CWD 历史目录已
+        存在时沿用之（保证升级后不静默掉登录）；显式配置一路优先。
         """
         explicit = str(getattr(self, "account_persistent_profile_dir", None) or "").strip()
         if explicit:
             os.makedirs(explicit, exist_ok=True)
             return explicit
         cfg = getattr(self, "_slidex_config", None)
+        if cfg is not None and cfg.browser_data_dir:
+            # 显式配置：目录意图明确，不做任何历史沿用推断
+            explicit_base_dir = cfg.get_browser_data_dir()
+            explicit_dir = os.path.join(explicit_base_dir, f"user_{self.pure_user_id}")
+            os.makedirs(explicit_dir, exist_ok=True)
+            return explicit_dir
         if cfg is not None:
             stable_base = cfg.get_browser_data_dir()
         else:
@@ -2111,7 +2117,8 @@ class XianyuSliderStealth:
         if os.path.isdir(legacy_dir):
             logger.info(
                 f"【{self.pure_user_id}】沿用历史浏览器目录: {legacy_dir}"
-                f"（新目录为 {stable_dir}，可用 SLIDEX_BROWSER_DATA_DIR 统一）"
+                f"（新账号目录为 {stable_dir}；可设置 SLIDEX_BROWSER_DATA_DIR "
+                f"显式指定稳定目录以统一管理）"
             )
             return legacy_dir
         os.makedirs(stable_dir, exist_ok=True)
