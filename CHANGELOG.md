@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.5.7] - 2026-09-10
+
+Review follow-up: explicit browser-data configuration takes precedence over
+legacy CWD profile inference.
+
+### Fixed
+- `XianyuSliderStealth._resolve_account_profile_dir()` honored a legacy
+  CWD `browser_data/` directory even when the operator explicitly set
+  `SLIDEX_BROWSER_DATA_DIR` (or passed `browser_data_dir`) — the explicit
+  intent was silently ignored and the account stayed on the old location,
+  splitting profiles across two places. Precedence is now
+  `account_persistent_profile_dir` > explicit `browser_data_dir` > legacy
+  CWD dir (only when nothing is configured) > default stable
+  `~/.slidex/browser_data`. The legacy branch log message was corrected to
+  match (it is now only reachable in the unconfigured case).
+- Tests: `tests/test_stealth_dirs.py` gains `test_explicit_config_beats_legacy_dir`
+  and `test_default_no_legacy_uses_stable_home_dir`; the legacy-honoring
+  test now uses an unconfigured config. 306 passed / 9 skipped.
+
 ## [0.5.6] - 2026-09-10
 
 Final CWD-drift cleanup across the stealth stack.
