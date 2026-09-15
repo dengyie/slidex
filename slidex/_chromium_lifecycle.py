@@ -77,7 +77,8 @@ def kill_chromium_process_tree(pid):
 
     Used after finally-cleanup regardless of whether close() succeeded
     (including greenlet/timeout errors) so that Chromium never outlives
-    its session and exhausts RAM.
+    its session and exhausts RAM. Verifies the root process is actually
+    a Chromium binary before killing to prevent PID-reuse friendly fire.
     """
     killed = 0
     try:
@@ -87,6 +88,16 @@ def kill_chromium_process_tree(pid):
     except Exception as tree_err:
         logger.warning(f"[slider] Inspect Chromium PID={pid} failed: {tree_err}")
         return 0
+
+    try:
+        if not _is_chromium_name(proc.name()):
+            logger.warning(f"[slider] PID={pid} is no longer a Chromium process (name={proc.name()}), skip kill (PID-reuse guard)")
+            return 0
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return 0
+    except Exception as tree_err:
+        # 校验失败不阻塞兜底（进程确实存在），仅记录
+        logger.warning(f"[slider] Read PID={pid} name failed (kill attempt continues): {tree_err}")
 
     try:
         children = proc.children(recursive=True)

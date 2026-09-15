@@ -58,5 +58,14 @@ class TestKillChromiumProcessTree:
         with patch.object(psutil, "Process", side_effect=psutil.ZombieProcess(100)):
             assert _chromium_lifecycle.kill_chromium_process_tree(100) == 0
 
+    def test_non_chromium_root_skipped_pid_reuse_guard(self):
+        """quit 后 PID 被回收复用为无关进程时不得误杀。"""
+        proc = _make_proc(100, name="python3")
+
+        with patch.object(psutil, "Process", return_value=proc):
+            assert _chromium_lifecycle.kill_chromium_process_tree(100) == 0
+
+        proc.kill.assert_not_called()
+
     def test_exported_in_module_all(self):
         assert "kill_chromium_process_tree" in _chromium_lifecycle.__all__

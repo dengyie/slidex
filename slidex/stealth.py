@@ -11303,6 +11303,24 @@ class XianyuSliderStealth:
             
             finally:
                 # 关闭浏览器。这里不能无限阻塞，否则上层会话会一直卡在 processing。
+                # 同线程 close 挂死防护：close 卡死会让后面的进程树强杀永远执行
+                # 不到（ Chromium 变成"父进程存活"的泄漏，孤儿回收器不越权）。
+                # psutil 强杀 OS 进程不经过 Playwright greenlet，线程安全——
+                # 独立线程计时，超时后强杀进程树，反而解除主线程的 close 阻塞。
+                close_watchdog = None
+                if browser_pid:
+                    try:
+                        close_watchdog = threading.Timer(
+                            30.0,
+                            _lifecycle.kill_chromium_process_tree,
+                            args=(browser_pid,),
+                        )
+                        close_watchdog.daemon = True
+                        close_watchdog.start()
+                    except Exception as wd_err:
+                        logger.warning(f"【{self.pure_user_id}】关闭看门狗启动失败（不影响正常清理）: {wd_err}")
+                        close_watchdog = None
+
                 try:
                     close_errors = []
 
@@ -11330,6 +11348,11 @@ class XianyuSliderStealth:
                         logger.info(f"【{self.pure_user_id}】浏览器已关闭，缓存已保存")
                 except Exception as e:
                     logger.warning(f"【{self.pure_user_id}】关闭浏览器时出错: {e}")
+                finally:
+                    # 放在 finally：无论清理是否走完都取消看门狗，避免按已过期的
+                    # PID 误杀后续新会话的浏览器（PID 复用防护：kill 内部还有进程名校验）
+                    if close_watchdog:
+                        close_watchdog.cancel()
 
                 # 进程树强杀兜底：无论上面 close 是否成功（含 greenlet/超时异常），
                 # 只要 Chromium OS 进程仍存活就按 PID 递归终止，杜绝进程残留泄漏。
