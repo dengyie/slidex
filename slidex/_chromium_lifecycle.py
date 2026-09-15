@@ -71,6 +71,53 @@ def record_chromium_pid(pid):
     logger.info(f"[slider] Recorded Chromium PID={pid}")
 
 
+def kill_chromium_process_tree(pid):
+    """
+    Recursively kill an observed Chromium OS process and all its children.
+
+    Used after finally-cleanup regardless of whether close() succeeded
+    (including greenlet/timeout errors) so that Chromium never outlives
+    its session and exhausts RAM.
+    """
+    killed = 0
+    try:
+        proc = psutil.Process(pid)
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        return 0
+    except Exception as tree_err:
+        logger.warning(f"[slider] Inspect Chromium PID={pid} failed: {tree_err}")
+        return 0
+
+    try:
+        children = proc.children(recursive=True)
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+        children = []
+    except Exception as tree_err:
+        logger.warning(f"[slider] Enumerate Chromium children PID={pid} failed: {tree_err}")
+        children = []
+
+    for child in children:
+        try:
+            child.kill()
+            killed += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+        except Exception as tree_err:
+            logger.warning(f"[slider] Kill Chromium child PID={child.pid} failed: {tree_err}")
+
+    try:
+        proc.kill()
+        killed += 1
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+        pass
+    except Exception as tree_err:
+        logger.warning(f"[slider] Kill Chromium PID={pid} failed: {tree_err}")
+
+    if killed:
+        logger.info(f"[slider] Killed Chromium process tree PID={pid} ({killed} processes)")
+    return killed
+
+
 async def ensure_previous_chromium_closed():
     """
     Ensure any previously recorded Chromium process is closed.
@@ -170,6 +217,7 @@ async def ensure_profile_chromium_closed(user_data_dir):
 __all__ = [
     "get_pid_lock",
     "kill_chromium_by_pid",
+    "kill_chromium_process_tree",
     "record_chromium_pid",
     "ensure_previous_chromium_closed",
     "ensure_profile_chromium_closed",

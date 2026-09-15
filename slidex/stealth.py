@@ -10416,6 +10416,23 @@ class XianyuSliderStealth:
 
             if not browser:
                 browser = context.browser
+
+            # 记录 Chromium 主进程 OS PID：任何退出路径（尤其 finally 清理失败时）
+            # 都需要能按 PID 强杀整棵进程树，否则 Chromium 残留会耗尽内存
+            try:
+                from . import _chromium_lifecycle as _lifecycle
+            except ImportError:
+                import _chromium_lifecycle as _lifecycle
+            browser_pid = None
+            try:
+                _proc_pid = getattr(getattr(browser, 'process', None), 'pid', None)
+                if _proc_pid:
+                    browser_pid = int(_proc_pid)
+            except (TypeError, ValueError):
+                pass
+            if browser_pid:
+                logger.info(f"【{self.pure_user_id}】密码登录浏览器 OS PID: {browser_pid}")
+
             page = context.new_page()
             self._apply_headless_network_fingerprint(page, browser_features)
             observed_set_cookie_updates: Dict[str, str] = {}
@@ -11289,36 +11306,23 @@ class XianyuSliderStealth:
                 try:
                     close_errors = []
 
-                    def _close_runtime_resources():
+                    def _safe_close(obj_name, obj, action):
+                        # Playwright sync API 绑定创建线程的 greenlet：必须在同一线程
+                        # 直接调用，跨线程调用必抛 "Cannot switch to a different thread"
+                        # 且导致 close 实际未执行（历史泄漏根因）。
+                        if not obj:
+                            return
                         try:
-                            if context:
-                                context.close()
-                        except Exception as close_context_err:
-                            close_errors.append(f"context.close: {close_context_err}")
+                            getattr(obj, action)()
+                        except Exception as close_err:
+                            close_errors.append(f"{obj_name}.{action}: {close_err}")
 
-                        if effective_clean_context and browser:
-                            try:
-                                browser.close()
-                            except Exception as close_browser_err:
-                                close_errors.append(f"browser.close: {close_browser_err}")
+                    _safe_close("context", context, "close")
+                    if effective_clean_context:
+                        _safe_close("browser", browser, "close")
+                    _safe_close("playwright", playwright, "stop")
 
-                        try:
-                            if playwright:
-                                playwright.stop()
-                        except Exception as stop_playwright_err:
-                            close_errors.append(f"playwright.stop: {stop_playwright_err}")
-
-                    close_thread = threading.Thread(
-                        target=_close_runtime_resources,
-                        name=f"pwd-login-close-{self.pure_user_id}",
-                        daemon=True,
-                    )
-                    close_thread.start()
-                    close_thread.join(timeout=8)
-
-                    if close_thread.is_alive():
-                        logger.warning(f"【{self.pure_user_id}】关闭浏览器超时，改为后台继续清理，避免阻塞密码登录会话收尾")
-                    elif close_errors:
+                    if close_errors:
                         logger.warning(f"【{self.pure_user_id}】关闭浏览器时出现异常: {close_errors}")
                     elif effective_clean_context:
                         logger.info(f"【{self.pure_user_id}】浏览器已关闭，干净上下文已销毁")
@@ -11326,6 +11330,16 @@ class XianyuSliderStealth:
                         logger.info(f"【{self.pure_user_id}】浏览器已关闭，缓存已保存")
                 except Exception as e:
                     logger.warning(f"【{self.pure_user_id}】关闭浏览器时出错: {e}")
+
+                # 进程树强杀兜底：无论上面 close 是否成功（含 greenlet/超时异常），
+                # 只要 Chromium OS 进程仍存活就按 PID 递归终止，杜绝进程残留泄漏。
+                try:
+                    if browser_pid:
+                        _killed = _lifecycle.kill_chromium_process_tree(browser_pid)
+                        if _killed:
+                            logger.info(f"【{self.pure_user_id}】兜底强杀 Chromium 进程树 PID={browser_pid}")
+                except Exception as kill_err:
+                    logger.warning(f"【{self.pure_user_id}】进程树兜底清理失败: {kill_err}")
 
                 # 释放并发槽位（防止槽位泄漏导致后续任务永远等待）
                 try:
