@@ -11351,6 +11351,18 @@ class XianyuSliderStealth:
             logger.error(f"【{self.pure_user_id}】密码登录流程异常: {e}")
             import traceback
             logger.error(traceback.format_exc())
+            # 早退兜底：browser_pid 已记录但异常发生在内层 try 覆盖范围之外
+            # （如 stealth 脚本注入失败）时，浏览器进程树不会被内层 finally
+            # 强杀——这里补一刀，杜绝任何启动后早退路径的 Chromium 残留。
+            try:
+                _late_pid = locals().get('browser_pid')
+                _late_lifecycle = locals().get('_lifecycle')
+                if _late_pid and _late_lifecycle:
+                    _killed = _late_lifecycle.kill_chromium_process_tree(_late_pid)
+                    if _killed:
+                        logger.info(f"【{self.pure_user_id}】早退兜底强杀 Chromium 进程树 PID={_late_pid}")
+            except Exception as late_kill_err:
+                logger.warning(f"【{self.pure_user_id}】早退兜底清理失败: {late_kill_err}")
             error_message = str(e)
             if self._is_profile_in_use_launch_error(e):
                 return self._fail_login("浏览器用户目录正被其他登录流程占用，请稍后重试")
