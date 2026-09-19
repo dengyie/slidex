@@ -1819,6 +1819,66 @@ class XianyuSliderStealth:
     def _should_force_docker_cold_start_conservative(self, attempt: int, has_learning: bool) -> bool:
         return attempt == 1 and self._should_prefer_docker_conservative_profile(has_learning)
 
+    def _get_user_agent_data_override_script(self, browser_features: Dict[str, Any]) -> str:
+        """userAgentData 覆盖片段（自包含 IIFE，可与轻量脚本拼接）。
+
+        UA 池把 navigator.userAgent 改成池内版本，但 userAgentData 是 Chromium
+        按真实内核生成的只读属性：不覆盖就会 UA=池版本 vs brands=真实内核
+        自相矛盾。阿里 punish 的风控 JS 只读 navigator.userAgent / platform /
+        userAgentData.brands 三个属性即可零成本判自动化（2026-09-19 滑块
+        400+ 次全败 error:hwR4mj 的根因之一，见 2026-09-19 排查记录）。
+        """
+        hints = self._build_client_hint_profile(browser_features)
+        brands_json = json.dumps(hints["brands"], ensure_ascii=False)
+        full_version_list_json = json.dumps(hints["fullVersionList"], ensure_ascii=False)
+        return f"""
+            (() => {{
+                const defineGetter = (target, key, getter) => {{
+                    try {{
+                        Object.defineProperty(target, key, {{
+                            get: getter,
+                            configurable: true
+                        }});
+                    }} catch (e) {{}}
+                }};
+
+                const uaData = {{
+                    brands: {brands_json},
+                    mobile: {str(bool(browser_features.get("is_mobile"))).lower()},
+                    platform: {json.dumps(hints["platformName"], ensure_ascii=False)},
+                    getHighEntropyValues: async (requestedHints) => {{
+                        const payload = {{
+                            architecture: {json.dumps(hints["architecture"])},
+                            bitness: {json.dumps(hints["bitness"])},
+                            brands: {brands_json},
+                            fullVersionList: {full_version_list_json},
+                            mobile: {str(bool(hints["mobile"])).lower()},
+                            model: {json.dumps(hints["model"])},
+                            platform: {json.dumps(hints["platformName"], ensure_ascii=False)},
+                            platformVersion: {json.dumps(hints["platformVersion"])},
+                            uaFullVersion: {json.dumps(hints["fullVersion"])},
+                            wow64: {str(bool(hints["wow64"])).lower()}
+                        }};
+                        if (!Array.isArray(requestedHints) || requestedHints.length === 0) {{
+                            return payload;
+                        }}
+                        const result = {{}};
+                        for (const key of requestedHints) {{
+                            if (Object.prototype.hasOwnProperty.call(payload, key)) {{
+                                result[key] = payload[key];
+                            }}
+                        }}
+                        return result;
+                    }},
+                    toJSON() {{
+                        return {{ brands: this.brands, mobile: this.mobile, platform: this.platform }};
+                    }}
+                }};
+
+                defineGetter(Navigator.prototype, 'userAgentData', () => uaData);
+            }})();
+        """
+
     def _get_light_stealth_script(self, browser_features: Dict[str, Any]) -> str:
         locale = json.dumps(browser_features.get("locale") or "zh-CN", ensure_ascii=False)
         platform = json.dumps(browser_features.get("platform") or "Win32", ensure_ascii=False)
@@ -1847,7 +1907,36 @@ class XianyuSliderStealth:
                 }}
                 window.chrome.runtime = window.chrome.runtime || {{}};
             }})();
+        """ + self._get_user_agent_data_override_script(browser_features)
+
+    def _get_headful_stealth_script(self, browser_features: Dict[str, Any]) -> str:
+        """有头模式的「指纹一致性」脚本。
+
+        白屏约束不变：不得覆盖 document.fonts / EventTarget / Performance.now /
+        Date 等渲染核心 API（有头登录页会整页白屏）。但 platform /
+        userAgent 必须与 UA 池对齐，userAgentData 必须与 UA 版本对齐；
+        plugins 有头下本来就是真实 PluginArray，保留真实值（历史实现注入的
+        数字数组本身就是破绽，全源码禁止再出现）。
+
+        webdriver 必须是 present 的 false（与 full 脚本一致）：真实有头
+        Chrome 该属性存在且值为 false，置 undefined（属性缺失语义）本身就是
+        可探测的异常形态。
         """
+        webdriver_snippet = """
+            (() => {
+                const defineGetter = (target, key, getter) => {
+                    try {
+                        Object.defineProperty(target, key, {
+                            get: getter,
+                            configurable: true
+                        });
+                    } catch (e) {}
+                };
+                defineGetter(Navigator.prototype, 'webdriver', () => false);
+            })();
+        """
+        return self._get_light_stealth_script(browser_features) + webdriver_snippet
+
 
     def _install_stealth_init_script(self, page, browser_features: Dict[str, Any], mode_override: Optional[str] = None):
         mode = str(mode_override or "").strip().lower() or self._resolve_stealth_mode()
@@ -1975,9 +2064,6 @@ class XianyuSliderStealth:
                 } catch (e) {}
                 try {
                     defineGetter(Navigator.prototype, 'languages', () => ['zh-CN', 'zh', 'en']);
-                } catch (e) {}
-                try {
-                    defineGetter(Navigator.prototype, 'plugins', () => [1, 2, 3, 4, 5]);
                 } catch (e) {}
                 try {
                     window.chrome = window.chrome || {};
@@ -6043,6 +6129,17 @@ class XianyuSliderStealth:
 
         sec_ch_ua = ", ".join(sec_ch_ua_parts)
 
+        # navigator.platform（"Win32"）与 userAgentData.platform / sec-ch-ua-platform
+        # （"Windows"）在真实 Chrome 里是两个不同的值：前者是底层平台标识，后者是
+        # 高层平台名。历史上混用 "Win32" 导致 JS 侧 userAgentData.platform 与
+        # 网络层 sec-ch-ua-platform 头都发出真实 Chrome 永远不会发的值。
+        navigator_platform = browser_features.get("platform") or "Win32"
+        platform_name = "Windows"
+        if navigator_platform.startswith("Mac"):
+            platform_name = "macOS"
+        elif navigator_platform.startswith("Linux"):
+            platform_name = "Linux"
+
         return {
             "userAgent": user_agent,
             "fullVersion": full_version,
@@ -6051,8 +6148,9 @@ class XianyuSliderStealth:
             "fullVersionList": full_version_list,
             "secChUa": sec_ch_ua,
             "secChUaMobile": "?1" if browser_features.get("is_mobile") else "?0",
-            "secChUaPlatform": f'"{browser_features.get("platform") or "Windows"}"',
-            "platform": browser_features.get("platform") or "Windows",
+            "secChUaPlatform": f'"{platform_name}"',
+            "platform": navigator_platform,
+            "platformName": platform_name,
             "platformVersion": "10.0.0",
             "architecture": "x86",
             "bitness": "64",
@@ -6069,8 +6167,16 @@ class XianyuSliderStealth:
             "sec-ch-ua-platform": hints["secChUaPlatform"],
         }
 
-    def _apply_headless_network_fingerprint(self, page, browser_features: Dict[str, Any]):
-        if not self.headless or not self.context or not page:
+    def _apply_network_fingerprint(self, page, browser_features: Dict[str, Any]):
+        """网络层 UA/UA-CH 统一（CDP setUserAgentOverride）。
+
+        有头也要应用：context 级 user_agent 只改 User-Agent 头与
+        navigator.userAgent，Sec-CH-UA 头仍是真实内核派生值（头层 UA vs
+        UA-CH 自相矛盾）；且 metadata.platform 顺带把 navigator.platform
+        统一到 Win32，比 init script 多一层保险。CDP 只影响网络头与
+        UA 元数据，不碰渲染，无白屏风险。
+        """
+        if not self.context or not page:
             return
 
         try:
@@ -6087,7 +6193,7 @@ class XianyuSliderStealth:
                         "brands": hints["brands"],
                         "fullVersionList": hints["fullVersionList"],
                         "fullVersion": hints["fullVersion"],
-                        "platform": hints["platform"],
+                        "platform": hints["platformName"],
                         "platformVersion": hints["platformVersion"],
                         "architecture": hints["architecture"],
                         "bitness": hints["bitness"],
@@ -6097,9 +6203,9 @@ class XianyuSliderStealth:
                     },
                 },
             )
-            logger.info(f"【{self.pure_user_id}】已应用无头浏览器 UA/Client-Hints 网络层伪装")
+            logger.info(f"【{self.pure_user_id}】已应用浏览器 UA/Client-Hints 网络层伪装（headless={self.headless}）")
         except Exception as e:
-            logger.warning(f"【{self.pure_user_id}】应用无头网络层指纹伪装失败: {e}")
+            logger.warning(f"【{self.pure_user_id}】应用网络层指纹伪装失败: {e}")
 
     def _get_stealth_script(self, browser_features):
         """获取更接近真实桌面 Chrome 的反检测脚本。"""
@@ -6162,7 +6268,7 @@ class XianyuSliderStealth:
                 const uaData = {{
                     brands: {brands_json},
                     mobile: {str(bool(browser_features['is_mobile'])).lower()},
-                    platform: {json.dumps(client_hints['platform'], ensure_ascii=False)},
+                    platform: {json.dumps(client_hints['platformName'], ensure_ascii=False)},
                     getHighEntropyValues: async (hints) => {{
                         const payload = {{
                             architecture: {json.dumps(client_hints['architecture'])},
@@ -6171,7 +6277,7 @@ class XianyuSliderStealth:
                             fullVersionList: {full_version_list_json},
                             mobile: {str(bool(client_hints['mobile'])).lower()},
                             model: {json.dumps(client_hints['model'])},
-                            platform: {json.dumps(client_hints['platform'], ensure_ascii=False)},
+                            platform: {json.dumps(client_hints['platformName'], ensure_ascii=False)},
                             platformVersion: {json.dumps(client_hints['platformVersion'])},
                             uaFullVersion: {json.dumps(client_hints['fullVersion'])},
                             wow64: {str(bool(client_hints['wow64'])).lower()}
@@ -10434,7 +10540,7 @@ class XianyuSliderStealth:
                 logger.info(f"【{self.pure_user_id}】密码登录浏览器 OS PID: {browser_pid}")
 
             page = context.new_page()
-            self._apply_headless_network_fingerprint(page, browser_features)
+            self._apply_network_fingerprint(page, browser_features)
             observed_set_cookie_updates: Dict[str, str] = {}
 
             def _capture_response_set_cookie(response):
@@ -10464,17 +10570,19 @@ class XianyuSliderStealth:
             except Exception as listener_e:
                 logger.warning(f"【{self.pure_user_id}】注册登录响应监听失败（不影响主流程）: {listener_e}")
 
-            # 有头模式使用轻量反检测脚本（完整脚本会覆盖 document.fonts / EventTarget /
-            # Performance.now / Date 等浏览器核心 API，导致页面白屏无法渲染）；
-            # 无头模式使用完整脚本以通过自动化检测。
+            # 有头模式用「指纹一致性」脚本：platform/userAgentData 必须与 UA 池
+            # 对齐。历史实现只改 UA，放任 platform=Linux x86_64 与
+            # userAgentData.brands=真实内核裸奔、plugins 用数字数组冒充——
+            # 风控 JS 读三处自相矛盾即判自动化，滑块 400+ 次全败（error:hwR4mj）。
+            # 白屏约束不变：不覆盖 document.fonts / EventTarget /
+            # Performance.now / Date 等渲染核心 API。
             if show_browser:
-                stealth_js = """
-                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-                Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
-                window.chrome = { runtime: {} };
-                """
+                stealth_js = self._get_headful_stealth_script(browser_features)
                 page.add_init_script(stealth_js)
+                logger.info(
+                    f"【{self.pure_user_id}】已注入 headful 指纹一致性反检测脚本"
+                    "（platform/userAgentData 与 UA 池对齐，避开白屏源 API）"
+                )
             else:
                 password_login_stealth_mode = None
                 if not show_browser and not self.stealth_mode_override:
