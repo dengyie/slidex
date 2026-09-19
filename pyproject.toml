@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "slidex"
-version = "0.5.9"
+version = "0.6.0"
 description = "专业滑块验证码求解库 | Professional Slider CAPTCHA Solver — Multi-provider auto-detection, CDP mode, plugin-extensible"
 requires-python = ">=3.10"
 license = "MIT"
@@ -32,6 +32,11 @@ dependencies = [
 automation-kit = [
     "automation-kit>=0.4.0,<0.5.0",
 ]
+# 纯图片无块图缺口检测的可选深度学习后端（YOLO/ONNX，自带模型权重）。
+# 未安装时 SliderImageSolver 静默回退到零依赖的模板匹配 / 轮廓 / 列剖面策略。
+vision = [
+    "captcha-recognizer>=1.0.0,<2.0.0",
+]
 remote = [
     "fastapi>=0.111.0,<2.0.0",
     # fastapi 自身的范围允许 starlette 跨 major，而其 major 会改 TestClient / WS
@@ -49,7 +54,7 @@ dev = [
     "httpx2>=2.0.0,<3.0.0",
 ]
 all = [
-    "slidex[automation-kit,remote,dev]",
+    "slidex[automation-kit,remote,vision,dev]",
 ]
 
 [tool.setuptools.packages.find]

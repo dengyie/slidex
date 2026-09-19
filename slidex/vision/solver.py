@@ -4,7 +4,7 @@ import inspect
 import asyncio
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from slidex.ocr import FakeOcrExtractor, OcrTextExtractor
 from slidex.solver import SliderSolver
@@ -15,6 +15,15 @@ from slidex.vision.models import (
     VisualChallengeRequest,
     VisualChallengeResult,
 )
+from slidex.vision.slider_image import SliderImageResult, SliderImageSolver
+
+# slider_captcha 走纯图片求解（无浏览器）的上下文：只拿得到图片 bytes/path。
+# ANDROID_SCREENSHOT_BYTES 复用 image_bytes 字段承载整屏截图。
+_IMAGE_SLIDER_CONTEXTS = {
+    VisionContext.IMAGE_BYTES,
+    VisionContext.IMAGE_PATH,
+    VisionContext.ANDROID_SCREENSHOT_BYTES,
+}
 
 
 class VisualChallengeSolver:
@@ -23,9 +32,11 @@ class VisualChallengeSolver:
         *,
         ocr_extractor: Optional[OcrTextExtractor] = None,
         slider_solver_factory: Optional[Callable[..., SliderSolver]] = None,
+        slider_image_solver: Optional[SliderImageSolver] = None,
     ):
         self.ocr_extractor = ocr_extractor or FakeOcrExtractor()
         self.slider_solver_factory = slider_solver_factory or SliderSolver
+        self.slider_image_solver = slider_image_solver or SliderImageSolver()
 
     async def solve(self, request: VisualChallengeRequest) -> VisualChallengeResult:
         started = time.time()
@@ -34,6 +45,13 @@ class VisualChallengeSolver:
             # caller event loop remains responsive under Provider V2 runtime.
             return await asyncio.to_thread(self._solve_ocr, request, started)
         if request.challenge_type == ChallengeType.SLIDER_CAPTCHA:
+            if request.context in _IMAGE_SLIDER_CONTEXTS:
+                # 纯图片求解是 CPU 密集型，隔离到线程避免阻塞事件循环。
+                # ANDROID_SCREENSHOT_BYTES 也走这里：安卓截图无 CDP/Page，
+                # 只有整屏 bytes，走无块图缺口检测（解 dianping REQ-004）。
+                return await asyncio.to_thread(
+                    self._solve_slider_image, request, started
+                )
             return await self._solve_slider(request, started)
         return VisualChallengeResult(
             success=False,
@@ -70,6 +88,75 @@ class VisualChallengeSolver:
                 "boxes": [box.__dict__ for box in result.boxes],
                 **result.metadata,
             },
+        )
+
+    def _solve_slider_image(self, request: VisualChallengeRequest, started: float) -> VisualChallengeResult:
+        """纯图片滑块求解（IMAGE_BYTES / IMAGE_PATH 上下文），同步 CPU-bound。"""
+        use_path = request.context == VisionContext.IMAGE_PATH
+        if use_path and not request.image_path:
+            return self._slider_image_error(request, started, "missing_image_path")
+        if not use_path and not request.image_bytes:
+            # IMAGE_BYTES 与 ANDROID_SCREENSHOT_BYTES 都从 image_bytes 承载
+            return self._slider_image_error(request, started, "missing_image_bytes")
+
+        background: Any = request.image_path if use_path else request.image_bytes
+        piece: Optional[Any] = None
+        if request.piece_image_bytes is not None:
+            piece = request.piece_image_bytes
+        elif request.piece_image_path is not None:
+            piece = request.piece_image_path
+
+        distance_scale = request.metadata.get("distance_scale")
+        # bool 是 int 子类，需显式排除，否则 True/False 会被当 1.0/0.0
+        if distance_scale is not None and (
+            isinstance(distance_scale, bool)
+            or not isinstance(distance_scale, (int, float))
+        ):
+            return self._slider_image_error(request, started, "invalid_distance_scale")
+
+        result = self.slider_image_solver.solve(
+            background,
+            piece,
+            distance_scale=float(distance_scale) if distance_scale is not None else None,
+            roi=request.roi,
+        )
+        return VisualChallengeResult(
+            success=result.success,
+            challenge_type=request.challenge_type,
+            provider="slidex-image",
+            confidence=result.confidence,
+            duration_ms=self._duration_ms(started),
+            error_code=result.error_code,
+            retryable=not result.success,
+            cookies=None,
+            artifacts=[],
+            metadata={
+                "context": request.context.value,
+                "gap_x": result.gap_x,
+                "distance_px": result.distance_px,
+                "method": result.method,
+                "gap_box": result.gap_box,
+                "candidates": result.candidates,
+                **result.metadata,
+            },
+        )
+
+    @staticmethod
+    def _slider_image_error(
+        request: VisualChallengeRequest,
+        started: float,
+        error_code: str,
+    ) -> VisualChallengeResult:
+        return VisualChallengeResult(
+            success=False,
+            challenge_type=request.challenge_type,
+            provider="slidex-image",
+            duration_ms=VisualChallengeSolver._duration_ms(started),
+            error_code=error_code,
+            retryable=True,
+            cookies=None,
+            artifacts=[],
+            metadata={"context": request.context.value},
         )
 
     async def _solve_slider(self, request: VisualChallengeRequest, started: float) -> VisualChallengeResult:

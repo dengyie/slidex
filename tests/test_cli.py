@@ -387,3 +387,92 @@ class TestSlideSolveCdpCLI:
             assert False, "Should raise JSONDecodeError"
         except json.JSONDecodeError:
             pass  # 预期行为
+
+
+class TestSlideSolveImageCLI:
+    """测试纯图片滑块 CLI: slide_solve_image.py"""
+
+    def test_image_cli_help(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "slidex.scripts.slide_solve_image", "--help"],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0
+        assert "--background" in result.stdout
+        assert "--piece" in result.stdout
+
+    def test_image_run_success(self, tmp_path):
+        from slidex.scripts.slide_solve_image import _run
+        from tests.test_slider_image import (
+            encode_png,
+            make_notched_background,
+        )
+
+        bg_path = tmp_path / "bg.png"
+        bg_path.write_bytes(encode_png(make_notched_background()))
+
+        result = _run(str(bg_path), None, None, None)
+
+        assert result["success"] is True
+        assert result["provider"] == "slidex-image"
+        assert result["challenge_type"] == "slider_captcha"
+        assert abs(result["metadata"]["gap_x"] - 180) <= 6
+        assert result["error"] is None
+
+    def test_image_run_with_piece_and_roi(self, tmp_path):
+        from slidex.scripts.slide_solve_image import _run
+        from tests.test_slider_image import (
+            crop_notch,
+            encode_png,
+            make_textured_background,
+        )
+
+        bg = make_textured_background()
+        bg_path = tmp_path / "bg.png"
+        bg_path.write_bytes(encode_png(bg))
+        piece_path = tmp_path / "piece.png"
+        piece_path.write_bytes(encode_png(crop_notch(bg)))
+
+        result = _run(
+            str(bg_path), str(piece_path), 2.0, None,
+            roi={"x": 150, "y": 20, "width": 100, "height": 90},
+        )
+
+        assert result["success"] is True
+        assert result["metadata"]["method"] == "template_edge"
+        assert result["metadata"]["distance_scale"] == 2.0
+
+    def test_image_run_missing_background(self, tmp_path):
+        from slidex.scripts.slide_solve_image import _run
+
+        result = _run(str(tmp_path / "nope.png"), None, None, None)
+
+        assert result["success"] is False
+        assert result["error_code"] == "background_image_not_found"
+        assert result["retryable"] is False
+
+    def test_image_run_missing_piece(self, tmp_path):
+        from slidex.scripts.slide_solve_image import _run
+        from tests.test_slider_image import encode_png, make_notched_background
+
+        bg_path = tmp_path / "bg.png"
+        bg_path.write_bytes(encode_png(make_notched_background()))
+
+        result = _run(str(bg_path), str(tmp_path / "nope.png"), None, None)
+
+        assert result["success"] is False
+        assert result["error_code"] == "piece_image_not_found"
+
+    def test_parse_roi(self):
+        from slidex.scripts.slide_solve_image import _parse_roi
+
+        assert _parse_roi(None) is None
+        assert _parse_roi("10,20,30,40") == {
+            "x": 10.0, "y": 20.0, "width": 30.0, "height": 40.0,
+        }
+        with pytest.raises(SystemExit):
+            _parse_roi("10,20,30")
+        with pytest.raises(SystemExit):
+            _parse_roi("a,b,c,d")

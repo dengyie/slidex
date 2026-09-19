@@ -122,6 +122,9 @@ class VisualChallengeRequest:
     page_url: str = ""
     image_bytes: Optional[bytes] = None
     image_path: Optional[Path] = None
+    # slider_captcha 专用：拼图块图像（可选；缺失时走无块图缺口检测）
+    piece_image_bytes: Optional[bytes] = None
+    piece_image_path: Optional[Path] = None
     roi: Optional[Dict[str, float]] = None
     provider: str = "auto"
     timeout_ms: int = 30_000

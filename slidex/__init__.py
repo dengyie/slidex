@@ -14,6 +14,8 @@ from slidex.vision import (
     ManualFallbackSession,
     ProviderDecision,
     ProviderManifest,
+    SliderImageResult,
+    SliderImageSolver,
     VisionArtifact,
     VisionContext,
     VisualChallengeRequest,
@@ -64,6 +66,8 @@ __all__ = [
     "VisualChallengeRequest",
     "VisualChallengeResult",
     "VisualChallengeSolver",
+    "SliderImageSolver",
+    "SliderImageResult",
     # Chromium lifecycle (for tests)
     "get_pid_lock",
     "kill_chromium_by_pid",
