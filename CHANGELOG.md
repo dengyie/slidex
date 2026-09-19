@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.5.9] - 2026-09-19
+
+Fingerprint self-consistency for headful/light stealth — the slider was being
+auto-detected by three read-only navigator attributes.
+
+### Fixed
+- Headful password login injected only a 4-line stealth script (avoiding the
+  full script's document.fonts/EventTarget/Performance.now/Date overrides that
+  blank the login page). It left `navigator.platform` (real Linux x86_64),
+  `navigator.userAgentData.brands` (real kernel version) and a numeric-array
+  `plugins` fake exposed while the UA claimed Windows Chrome — three direct
+  contradictions any risk JS can check for free. New
+  `_get_headful_stealth_script` composes the light script (platform/vendor/
+  userAgent now consistent with the UA pool) with a `webdriver => false`
+  override; plugins stay real.
+- `_get_light_stealth_script` now appends a `userAgentData` override
+  (`_get_user_agent_data_override_script`) whose brands and
+  `getHighEntropyValues` are built from `_build_client_hint_profile`, so the
+  headless lite path no longer leaks the real kernel brand either.
+- `_harden_password_slider_runtime` no longer overwrites plugins with a
+  numeric array — it was clobbering the proper PluginArray shim installed by
+  the full script.
+- `_build_client_hint_profile` separates `platform` (navigator.platform,
+  "Win32") from `platformName` ("Windows"): `userAgentData.platform`, the
+  `sec-ch-ua-platform` header and the CDP `userAgentMetadata.platform` now
+  emit the high-level name real Chrome sends, not "Win32".
+- `_apply_headless_network_fingerprint` → `_apply_network_fingerprint`, no
+  longer gated on headless: headful pages get the CDP UA/UA-CH override too,
+  so the `Sec-CH-UA` header family matches the overridden UA instead of the
+  real kernel.
+
+Evidence: xianyu-auto-bot production, 400+ slider failures over 20 days
+(`error:hwR4mj`), solved from a runtime debug snapshot of the failed punish
+page. Added `tests/test_headful_stealth_consistency.py` (6 cases).
+
 ## [0.5.8] - 2026-09-10
 
 Dependency governance: bound the floating majors that broke CI, and restore

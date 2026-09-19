@@ -1845,7 +1845,7 @@ class XianyuSliderStealth:
                 const uaData = {{
                     brands: {brands_json},
                     mobile: {str(bool(browser_features.get("is_mobile"))).lower()},
-                    platform: {json.dumps(hints["platform"], ensure_ascii=False)},
+                    platform: {json.dumps(hints["platformName"], ensure_ascii=False)},
                     getHighEntropyValues: async (requestedHints) => {{
                         const payload = {{
                             architecture: {json.dumps(hints["architecture"])},
@@ -1854,7 +1854,7 @@ class XianyuSliderStealth:
                             fullVersionList: {full_version_list_json},
                             mobile: {str(bool(hints["mobile"])).lower()},
                             model: {json.dumps(hints["model"])},
-                            platform: {json.dumps(hints["platform"], ensure_ascii=False)},
+                            platform: {json.dumps(hints["platformName"], ensure_ascii=False)},
                             platformVersion: {json.dumps(hints["platformVersion"])},
                             uaFullVersion: {json.dumps(hints["fullVersion"])},
                             wow64: {str(bool(hints["wow64"])).lower()}
@@ -1917,6 +1917,10 @@ class XianyuSliderStealth:
         userAgent 必须与 UA 池对齐，userAgentData 必须与 UA 版本对齐；
         plugins 有头下本来就是真实 PluginArray，保留真实值（历史实现注入的
         数字数组本身就是破绽，全源码禁止再出现）。
+
+        webdriver 必须是 present 的 false（与 full 脚本一致）：真实有头
+        Chrome 该属性存在且值为 false，置 undefined（属性缺失语义）本身就是
+        可探测的异常形态。
         """
         webdriver_snippet = """
             (() => {
@@ -1928,7 +1932,7 @@ class XianyuSliderStealth:
                         });
                     } catch (e) {}
                 };
-                defineGetter(Navigator.prototype, 'webdriver', () => undefined);
+                defineGetter(Navigator.prototype, 'webdriver', () => false);
             })();
         """
         return self._get_light_stealth_script(browser_features) + webdriver_snippet
@@ -6125,6 +6129,17 @@ class XianyuSliderStealth:
 
         sec_ch_ua = ", ".join(sec_ch_ua_parts)
 
+        # navigator.platform（"Win32"）与 userAgentData.platform / sec-ch-ua-platform
+        # （"Windows"）在真实 Chrome 里是两个不同的值：前者是底层平台标识，后者是
+        # 高层平台名。历史上混用 "Win32" 导致 JS 侧 userAgentData.platform 与
+        # 网络层 sec-ch-ua-platform 头都发出真实 Chrome 永远不会发的值。
+        navigator_platform = browser_features.get("platform") or "Win32"
+        platform_name = "Windows"
+        if navigator_platform.startswith("Mac"):
+            platform_name = "macOS"
+        elif navigator_platform.startswith("Linux"):
+            platform_name = "Linux"
+
         return {
             "userAgent": user_agent,
             "fullVersion": full_version,
@@ -6133,8 +6148,9 @@ class XianyuSliderStealth:
             "fullVersionList": full_version_list,
             "secChUa": sec_ch_ua,
             "secChUaMobile": "?1" if browser_features.get("is_mobile") else "?0",
-            "secChUaPlatform": f'"{browser_features.get("platform") or "Windows"}"',
-            "platform": browser_features.get("platform") or "Windows",
+            "secChUaPlatform": f'"{platform_name}"',
+            "platform": navigator_platform,
+            "platformName": platform_name,
             "platformVersion": "10.0.0",
             "architecture": "x86",
             "bitness": "64",
@@ -6151,8 +6167,16 @@ class XianyuSliderStealth:
             "sec-ch-ua-platform": hints["secChUaPlatform"],
         }
 
-    def _apply_headless_network_fingerprint(self, page, browser_features: Dict[str, Any]):
-        if not self.headless or not self.context or not page:
+    def _apply_network_fingerprint(self, page, browser_features: Dict[str, Any]):
+        """网络层 UA/UA-CH 统一（CDP setUserAgentOverride）。
+
+        有头也要应用：context 级 user_agent 只改 User-Agent 头与
+        navigator.userAgent，Sec-CH-UA 头仍是真实内核派生值（头层 UA vs
+        UA-CH 自相矛盾）；且 metadata.platform 顺带把 navigator.platform
+        统一到 Win32，比 init script 多一层保险。CDP 只影响网络头与
+        UA 元数据，不碰渲染，无白屏风险。
+        """
+        if not self.context or not page:
             return
 
         try:
@@ -6169,7 +6193,7 @@ class XianyuSliderStealth:
                         "brands": hints["brands"],
                         "fullVersionList": hints["fullVersionList"],
                         "fullVersion": hints["fullVersion"],
-                        "platform": hints["platform"],
+                        "platform": hints["platformName"],
                         "platformVersion": hints["platformVersion"],
                         "architecture": hints["architecture"],
                         "bitness": hints["bitness"],
@@ -6179,9 +6203,9 @@ class XianyuSliderStealth:
                     },
                 },
             )
-            logger.info(f"【{self.pure_user_id}】已应用无头浏览器 UA/Client-Hints 网络层伪装")
+            logger.info(f"【{self.pure_user_id}】已应用浏览器 UA/Client-Hints 网络层伪装（headless={self.headless}）")
         except Exception as e:
-            logger.warning(f"【{self.pure_user_id}】应用无头网络层指纹伪装失败: {e}")
+            logger.warning(f"【{self.pure_user_id}】应用网络层指纹伪装失败: {e}")
 
     def _get_stealth_script(self, browser_features):
         """获取更接近真实桌面 Chrome 的反检测脚本。"""
@@ -6244,7 +6268,7 @@ class XianyuSliderStealth:
                 const uaData = {{
                     brands: {brands_json},
                     mobile: {str(bool(browser_features['is_mobile'])).lower()},
-                    platform: {json.dumps(client_hints['platform'], ensure_ascii=False)},
+                    platform: {json.dumps(client_hints['platformName'], ensure_ascii=False)},
                     getHighEntropyValues: async (hints) => {{
                         const payload = {{
                             architecture: {json.dumps(client_hints['architecture'])},
@@ -6253,7 +6277,7 @@ class XianyuSliderStealth:
                             fullVersionList: {full_version_list_json},
                             mobile: {str(bool(client_hints['mobile'])).lower()},
                             model: {json.dumps(client_hints['model'])},
-                            platform: {json.dumps(client_hints['platform'], ensure_ascii=False)},
+                            platform: {json.dumps(client_hints['platformName'], ensure_ascii=False)},
                             platformVersion: {json.dumps(client_hints['platformVersion'])},
                             uaFullVersion: {json.dumps(client_hints['fullVersion'])},
                             wow64: {str(bool(client_hints['wow64'])).lower()}
@@ -10516,7 +10540,7 @@ class XianyuSliderStealth:
                 logger.info(f"【{self.pure_user_id}】密码登录浏览器 OS PID: {browser_pid}")
 
             page = context.new_page()
-            self._apply_headless_network_fingerprint(page, browser_features)
+            self._apply_network_fingerprint(page, browser_features)
             observed_set_cookie_updates: Dict[str, str] = {}
 
             def _capture_response_set_cookie(response):
