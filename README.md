@@ -21,6 +21,7 @@ Slidex 已从滑块验证码求解库升级为 `automation-kit` 生态的视觉�
 **特性**：
 - 🎯 **多供应商支持** — 内置 Aliyun NoCaptcha、GeeTest 适配器，自动检测
 - 🔎 **统一视觉接口** — `slidex.vision` 统一描述 slider、OCR、manual fallback
+- 🖼️ **纯图片滑块识别** — `SliderImageSolver` 只给图片即可定位缺口，无需浏览器/网络
 - 🧾 **OCR 能力内建** — `slidex.ocr` 提供 `OcrTextExtractor` / `OcrResult` / `FakeOcrExtractor`
 - 🔌 **插件式扩展** — 10 分钟实现自定义 Provider，无需修改核心代码
 - 🌐 **CDP 模式** — 连接已有浏览器，适合 TypeScript/Node 集成
@@ -35,6 +36,7 @@ pip install -e .
 playwright install chromium
 pip install -e ".[remote]"   # 可选：远程控制 API
 pip install -e ".[automation-kit]"  # 可选：native automation-kit 适配
+pip install -e ".[vision]"   # 可选：纯图片无块图缺口检测的 YOLO 后端
 ```
 
 ## 快速开始
@@ -102,6 +104,73 @@ result = extractor.extract(
     image_bytes=b"...png bytes...",
     roi={"x": 10, "y": 20, "width": 100, "height": 32},
 )
+```
+
+### 纯图片滑块 API（无浏览器）
+
+只拿得到图片（截图、抓包图像、裁剪产物）时，直接定位缺口，不启动浏览器、不产生 cookie：
+
+```python
+from slidex.vision import SliderImageSolver
+
+solver = SliderImageSolver()
+
+# 有拼图块图：Canny 边缘 + 模板匹配（method="template_edge"）
+result = solver.solve("bg.png", "piece.png")
+
+# 无块图：YOLO 后端（装了 slidex[vision]）→ 轮廓几何 → 列能量剖面
+result = solver.solve(b"...png bytes...")
+
+# 从整页截图里只检测验证码区域（ROI，坐标自动平移回原图）
+result = solver.solve(
+    "full_page.png",
+    roi={"x": 320, "y": 180, "width": 300, "height": 160},
+    distance_scale=1.5,  # 可选：图像像素 → 实际滑动行程换算
+)
+
+print(result.to_dict())
+# {"success": True, "gap_x": 182, "confidence": 0.87, "method": "template_edge",
+#  "gap_box": [182, 40, 222, 84], "candidates": [...], ...}
+```
+
+多策略检测管线（`auto` 按可用性自动选择，全失败返回 `success=False`）：
+
+| 方法 | 触发条件 | 依赖 |
+|------|---------|------|
+| `template_edge` | 提供拼图块图 | 内置（OpenCV） |
+| `yolo` | 无块图，装了 `slidex[vision]` | `captcha-recognizer` |
+| `contour` | 无块图，无 YOLO 后端 | 内置（OpenCV） |
+| `column_profile` | 轮廓无结果的兜底 | 内置（OpenCV） |
+
+> `gap_x` 是缺口左边缘在图像坐标系的 x 像素，不做供应商 offset 校正（校正是调用方/供应商层职责）。
+> 实际滑动距离需减去拼图块初始偏移，并按 `distance_scale` 做渲染缩放换算。
+
+也可走统一视觉 API（`VisualChallengeSolver`）或 CLI：
+
+```python
+from slidex.vision import (
+    ChallengeType, VisionContext, VisualChallengeRequest, VisualChallengeSolver,
+)
+
+solver = VisualChallengeSolver()
+result = await solver.solve(
+    VisualChallengeRequest(
+        challenge_type=ChallengeType.SLIDER_CAPTCHA,
+        context=VisionContext.IMAGE_BYTES,
+        image_bytes=b"...bg png...",
+        piece_image_bytes=b"...piece png...",  # 可选
+        roi={"x": 320, "y": 180, "width": 300, "height": 160},  # 可选
+        metadata={"distance_scale": 1.5},  # 可选
+    )
+)
+```
+
+```bash
+python -m slidex.scripts.slide_solve_image \
+  --background bg.png \
+  [--piece piece.png] \
+  [--roi 320,180,300,160] \
+  [--distance-scale 1.5]
 ```
 
 ### automation-kit 能力适配

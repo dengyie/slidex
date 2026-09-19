@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.6.0] - 2026-09-19
+
+新增纯图片滑块缺口识别能力：无需浏览器/网络，只给图片就能定位缺口。
+面向截图、抓包图像、裁剪产物等只拿得到图片的场景。
+
+### Added
+- `slidex.vision.SliderImageSolver` — 同步图片滑块求解器，多策略检测管线：
+  1. `template_edge` — 有拼图块图时：Canny 边缘 + `matchTemplate`，与浏览器内
+     provider 同源（`_image_match`），直接返回缺口左上角 box（不做供应商 offset 校正，
+     校正是调用方职责）。
+  2. `yolo` — 可选深度学习后端：安装 `slidex[vision]`（社区项目
+     chenwei-zhao/captcha-recognizer，YOLO/ONNX，支持无块图与多缺口）后启用；
+     未安装时静默跳过。
+  3. `contour` — 无块图零依赖几何检测：Canny → 轮廓筛选（尺寸/长宽比/矩形贴合度）
+     → 评分；启发式置信度上限 0.8。
+  4. `column_profile` — 轮廓无结果时的列边缘能量剖面兜底。
+- `SliderImageResult` 结构化结果：`gap_x` / `distance_px` / `confidence` / `method`
+  / `gap_box` / `candidates` 与 `to_dict()`。两者从顶层 `slidex` 与 `slidex.vision` 导出。
+- `VisualChallengeSolver` 现在把 `SLIDER_CAPTCHA` + `IMAGE_BYTES`/`IMAGE_PATH`/
+  `ANDROID_SCREENSHOT_BYTES` 上下文路由到图片求解器（`asyncio.to_thread` 隔离
+  CPU-bound），provider 名 `slidex-image`。`ANDROID_SCREENSHOT_BYTES` 从此有了
+  内置求解路径——0.5.8 时安卓截图返回 `unsupported_slider_context`（dianping
+  REQ-004 阻塞），现走无块图缺口检测。
+  `VisualChallengeRequest` 新增 `piece_image_bytes` / `piece_image_path`；`roi`
+  复用为检测区域裁剪（坐标自动平移回原图），`metadata.distance_scale` 做行程换算。
+- `SlidexVisualCapability`（automation-kit 适配）透传 `piece_image_bytes` /
+  `piece_image_path` 参数。
+- CLI `python -m slidex.scripts.slide_solve_image`：`--background` / `--piece` /
+  `--roi x,y,w,h` / `--distance-scale` / `--min-confidence`，输出与
+  `slide_solve_cdp` 兼容的 JSON（无 cookie / telemetry）。
+- 可选 extra `slidex[vision]` 引入 `captcha-recognizer` YOLO 后端。
+
+### Notes
+- `SliderImageSolver` 只定位缺口几何，不启动浏览器、不产生 cookie、不做滑动。
+  实际滑动行程需调用方按初始偏移与 `distance_scale` 换算。
+- 测试：新增 `tests/test_slider_image.py` 与 `slide_solve_image` CLI / vision 路由
+  用例；合成图保证确定性，不依赖网络或模型权重。338 passed / 9 skipped。
+
 ## [0.5.8] - 2026-09-10
 
 Dependency governance: bound the floating majors that broke CI, and restore

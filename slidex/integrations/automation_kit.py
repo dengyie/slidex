@@ -142,6 +142,8 @@ class SlidexVisualCapability:
 
         image_bytes = parameters.get("image_bytes")
         image_path = parameters.get("image_path")
+        piece_image_bytes = parameters.get("piece_image_bytes")
+        piece_image_path = parameters.get("piece_image_path")
         page = parameters.get("page")
         cdp_endpoint = parameters.get("cdp_endpoint")
 
@@ -154,12 +156,26 @@ class SlidexVisualCapability:
                     "image_bytes must be non-empty bytes for the selected context"
                 )
             image_bytes = bytes(image_bytes)
+            if piece_image_bytes is not None:
+                if not isinstance(piece_image_bytes, (bytes, bytearray)):
+                    raise CapabilityProtocolError(
+                        "piece_image_bytes must be bytes when provided"
+                    )
+                piece_image_bytes = bytes(piece_image_bytes)
         elif vision_context == VisionContext.IMAGE_PATH:
             if not isinstance(image_path, (str, Path)) or not str(image_path).strip():
                 raise CapabilityProtocolError(
                     "image_path is required for image_path context"
                 )
             image_path = Path(image_path)
+            if piece_image_path is not None:
+                if not isinstance(piece_image_path, (str, Path)) or not str(
+                    piece_image_path
+                ).strip():
+                    raise CapabilityProtocolError(
+                        "piece_image_path must be a path string when provided"
+                    )
+                piece_image_path = Path(piece_image_path)
         elif vision_context == VisionContext.PLAYWRIGHT_PAGE and page is None:
             raise CapabilityProtocolError(
                 "page is required for playwright_page context"
@@ -186,6 +202,8 @@ class SlidexVisualCapability:
             page_url=page_url,
             image_bytes=image_bytes,
             image_path=image_path,
+            piece_image_bytes=piece_image_bytes,
+            piece_image_path=piece_image_path,
             roi=roi,
             provider=provider,
             timeout_ms=timeout_ms,

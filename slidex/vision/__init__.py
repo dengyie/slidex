@@ -10,6 +10,7 @@ from slidex.vision.models import (
 )
 from slidex.vision.artifacts import build_artifact_path, safe_artifact_metadata
 from slidex.vision.manual import ManualFallbackSession
+from slidex.vision.slider_image import SliderImageResult, SliderImageSolver
 
 __all__ = [
     "ChallengeType",
@@ -20,6 +21,8 @@ __all__ = [
     "VisualChallengeRequest",
     "VisualChallengeResult",
     "VisualChallengeSolver",
+    "SliderImageSolver",
+    "SliderImageResult",
     "ManualFallbackSession",
     "build_artifact_path",
     "redact_sensitive",
