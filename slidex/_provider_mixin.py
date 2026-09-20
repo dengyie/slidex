@@ -8,6 +8,7 @@ from slidex.providers import ProviderRegistry, CaptchaProvider
 from slidex.providers.builtin import *  # auto-register built-in providers
 from slidex._trajectory import generate_trajectory, trajectory_to_points
 from slidex._trajectory_pool import SliderTrajectoryPool
+from slidex._slide_geometry import clamp_travel, points_from_recorded
 
 
 class ProviderSolverMixin:
@@ -89,41 +90,45 @@ class ProviderSolverMixin:
                 self._emit_telemetry_event("provider_gap_not_found", provider_name=self._provider.name)
                 return False, None
 
-            logger.info(f"[{self.pure_user_id}] gap detected at x={gap_x}px, confidence={confidence:.2f}")
+            travel = int(clamp_travel(gap_x, elements.track_width_px))
+            logger.info(
+                f"[{self.pure_user_id}] gap detected at x={gap_x}px, "
+                f"travel={travel}px, confidence={confidence:.2f}"
+            )
             self._emit_telemetry_event(
                 "distance_detected",
-                distance=gap_x,
+                distance=travel,
                 source="provider",
                 provider_name=self._provider.name,
                 confidence=round(confidence, 4),
             )
 
-            # 4. 生成轨迹（优先使用录制轨迹）
+            # 4. 生成轨迹（相对位移；按 cookie + 目标距离匹配并缩放）
             try:
                 trajectory_dir = self._config.get_trajectory_dir()
                 trajectory_pool = SliderTrajectoryPool(trajectory_dir)
-                recorded_traj = trajectory_pool.get_random_trajectory()
+                recorded_traj = trajectory_pool.load_best_trajectory(self.pure_user_id, travel)
+                if recorded_traj is None:
+                    recorded_traj = trajectory_pool.load_best_trajectory("default", travel)
             except Exception as e:
                 logger.warning(f"[{self.pure_user_id}] trajectory pool error: {e}, using synthetic")
                 recorded_traj = None
 
-            if recorded_traj:
-                logger.debug(f"[{self.pure_user_id}] using recorded trajectory")
-                # 录制的轨迹已经是绝对坐标，包含 (x, y, timestamp)
-                points = recorded_traj["points"]
+            points = points_from_recorded(recorded_traj, travel)
+            if points:
+                logger.debug(f"[{self.pure_user_id}] using recorded relative trajectory ({len(points)} points)")
             else:
                 logger.debug(f"[{self.pure_user_id}] generating synthetic trajectory")
                 trajectory = generate_trajectory(
-                    distance=gap_x,
+                    distance=travel,
                     attempt=1,
                 )
-                # 生成的轨迹是相对坐标，需要转换为绝对坐标
-                # 但 provider 模式下不知道起始坐标，直接使用相对坐标 (0, 0 起点)
+                # 合成轨迹转成相对位移；provider.perform_slide 会再加按钮起点
                 points = trajectory_to_points(trajectory, start_x=0, start_y=0)
 
             try:
                 # 5. 执行滑动
-                await self._provider.perform_slide(page, elements, gap_x, points)
+                await self._provider.perform_slide(page, elements, travel, points)
                 logger.debug(f"[{self.pure_user_id}] slide performed")
 
                 # 6. 等待结果

@@ -49,10 +49,16 @@ class VisualChallengeSolver:
                 # 纯图片求解是 CPU 密集型，隔离到线程避免阻塞事件循环。
                 # ANDROID_SCREENSHOT_BYTES 也走这里：安卓截图无 CDP/Page，
                 # 只有整屏 bytes，走无块图缺口检测（解 dianping REQ-004）。
-                return await asyncio.to_thread(
-                    self._solve_slider_image, request, started
+                return await self._await_with_timeout(
+                    asyncio.to_thread(self._solve_slider_image, request, started),
+                    request,
+                    started,
                 )
-            return await self._solve_slider(request, started)
+            return await self._await_with_timeout(
+                self._solve_slider(request, started),
+                request,
+                started,
+            )
         return VisualChallengeResult(
             success=False,
             challenge_type=request.challenge_type,
@@ -159,6 +165,36 @@ class VisualChallengeSolver:
             metadata={"context": request.context.value},
         )
 
+    async def _await_with_timeout(
+        self,
+        awaitable,
+        request: VisualChallengeRequest,
+        started: float,
+    ) -> VisualChallengeResult:
+        timeout_ms = getattr(request, "timeout_ms", None) or 0
+        if timeout_ms <= 0:
+            return await awaitable
+        task = asyncio.ensure_future(awaitable)
+        try:
+            return await asyncio.wait_for(task, timeout=timeout_ms / 1000.0)
+        except asyncio.TimeoutError:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+            return VisualChallengeResult(
+                success=False,
+                challenge_type=request.challenge_type,
+                provider=request.provider,
+                duration_ms=self._duration_ms(started),
+                error_code="timeout",
+                retryable=True,
+                cookies=None,
+                artifacts=[],
+                metadata={"context": request.context.value, "timeout_ms": timeout_ms},
+            )
+
     async def _solve_slider(self, request: VisualChallengeRequest, started: float) -> VisualChallengeResult:
         slider = self.slider_solver_factory(
             cookie_id=str(request.metadata.get("cookie_id", "default")),
@@ -204,9 +240,12 @@ class VisualChallengeSolver:
         finally:
             close = getattr(slider, "close", None)
             if close:
-                close_result = close()
-                if inspect.isawaitable(close_result):
-                    await close_result
+                try:
+                    close_result = close()
+                    if inspect.isawaitable(close_result):
+                        await asyncio.shield(close_result)
+                except Exception:
+                    pass
 
     @staticmethod
     def _duration_ms(started: float) -> float:

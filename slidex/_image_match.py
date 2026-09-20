@@ -18,7 +18,7 @@ class SliderImageMatcher:
     def find_gap_position(
         background: np.ndarray,
         puzzle_piece: np.ndarray,
-        offset_correction: int = -35,
+        offset_correction: int = 0,
     ) -> Tuple[Optional[int], float]:
         """
         使用 Canny 边缘检测 + 模板匹配定位滑块缺口位置。
@@ -75,7 +75,7 @@ class SliderImageMatcher:
     def find_gap_from_bytes(
         bg_bytes: bytes,
         piece_bytes: bytes,
-        offset_correction: int = -35,
+        offset_correction: int = 0,
     ) -> Optional[int]:
         try:
             bg_arr = np.frombuffer(bg_bytes, np.uint8)
@@ -100,7 +100,7 @@ class SliderImageMatcher:
     def find_gap_with_confidence(
         bg_bytes: bytes,
         piece_bytes: bytes,
-        offset_correction: int = -35,
+        offset_correction: int = 0,
     ) -> Tuple[Optional[int], float]:
         """与 find_gap_from_bytes 相同逻辑，但同时返回匹配置信度"""
         try:
@@ -119,7 +119,7 @@ class SliderImageMatcher:
 
 
 # 便捷函数
-def find_gap(background, puzzle_piece, offset_correction=-35):
+def find_gap(background, puzzle_piece, offset_correction=0):
     """向后兼容：只返回 gap_x"""
     gap_x, _ = SliderImageMatcher.find_gap_position(background, puzzle_piece, offset_correction)
     return gap_x

@@ -1,7 +1,6 @@
 """GeeTest (极验) Provider"""
 
 import json
-import asyncio
 from typing import Iterable, List, Optional, Tuple
 from urllib.parse import urlparse
 from playwright.async_api import Page, Response
@@ -9,6 +8,7 @@ from loguru import logger
 
 from slidex.providers import CaptchaProvider, ProviderElements, SolveResult
 from slidex.vision.models import ChallengeType, ProviderManifest, VisionContext
+from slidex._frames import iter_search_targets
 
 
 class GeeTestProvider(CaptchaProvider):
@@ -27,35 +27,38 @@ class GeeTestProvider(CaptchaProvider):
 
     def __init__(self, host_markers: Optional[Iterable[str]] = None):
         super().__init__()
-        self._result: Optional[bool] = None
         self._version: Optional[str] = None  # "v3" or "v4"
-        self._response_handler = None
         # 私有化部署自定义域（不含 geetest 字样）的 host 特征扩展点
         self._extra_host_markers = tuple(host_markers or ())
 
     async def detect(self, page: Page) -> bool:
-        """检测是否是 GeeTest"""
+        """检测是否是 GeeTest（主文档 + iframe）。"""
+        self._challenge_scope = None
         try:
-            # 特征 1: DOM class
-            geetest_el = await page.query_selector(
-                ".geetest_panel, .geetest_holder, .geetest_box, [class*=geetest]"
-            )
-            if geetest_el:
-                return True
-
-            # 特征 2: JS 全局变量
-            has_geetest = await page.evaluate(
-                "() => window.initGeetest !== undefined || window.initGeetest4 !== undefined"
-            )
-            if has_geetest:
-                # 判断版本
-                has_v4 = await page.evaluate("() => window.initGeetest4 !== undefined")
-                self._version = "v4" if has_v4 else "v3"
-                return True
-
-            # 特征 3: 网络请求
-            # (需要在 page 初始化时监听，这里暂时跳过)
-
+            for target in await iter_search_targets(page):
+                try:
+                    geetest_el = await target.query_selector(
+                        ".geetest_panel, .geetest_holder, .geetest_box, [class*=geetest]"
+                    )
+                except Exception:
+                    geetest_el = None
+                if geetest_el:
+                    self._challenge_scope = target
+                    return True
+                try:
+                    has_geetest = await target.evaluate(
+                        "() => window.initGeetest !== undefined || window.initGeetest4 !== undefined"
+                    )
+                except Exception:
+                    has_geetest = False
+                if has_geetest:
+                    try:
+                        has_v4 = await target.evaluate("() => window.initGeetest4 !== undefined")
+                    except Exception:
+                        has_v4 = False
+                    self._version = "v4" if has_v4 else "v3"
+                    self._challenge_scope = target
+                    return True
             return False
         except Exception as e:
             logger.debug(f"GeeTestProvider.detect() error: {e}")
@@ -76,17 +79,18 @@ class GeeTestProvider(CaptchaProvider):
             canvas_bg_selector = ".geetest_canvas_bg canvas"
             canvas_slice_selector = ".geetest_canvas_slice canvas"
 
-        slider_btn = await page.wait_for_selector(slider_btn_selector, timeout=10000)
+        scope = self._challenge_scope or page
+        slider_btn = await scope.wait_for_selector(slider_btn_selector, timeout=10000)
         if not slider_btn:
             raise RuntimeError("GeeTest slider button not found")
 
-        slider_track = await page.query_selector(slider_track_selector)
+        slider_track = await scope.query_selector(slider_track_selector)
         if not slider_track:
             raise RuntimeError("GeeTest slider track not found")
 
         # GeeTest 使用 canvas
-        bg_canvas = await page.query_selector(canvas_bg_selector)
-        piece_canvas = await page.query_selector(canvas_slice_selector)
+        bg_canvas = await scope.query_selector(canvas_bg_selector)
+        piece_canvas = await scope.query_selector(canvas_slice_selector)
 
         # 轨道宽度
         track_box = await slider_track.bounding_box()
@@ -105,20 +109,20 @@ class GeeTestProvider(CaptchaProvider):
         self, page: Page, elements: ProviderElements
     ) -> Tuple[bytes, bytes]:
         """提取图像（从 canvas）"""
-        # 背景 canvas → data URL → bytes
+        import base64
+
+        # 在元素所属 frame 上取图，避免 iframe 场景下 page.evaluate 拿错上下文。
         if elements.bg_img:
-            bg_data_url = await page.evaluate(
-                "(canvas) => canvas.toDataURL('image/png')", elements.bg_img
+            bg_data_url = await elements.bg_img.evaluate(
+                "(canvas) => canvas.toDataURL('image/png')"
             )
-            import base64
             bg_bytes = base64.b64decode(bg_data_url.split(",", 1)[1])
         else:
             raise RuntimeError("GeeTest background canvas not found")
 
-        # 拼图块 canvas
         if elements.piece_img:
-            piece_data_url = await page.evaluate(
-                "(canvas) => canvas.toDataURL('image/png')", elements.piece_img
+            piece_data_url = await elements.piece_img.evaluate(
+                "(canvas) => canvas.toDataURL('image/png')"
             )
             piece_bytes = base64.b64decode(piece_data_url.split(",", 1)[1])
         else:
@@ -133,19 +137,8 @@ class GeeTestProvider(CaptchaProvider):
         gap_x: int,
         trajectory: List[Tuple[int, int, int]],
     ) -> None:
-        """执行滑动"""
-        self._result = None
-
-        def response_handler(response: Response):
-            async def _handle():
-                result = await self.validate_response(response)
-                if result is not None:
-                    self._result = result
-
-            asyncio.create_task(_handle())
-
-        self._response_handler = response_handler
-        page.on("response", response_handler)
+        """执行滑动。trajectory 为相对位移 (dx, dy, delay_ms)。"""
+        self.bind_response_listener(page)
 
         btn_box = await elements.slider_btn.bounding_box()
         if not btn_box:
@@ -164,11 +157,6 @@ class GeeTestProvider(CaptchaProvider):
 
         await page.wait_for_timeout(100)
         await page.mouse.up()
-
-    async def cleanup_after_result(self, page: Page) -> None:
-        if self._response_handler:
-            page.remove_listener("response", self._response_handler)
-            self._response_handler = None
 
     # GeeTest 验证响应的 URL 特征：host 属于 geetest 域（含私有化部署的自定义域），
     # 且路径是已知端点。host 匹配是根因约束——旧逻辑对任意站点的 /verify 都会

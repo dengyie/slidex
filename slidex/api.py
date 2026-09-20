@@ -268,6 +268,8 @@ async def submit_trajectory(request: TrajectorySubmitRequest, x_captcha_token: O
         trajectory_pool.save_trajectory(request.points, cookie_id, request.distance, True, request.verify_url or "")
         logger.success(f"trajectory saved: cookie={cookie_id}")
         return {"success": True, "message": "saved", "cookie_id": cookie_id}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"trajectory save failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -314,7 +316,11 @@ async def get_captcha_status(session_id: str, x_captcha_token: Optional[str] = H
 @router.get("/control", response_class=HTMLResponse)
 async def captcha_control_page():
     if os.path.exists(_HTML_FILE):
-        return FileResponse(_HTML_FILE, media_type="text/html")
+        return FileResponse(
+            _HTML_FILE,
+            media_type="text/html",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"},
+        )
     else:
         return HTMLResponse(content="""
         <!DOCTYPE html>
@@ -351,6 +357,9 @@ async def captcha_control_page_with_session(session_id: str, ticket: Optional[st
                 '</body>',
                 f'{initial_session_script}</body>'
             )
-            return HTMLResponse(content=html_content)
+            return HTMLResponse(
+                content=html_content,
+                headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"},
+            )
     else:
         raise HTTPException(status_code=404, detail="前端页面不存在")

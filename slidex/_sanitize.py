@@ -27,6 +27,8 @@ def sanitize_pure_user_id(user_id) -> str:
     cleaned = cleaned.strip(".").replace("..", ".")
     if not cleaned:
         return "default"
-    if cleaned.upper() in _WINDOWS_RESERVED_NAMES:
+    # NT 把 CON.txt / COM1.log 也当设备名；只比第一段（第一个点之前）。
+    stem = cleaned.split(".", 1)[0].upper()
+    if stem in _WINDOWS_RESERVED_NAMES:
         return cleaned + "_"
     return cleaned

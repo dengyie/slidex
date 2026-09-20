@@ -16,7 +16,10 @@ from slidex._chromium_lifecycle import (
     ensure_profile_chromium_closed,
     record_chromium_pid,
     find_chromium_pid_by_user_data_dir,
+    kill_chromium_process_tree,
 )
+from slidex._cookies import cookie_domain_for_url, parse_cookie_header, select_cookies_for_url
+from slidex._slide_geometry import clamp_travel, points_from_recorded
 
 
 # ════════════════════════════════════════════════════════════
@@ -51,7 +54,7 @@ class SliderSolver(ProviderSolverMixin):
     OFFSET_CORRECTION_DEFAULT = -35
     OFFSET_CORRECTION_LIMITS = (-100, 100)
     OFFSET_CONFIRM_TOLERANCE = 5
-    PROFILE_LOCK_POLL_INTERVAL = 0.2
+    CLOSE_TIMEOUT_S = 30.0
 
     # 同 profile（同账号浏览器目录）互斥：进程内串行化，防止并发求解互踩
     _profile_locks: Dict[str, asyncio.Lock] = {}
@@ -90,6 +93,8 @@ class SliderSolver(ProviderSolverMixin):
         self.context = None
         self.page = None
         self._cdp = None
+        self._browser_pid = None
+        self._verify_url = ""
         self._result_event = asyncio.Event()
         self._slide_code = None
         self._calibration = self._load_calibration()
@@ -335,13 +340,12 @@ class SliderSolver(ProviderSolverMixin):
     async def _acquire_profile_lock(self, profile_dir: str) -> bool:
         """有界等待同 profile 互斥锁；超时返回 False（与 concurrency_manager.wait_for_slot 同语义）。"""
         lock = self._get_profile_lock(profile_dir)
-        deadline = time.monotonic() + max(1.0, float(self._config.wait_timeout))
-        while lock.locked() and time.monotonic() < deadline:
-            await asyncio.sleep(self.PROFILE_LOCK_POLL_INTERVAL)
-        if lock.locked():
+        timeout = max(1.0, float(self._config.wait_timeout))
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
             return False
-        await lock.acquire()
-        return True
 
     def _release_profile_lock(self, profile_dir: str) -> None:
         lock = self._get_profile_lock(profile_dir)
@@ -358,6 +362,7 @@ class SliderSolver(ProviderSolverMixin):
         self._emit_telemetry_event("solve_started", mode="browser", verify_url=verify_url)
         self._emit_step("solve", "solve_started", "started", mode="browser", verify_url=verify_url)
         logger.info(f"[{self.pure_user_id}] solving (mode={self.trajectory_mode})...")
+        self._verify_url = verify_url or ""
         if not await self._acquire_profile_lock(str(self.profile_dir)):
             logger.warning(
                 f"[{self.pure_user_id}] same-profile solve still running, "
@@ -413,6 +418,7 @@ class SliderSolver(ProviderSolverMixin):
         """
         self.last_fallback_used = None
         self._is_cdp_mode = True
+        self._verify_url = page_url or ""
         self._emit_telemetry_event("solve_started", mode="cdp", page_url=page_url)
         self._emit_step("solve", "solve_started", "started", mode="cdp", page_url=page_url)
         logger.info(f"[{self.pure_user_id}] solving on existing page "
@@ -446,6 +452,7 @@ class SliderSolver(ProviderSolverMixin):
         self._is_cdp_mode = True
         self.page = page
         self.context = page.context
+        self._verify_url = page_url or getattr(page, "url", "") or ""
         self._emit_telemetry_event("solve_started", mode="playwright_page", page_url=page_url)
         self._emit_step("solve", "solve_started", "started", mode="playwright_page", page_url=page_url)
         response_handler = self._on_response
@@ -642,135 +649,130 @@ class SliderSolver(ProviderSolverMixin):
                 self._emit_step("remote", "remote_fallback", "failed", reason=str(e))
                 return False, None
 
+        session_created = False
         try:
-            session_info = await captcha_controller.create_session(
-                session_id, self.page, cookie_id=self.pure_user_id
-            )
-            self._emit_step("remote", "session_created", "ok", session_id=session_id)
-        except Exception as e:
-            logger.error(f"[{self.pure_user_id}] create remote session failed: {e}")
-            self._emit_step("remote", "session_created", "failed", session_id=session_id, reason=str(e))
-            return False, None
-
-        # 发送通知（通过注入的回调）
-        if self._notification_callback:
             try:
-                import asyncio as _asyncio
-                # 控制 URL 携带一次性 ticket 而非长期 token：token 不落入访问日志/
-                # Referer/浏览器历史，页面 GET 时由服务端换 ticket 入页面内存。
-                control_ticket = captcha_controller.issue_control_ticket(session_id)
-                control_path = f"/api/captcha/control/{session_id}?ticket={control_ticket}"
-                _asyncio.ensure_future(
-                    self._notification_callback(
-                        self.cookie_id,
-                        f"【滑块验证需要人工介入】\nCookie: {self.cookie_id}\nSession: {session_id}\nURL: {control_path}\n"
-                        f"请访问滑块控制页面完成验证",
-                        "滑块验证 - 人工介入"
-                    )
+                await captcha_controller.create_session(
+                    session_id, self.page, cookie_id=self.pure_user_id
                 )
+                session_created = True
+                self._emit_step("remote", "session_created", "ok", session_id=session_id)
             except Exception as e:
-                logger.warning(f"[{self.pure_user_id}] notification failed: {e}")
+                logger.error(f"[{self.pure_user_id}] create remote session failed: {e}")
+                self._emit_step("remote", "session_created", "failed", session_id=session_id, reason=str(e))
+                return False, None
 
-        self.last_fallback_used = "remote"
-        timeout = self._config.remote_captcha_timeout
-        poll_interval = self._config.remote_captcha_poll_interval
-        deadline = time.time() + timeout
+            # 发送通知（通过注入的回调）
+            if self._notification_callback:
+                try:
+                    # 控制 URL 携带一次性 ticket 而非长期 token：token 不落入访问日志/
+                    # Referer/浏览器历史，页面 GET 时由服务端换 ticket 入页面内存。
+                    control_ticket = captcha_controller.issue_control_ticket(session_id)
+                    control_path = f"/api/captcha/control/{session_id}?ticket={control_ticket}"
+                    asyncio.ensure_future(
+                        self._notification_callback(
+                            self.cookie_id,
+                            f"【滑块验证需要人工介入】\nCookie: {self.cookie_id}\nSession: {session_id}\nURL: {control_path}\n"
+                            f"请访问滑块控制页面完成验证",
+                            "滑块验证 - 人工介入"
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(f"[{self.pure_user_id}] notification failed: {e}")
 
-        while time.time() < deadline:
-            try:
-                completed = await captcha_controller.check_completion(session_id)
-                if completed:
-                    logger.success(f"[{self.pure_user_id}] remote solve completed!")
-                    self._emit_step("remote", "remote_completion", "ok", session_id=session_id)
-                    cookies = await self._get_cookies()
-                    if self._requires_validation_cookie(verify_url) and not self._has_validation_cookie(cookies):
-                        logger.warning(
-                            f"[{self.pure_user_id}] remote completion missing validation cookie; "
-                            "treating as unresolved"
-                        )
-                        self._emit_telemetry_event(
-                            "fallback_validation_cookie_missing",
-                            fallback="remote",
-                            session_id=session_id,
-                            cookie_names=sorted((cookies or {}).keys()),
-                        )
+            self.last_fallback_used = "remote"
+            timeout = self._config.remote_captcha_timeout
+            poll_interval = self._config.remote_captcha_poll_interval
+            deadline = time.time() + timeout
+
+            while time.time() < deadline:
+                try:
+                    completed = await captcha_controller.check_completion(session_id)
+                    if completed:
+                        logger.success(f"[{self.pure_user_id}] remote solve completed!")
+                        self._emit_step("remote", "remote_completion", "ok", session_id=session_id)
+                        cookies = await self._get_cookies()
+                        if self._requires_validation_cookie(verify_url) and not self._has_validation_cookie(cookies):
+                            logger.warning(
+                                f"[{self.pure_user_id}] remote completion missing validation cookie; "
+                                "treating as unresolved"
+                            )
+                            self._emit_telemetry_event(
+                                "fallback_validation_cookie_missing",
+                                fallback="remote",
+                                session_id=session_id,
+                                cookie_names=sorted((cookies or {}).keys()),
+                            )
+                            self._emit_step(
+                                "remote",
+                                "validation_cookie",
+                                "failed",
+                                session_id=session_id,
+                                cookie_names=sorted((cookies or {}).keys()),
+                                verify_url=verify_url,
+                            )
+                            self._telemetry_summary["failure_reason"] = "x5_validation_cookie_missing"
+                            return False, cookies
+                        self._emit_telemetry_event("fallback_completed", fallback="remote", session_id=session_id)
                         self._emit_step(
                             "remote",
                             "validation_cookie",
-                            "failed",
+                            "ok",
                             session_id=session_id,
                             cookie_names=sorted((cookies or {}).keys()),
-                            verify_url=verify_url,
                         )
-                        self._telemetry_summary["failure_reason"] = "x5_validation_cookie_missing"
                         try:
-                            await captcha_controller.close_session(session_id)
-                        except Exception:
-                            pass
-                        return False, cookies
-                    self._emit_telemetry_event("fallback_completed", fallback="remote", session_id=session_id)
-                    self._emit_step(
-                        "remote",
-                        "validation_cookie",
-                        "ok",
-                        session_id=session_id,
-                        cookie_names=sorted((cookies or {}).keys()),
-                    )
-                    try:
-                        recording = captcha_controller.finish_recording(session_id)
-                        if recording and recording.get("points"):
-                            self._trajectory_pool.save_trajectory(
-                                recording["points"], self.pure_user_id,
-                                recording.get("distance", 0), True, verify_url,
-                                recording.get("duration_ms", 0))
-                            logger.info(f"[{self.pure_user_id}] trajectory recorded from remote solve")
-                    except Exception as e:
-                        logger.warning(f"[{self.pure_user_id}] trajectory record failed: {e}")
-                    await captcha_controller.close_session(session_id)
-                    return True, cookies
-                await asyncio.sleep(poll_interval)
-            except Exception as e:
-                logger.warning(f"[{self.pure_user_id}] poll error: {e}")
-                self._emit_step("remote", "poll", "failed", session_id=session_id, reason=str(e))
-                await asyncio.sleep(poll_interval)
+                            recording = captcha_controller.finish_recording(session_id)
+                            if recording and recording.get("points"):
+                                self._trajectory_pool.save_trajectory(
+                                    recording["points"], self.pure_user_id,
+                                    recording.get("distance", 0), True, verify_url,
+                                    recording.get("duration_ms", 0))
+                                logger.info(f"[{self.pure_user_id}] trajectory recorded from remote solve")
+                        except Exception as e:
+                            logger.warning(f"[{self.pure_user_id}] trajectory record failed: {e}")
+                        return True, cookies
+                    await asyncio.sleep(poll_interval)
+                except Exception as e:
+                    logger.warning(f"[{self.pure_user_id}] poll error: {e}")
+                    self._emit_step("remote", "poll", "failed", session_id=session_id, reason=str(e))
+                    await asyncio.sleep(poll_interval)
 
-        logger.warning(f"[{self.pure_user_id}] remote fallback timed out after {timeout}s")
-        self._emit_telemetry_event("fallback_timeout", fallback="remote", session_id=session_id, timeout_s=timeout)
-        self._emit_step("remote", "remote_fallback", "failed", session_id=session_id, reason="timeout", timeout_s=timeout)
-        try:
-            await captcha_controller.close_session(session_id)
-        except Exception:
-            pass
-        return False, None
+            logger.warning(f"[{self.pure_user_id}] remote fallback timed out after {timeout}s")
+            self._emit_telemetry_event("fallback_timeout", fallback="remote", session_id=session_id, timeout_s=timeout)
+            self._emit_step("remote", "remote_fallback", "failed", session_id=session_id, reason="timeout", timeout_s=timeout)
+            return False, None
+        finally:
+            if session_created:
+                try:
+                    await captcha_controller.close_session(session_id)
+                except Exception:
+                    pass
 
     # ════════════════════════════════════════════════════════════
     #  多源距离计算（链式 fallback + 自适应校准）
     # ════════════════════════════════════════════════════════════
     async def _calc_distance_multi_source(self) -> Optional[float]:
+        """缺口行程来自图像匹配；JS 轨道宽-按钮宽只是可滑动上限，不当缺口。"""
         js_dist = await self._calc_distance_js()
-        logger.debug(f"[{self.pure_user_id}] JS distance: {js_dist}")
+        logger.debug(f"[{self.pure_user_id}] JS max travel: {js_dist}")
 
         img_dist = await self._calc_distance()
-        if img_dist and img_dist > 0 and js_dist and js_dist > 0:
-            ratio = img_dist / js_dist
-            if 0.7 <= ratio <= 1.3:
-                logger.info(f"[{self.pure_user_id}] image match ok: {img_dist:.0f}px (ratio={ratio:.2f})")
-                return img_dist
-            else:
-                self._register_offset_mismatch(img_dist, js_dist, ratio)
-                self._emit_telemetry_event(
-                    "distance_detected",
-                    distance=js_dist,
-                    source="js_after_mismatch",
-                    image_distance=img_dist,
-                    ratio=round(ratio, 3),
+        if img_dist and img_dist > 0:
+            travel = clamp_travel(img_dist, js_dist)
+            if js_dist and js_dist > 0 and img_dist > js_dist:
+                logger.warning(
+                    f"[{self.pure_user_id}] image gap {img_dist:.0f}px exceeds JS max travel "
+                    f"{js_dist:.0f}px, clamping"
                 )
-                return js_dist
-
-        if js_dist and js_dist > 0:
-            logger.info(f"[{self.pure_user_id}] using JS distance: {js_dist:.0f}px")
-            self._emit_telemetry_event("distance_detected", distance=js_dist, source="js")
-            return js_dist
+            self._emit_telemetry_event(
+                "distance_detected",
+                distance=travel,
+                source="image_match",
+                image_distance=img_dist,
+                max_travel=js_dist,
+            )
+            return travel
 
         try:
             track_w = await self.page.evaluate(
@@ -779,7 +781,7 @@ class SliderSolver(ProviderSolverMixin):
                     return el ? el.offsetWidth : 0;
                 }""", self.selectors["track_width"])
             if track_w and track_w > 0:
-                estimated = track_w * 0.85
+                estimated = clamp_travel(track_w * 0.85, js_dist)
                 logger.warning(f"[{self.pure_user_id}] estimated distance from track: {estimated:.0f}px")
                 self._emit_telemetry_event("distance_detected", distance=estimated, source="track_estimate")
                 return estimated
@@ -1000,6 +1002,7 @@ class SliderSolver(ProviderSolverMixin):
         pid = find_chromium_pid_by_user_data_dir(str(self.profile_dir))
         if pid:
             record_chromium_pid(pid)
+            self._browser_pid = pid
 
         await self.page.add_init_script(STEALTH_INIT_SCRIPT)
         await self._inject_cookies()
@@ -1052,13 +1055,8 @@ class SliderSolver(ProviderSolverMixin):
     async def _inject_cookies(self):
         if not self.cookies_str:
             return
-        cl = []
-        for p in self.cookies_str.split(";"):
-            p = p.strip()
-            if not p or "=" not in p:
-                continue
-            k, v = p.split("=", 1)
-            cl.append({"name": k.strip(), "value": v.strip(), "domain": ".goofish.com", "path": "/"})
+        domain = cookie_domain_for_url(self._verify_url)
+        cl = parse_cookie_header(self.cookies_str, domain)
         if cl:
             await self.context.add_cookies(cl)
 
@@ -1126,11 +1124,11 @@ class SliderSolver(ProviderSolverMixin):
             logger.info(f"[{self.pure_user_id}] replaying recorded trajectory: "
                         f"dist={distance:.0f}px, {len(points)} points")
 
-            rec_dist = recorded_trajectory.get("distance", distance)
-            if rec_dist > 0 and abs(rec_dist - distance) / max(distance, 1) > 0.10:
-                scale = distance / rec_dist
-                points = [[p[0] * scale, p[1], p[2]] for p in points]
-                logger.info(f"[{self.pure_user_id}] scaled trajectory by {scale:.3f}")
+            scaled = points_from_recorded(recorded_trajectory, distance)
+            if scaled:
+                if scaled != points:
+                    logger.info(f"[{self.pure_user_id}] scaled recorded trajectory to {distance:.0f}px")
+                points = scaled
 
             cdp = getattr(self, "_cdp", None)
             if cdp:
@@ -1276,21 +1274,19 @@ class SliderSolver(ProviderSolverMixin):
     async def _get_cookies(self):
         self._emit_step("cookies", "cookie_snapshot", "started", context_available=bool(self.context), cdp_available=bool(getattr(self, "_cdp", None)))
         try:
-            cookies = {}
+            jar = []
             if self.context:
-                all_c = await self.context.cookies()
-                cookies.update({c["name"]: c["value"] for c in all_c if c.get("name")})
+                jar.extend(await self.context.cookies() or [])
             cdp = getattr(self, "_cdp", None)
             if cdp:
                 try:
                     response = await cdp.send("Network.getAllCookies")
-                    for c in response.get("cookies", []) if isinstance(response, dict) else []:
-                        name = c.get("name")
-                        if name:
-                            cookies[name] = c.get("value", "")
+                    jar.extend(response.get("cookies", []) if isinstance(response, dict) else [])
                 except Exception as e:
                     logger.debug(f"[{self.pure_user_id}] CDP cookie snapshot failed: {e}")
                     self._emit_step("cookies", "cdp_cookie_snapshot", "failed", reason=str(e))
+            page_url = self._verify_url or (getattr(self.page, "url", "") if self.page else "")
+            cookies = select_cookies_for_url(jar, page_url)
             self._emit_step("cookies", "cookie_snapshot", "ok", cookie_names=sorted(cookies.keys()))
             return cookies
         except Exception as e:
@@ -1336,31 +1332,45 @@ class SliderSolver(ProviderSolverMixin):
             await self._close()
 
     async def _close(self):
-        for obj in [self.context]:
-            if obj:
-                try:
-                    await obj.close()
-                except Exception:
-                    pass
-        if self._playwright:
+        pid = self._browser_pid or find_chromium_pid_by_user_data_dir(str(self.profile_dir))
+        try:
+            if self.context:
+                await asyncio.wait_for(self.context.close(), timeout=self.CLOSE_TIMEOUT_S)
+        except Exception:
+            pass
+        self.context = None
+        try:
+            if self._playwright:
+                await asyncio.wait_for(self._playwright.stop(), timeout=self.CLOSE_TIMEOUT_S)
+        except Exception:
+            pass
+        self._playwright = None
+        if pid:
             try:
-                await self._playwright.stop()
+                kill_chromium_process_tree(pid)
             except Exception:
                 pass
+        try:
+            await ensure_profile_chromium_closed(str(self.profile_dir))
+        except Exception:
+            pass
+        self._browser_pid = None
         self._cleanup_profiles()
 
     async def _close_cdp_only(self):
         """CDP 模式清理 — 不关闭外部浏览器，只断开连接"""
         if self._cdp:
             try:
-                await self._cdp.detach()
+                await asyncio.wait_for(self._cdp.detach(), timeout=self.CLOSE_TIMEOUT_S)
             except Exception:
                 pass
+            self._cdp = None
         if self._playwright:
             try:
-                await self._playwright.stop()
+                await asyncio.wait_for(self._playwright.stop(), timeout=self.CLOSE_TIMEOUT_S)
             except Exception:
                 pass
+            self._playwright = None
 
     def _cleanup_profiles(self):
         try:

@@ -2,9 +2,10 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Type
+from typing import Dict, List, Optional, Set, Tuple, Type
 from playwright.async_api import Page, ElementHandle, Response
 from loguru import logger
+import asyncio
 import threading
 
 from slidex.vision.models import (
@@ -57,6 +58,38 @@ class CaptchaProvider(ABC):
     def __init__(self):
         self._last_response: Optional[Response] = None
         self._result: Optional[bool] = None
+        self._result_event: Optional[asyncio.Event] = None
+        self._response_handler = None
+        self._response_tasks: Set[asyncio.Task] = set()
+        self._challenge_scope = None
+
+    def bind_response_listener(self, page: Page) -> None:
+        """注册响应监听：校验协程入集合，完成时丢弃，cleanup 可取消。"""
+        self._result = None
+        self._result_event = asyncio.Event()
+
+        async def _handle(response: Response) -> None:
+            try:
+                result = await self.validate_response(response)
+                if result is not None:
+                    self._result = result
+                    if self._result_event is not None:
+                        self._result_event.set()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug(f"{self.name} response handler error: {exc}")
+
+        def response_handler(response: Response) -> None:
+            try:
+                task = asyncio.get_running_loop().create_task(_handle(response))
+            except RuntimeError:
+                return
+            self._response_tasks.add(task)
+            task.add_done_callback(self._response_tasks.discard)
+
+        self._response_handler = response_handler
+        page.on("response", response_handler)
 
     async def on_init(self, page: Page) -> None:
         """
@@ -196,27 +229,52 @@ class CaptchaProvider(ABC):
         Returns:
             SolveResult 包含 success, cookies, error
         """
-        import asyncio
+        from slidex._cookies import select_cookies_for_url
 
-        start = asyncio.get_event_loop().time()
-        while asyncio.get_event_loop().time() - start < timeout_ms / 1000:
-            if self._result is not None:
-                cookies = await page.context.cookies()
+        event = self._result_event
+        if event is not None:
+            try:
+                await asyncio.wait_for(event.wait(), timeout=max(0.05, timeout_ms / 1000.0))
+            except asyncio.TimeoutError:
                 return SolveResult(
-                    success=self._result,
-                    cookies={c["name"]: c["value"] for c in cookies},
+                    success=False,
+                    cookies=None,
+                    error=f"{self.name}: timeout waiting for result",
                 )
-            await asyncio.sleep(0.1)
+        else:
+            start = asyncio.get_event_loop().time()
+            while asyncio.get_event_loop().time() - start < timeout_ms / 1000:
+                if self._result is not None:
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                return SolveResult(
+                    success=False,
+                    cookies=None,
+                    error=f"{self.name}: timeout waiting for result",
+                )
 
+        cookies = await page.context.cookies()
+        page_url = getattr(page, "url", "")
+        if not isinstance(page_url, str):
+            page_url = ""
         return SolveResult(
-            success=False,
-            cookies=None,
-            error=f"{self.name}: timeout waiting for result",
+            success=bool(self._result),
+            cookies=select_cookies_for_url(cookies, page_url),
         )
 
     async def cleanup_after_result(self, page: Page) -> None:
-        """Optional hook for providers to detach temporary listeners after result waiting."""
-        pass
+        """卸掉响应监听并取消未完成的 body 读取任务。"""
+        if self._response_handler:
+            try:
+                page.remove_listener("response", self._response_handler)
+            except Exception:
+                pass
+            self._response_handler = None
+        for task in list(self._response_tasks):
+            if not task.done():
+                task.cancel()
+        self._response_tasks.clear()
 
 
 class ProviderRegistry:
