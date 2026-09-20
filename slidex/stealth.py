@@ -3454,7 +3454,8 @@ class XianyuSliderStealth:
         'last_u_xianyu_web',
     )
     _X5_COOKIE_PREFIX = 'x5'
-    _PUNISH_TICKET_COOKIE_NAMES = ('x5sec', 'x5secdata')
+    _PUNISH_PASS_COOKIE_NAME = 'x5sec'
+    _PUNISH_TICKET_COOKIE_NAMES = (_PUNISH_PASS_COOKIE_NAME,)
 
     def _snapshot_context_cookies_via_cdp(self, context=None, page=None) -> Dict[str, str]:
         """通过 CDP 兜底抓取 Chromium 全量 Cookie，补齐 Playwright context.cookies() 可能遗漏的票据。"""
@@ -5898,24 +5899,34 @@ class XianyuSliderStealth:
         self,
         baseline: Optional[Dict[str, str]] = None,
         current: Optional[Dict[str, str]] = None,
+        *,
+        after_slide: Optional[bool] = None,
     ) -> bool:
-        """处罚页滑块通过后会下发新的 x5sec/x5secdata；这是票据，不是 URL 离开 punish。"""
+        """处罚页滑块通过后会下发新的 x5sec；这是票据，不是 URL 离开 punish。
+
+        ``x5secdata`` 是挑战参数（URL 上本来就有），不能当通过票。
+        基线快照为空且还没滑过时，任何已有 cookie 都不能当成「新下发」。
+        """
         if current is None:
             try:
                 current = self._snapshot_context_cookies()
             except Exception:
                 current = {}
         if baseline is None:
-            baseline = getattr(self, '_slider_cookie_baseline', None) or {}
+            baseline = getattr(self, '_slider_cookie_baseline', None)
         current = current or {}
         baseline = baseline or {}
-        for name in self._PUNISH_TICKET_COOKIE_NAMES:
-            new_value = current.get(name)
-            if new_value and new_value != baseline.get(name):
-                logger.info(
-                    f"【{self.pure_user_id}】处罚页票据检测: Cookie '{name}' 已新下发"
-                )
-                return True
+        if after_slide is None:
+            after_slide = bool(getattr(self, '_slider_did_slide', False))
+        if not after_slide:
+            return False
+        ticket_name = self._PUNISH_PASS_COOKIE_NAME
+        new_value = current.get(ticket_name)
+        if new_value and new_value != baseline.get(ticket_name):
+            logger.info(
+                f"【{self.pure_user_id}】处罚页票据检测: Cookie '{ticket_name}' 已新下发"
+            )
+            return True
         return False
 
     def _accept_punish_pass_with_ticket(
@@ -9032,6 +9043,7 @@ class XianyuSliderStealth:
         # 快照当前 Cookie 基线（用于验证成功后判定"有意义的刷新"）
         cookie_baseline = self._snapshot_context_cookies()
         self._slider_cookie_baseline = dict(cookie_baseline or {})
+        self._slider_did_slide = False
         if cookie_baseline:
             x5_count = sum(1 for k in cookie_baseline if k.lower().startswith('x5'))
             key_count = sum(1 for k in self._KEY_COOKIE_NAMES if k in cookie_baseline)
@@ -9202,6 +9214,7 @@ class XianyuSliderStealth:
                 if not self.simulate_slide(slider_button, trajectory):
                     logger.error(f"【{self.pure_user_id}】滑动模拟失败")
                     continue
+                self._slider_did_slide = True
                 
                 # 5. 检查验证结果（极速模式）
                 verification_success = self.check_verification_success_fast(slider_button)

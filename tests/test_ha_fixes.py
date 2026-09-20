@@ -477,6 +477,88 @@ class TestVisionTimeout:
         finally:
             release.set()
 
+    @pytest.mark.asyncio
+    async def test_hung_ocr_rotates_executor_instead_of_saturating_slots(self, monkeypatch):
+        import threading
+
+        monkeypatch.setattr(vision_solver, "_VISION_WORKER_CAP", 1)
+        monkeypatch.setattr(vision_solver, "_VISION_QUEUE_CAP", 1)
+        orig_slots = vision_solver._vision_slots
+        orig_hung = vision_solver._vision_hung
+        orig_generation = vision_solver._vision_generation
+        orig_executor = vision_solver._vision_executor
+        vision_solver._vision_slots = threading.BoundedSemaphore(1)
+        vision_solver._vision_hung = 0
+        vision_solver._vision_generation = 0
+        vision_solver._vision_executor = None
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        class HungOcr:
+            def extract(self, **kwargs):
+                entered.set()
+                release.wait(timeout=5)
+                return type(
+                    "R",
+                    (),
+                    {
+                        "text": "late",
+                        "confidence": 1.0,
+                        "provider": "hung",
+                        "language": None,
+                        "boxes": [],
+                        "metadata": {},
+                    },
+                )()
+
+        class FastOcr:
+            def extract(self, **kwargs):
+                return type(
+                    "R",
+                    (),
+                    {
+                        "text": "ok",
+                        "confidence": 1.0,
+                        "provider": "fast",
+                        "language": None,
+                        "boxes": [],
+                        "metadata": {},
+                    },
+                )()
+
+        try:
+            hung = VisualChallengeSolver(ocr_extractor=HungOcr())
+            first = await hung.solve(
+                VisualChallengeRequest(
+                    challenge_type=ChallengeType.OCR_TEXT,
+                    context=VisionContext.IMAGE_BYTES,
+                    image_bytes=b"x",
+                    timeout_ms=80,
+                )
+            )
+            assert first.error_code == "timeout"
+            assert entered.wait(timeout=1)
+            assert vision_solver._vision_generation == 1
+
+            fast = VisualChallengeSolver(ocr_extractor=FastOcr())
+            second = await fast.solve(
+                VisualChallengeRequest(
+                    challenge_type=ChallengeType.OCR_TEXT,
+                    context=VisionContext.IMAGE_BYTES,
+                    image_bytes=b"x",
+                    timeout_ms=80,
+                )
+            )
+            assert second.success is True
+            assert second.metadata.get("text") == "ok"
+        finally:
+            release.set()
+            vision_solver._vision_executor = orig_executor
+            vision_solver._vision_slots = orig_slots
+            vision_solver._vision_hung = orig_hung
+            vision_solver._vision_generation = orig_generation
+
 
 class TestAwaitBudget:
     @pytest.mark.asyncio

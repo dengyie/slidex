@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.3] - 2026-09-21
+
+0.6.2 把「已下发 x5sec 仍被 DOM 判失败」修掉了，但通过票过宽：`x5secdata` 是挑战参数，空基线时任何非空 cookie 都会假通过。
+
+### Fixed
+- 处罚页通过票只认相对基线新下发的 `x5sec`，且必须已经滑过。`x5secdata` 不再当通过票。基线快照为空、尚未滑动时，已有挑战 cookie 不能 `x5sec_on_punish`。
+- vision CPU 超时取消不了工作线程。挂死次数达到 worker 上限时换池，避免槽位被占死后连续 `executor_busy`。
+
+### Notes
+- 测试：`tests/test_slider_verification_guards.py` 覆盖空基线 / 仅 `x5secdata` / 滑后值未变仍失败；`tests/test_ha_fixes.py` 覆盖挂死 OCR 换池后下一次能成功。版本 0.6.3。
+
 ## [0.6.2] - 2026-09-21
 
 密码登录 stealth 把「处罚页滑块已下发 x5sec、容器消失、父页仍停在 punish URL」误判成失败。

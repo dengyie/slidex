@@ -35,6 +35,8 @@ _VISION_CLOSE_BUDGET_S = 2.0
 _vision_executor: Optional[ThreadPoolExecutor] = None
 _vision_executor_guard = threading.Lock()
 _vision_slots = threading.BoundedSemaphore(_VISION_QUEUE_CAP)
+_vision_hung = 0
+_vision_generation = 0
 
 
 def _get_vision_executor() -> ThreadPoolExecutor:
@@ -46,6 +48,25 @@ def _get_vision_executor() -> ThreadPoolExecutor:
                 thread_name_prefix="slidex-vision",
             )
         return _vision_executor
+
+
+def _retire_hung_vision_executor() -> None:
+    """超时取消不了工作线程；挂死数达到 worker 上限时换池，避免槽位被占死。"""
+    global _vision_executor, _vision_slots, _vision_hung, _vision_generation
+    with _vision_executor_guard:
+        _vision_hung += 1
+        if _vision_hung < _VISION_WORKER_CAP:
+            return
+        old = _vision_executor
+        _vision_executor = ThreadPoolExecutor(
+            max_workers=_VISION_WORKER_CAP,
+            thread_name_prefix="slidex-vision",
+        )
+        _vision_slots = threading.BoundedSemaphore(_VISION_QUEUE_CAP)
+        _vision_hung = 0
+        _vision_generation += 1
+        if old is not None:
+            old.shutdown(wait=False)
 
 
 class VisualChallengeSolver:
@@ -199,24 +220,31 @@ class VisualChallengeSolver:
         started: float,
     ) -> VisualChallengeResult:
         timeout_ms = getattr(request, "timeout_ms", None) or 0
-        if not _vision_slots.acquire(blocking=False):
+        slot = _vision_slots
+        if not slot.acquire(blocking=False):
             return self._timeout_result(request, started, timeout_ms, error_code="executor_busy")
         try:
             cfut = _get_vision_executor().submit(worker, request, started)
         except Exception:
-            _vision_slots.release()
+            slot.release()
             raise
 
         def _release_slot(_done) -> None:
-            _vision_slots.release()
+            try:
+                slot.release()
+            except ValueError:
+                pass
 
         cfut.add_done_callback(_release_slot)
-        return await self._await_with_timeout(
+        result = await self._await_with_timeout(
             asyncio.wrap_future(cfut),
             request,
             started,
             wait_cancelled=False,
         )
+        if result.error_code == "timeout" and not cfut.done():
+            _retire_hung_vision_executor()
+        return result
 
     async def _await_with_timeout(
         self,
