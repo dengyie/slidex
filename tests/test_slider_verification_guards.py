@@ -65,6 +65,35 @@ class _FakePage:
         return ""
 
 
+class _PunishPageAfterSuccessfulSlide(_FakePage):
+    def __init__(self):
+        super().__init__(
+            title="验证码拦截",
+            url=(
+                "https://passport.goofish.com/newlogin/login.do/_____tmd_____/punish?"
+                "x5secdata=abc123&x5step=2&action=captcha&pureCaptcha=true"
+            ),
+        )
+        self.solved = False
+
+    def inner_text(self, selector, timeout=None):
+        if selector != "body":
+            raise AssertionError(f"unexpected selector: {selector}")
+        if self.solved:
+            return "加载中..."
+        return "亲，请按住滑块，拖动到最右边"
+
+    def content(self):
+        return self.inner_text("body")
+
+    def query_selector(self, selector):
+        if self.solved:
+            return None
+        if selector in {".nc-container", "#nocaptcha", "#nc_1_n1z", "#nc_1_n1t", ".nc_scale"}:
+            return _FakeElement()
+        return None
+
+
 class _RecoverablePunishPage(_FakePage):
     def __init__(self):
         super().__init__(
@@ -158,7 +187,9 @@ class TestSliderVerificationGuards:
         slider = XianyuSliderStealth.__new__(XianyuSliderStealth)
         slider.pure_user_id = "unit_test_account"
         slider.page = page
+        slider.context = None
         slider.last_verification_feedback = {}
+        slider._slider_cookie_baseline = {}
         slider._merge_runtime_feedback = lambda *_args, **_kwargs: None
         slider._save_debug_snapshot = lambda *_args, **_kwargs: None
         slider._check_login_success_by_element = lambda _page: False
@@ -241,6 +272,32 @@ class TestSliderVerificationGuards:
         assert not result
         assert slider.last_verification_feedback.get("status") == "hard_block"
         assert slider.last_verification_feedback.get("source") == "punish_captcha"
+    @mock.patch("slidex.stealth.time.sleep", return_value=None)
+    def test_check_verification_success_fast_accepts_punish_container_missing_when_x5sec_issued(self, _mock_sleep):
+        page = _FakePage(
+            title="闲鱼",
+            url="https://h5api.m.goofish.com/mtop.taobao.idlemessage.pc.login.token/punish?x5secdata=abc123",
+            selectors={
+                ".nc-container": None,
+            },
+        )
+        slider = self._make_slider(page)
+        slider._slider_cookie_baseline = {}
+        slider._snapshot_context_cookies = lambda *args, **kwargs: {"x5sec": "ticket"}
+        slider._detect_special_captcha_block = lambda _page=None: {
+            "kind": "punish_captcha",
+            "message": "当前命中阿里验证码拦截处罚页（pureCaptcha），且页面不存在可操作滑块",
+            "url": page.url,
+            "title": page.title(),
+        }
+        slider.check_verification_failure = lambda: False
+        slider.check_page_changed = lambda: False
+
+        result = slider.check_verification_success_fast(_FakeElement())
+
+        assert result
+        assert slider.last_verification_feedback.get("status") == "success"
+        assert slider.last_verification_feedback.get("source") == "x5sec_on_punish"
     @mock.patch("slidex.stealth.time.sleep", return_value=None)
     def test_wait_for_context_login_does_not_finish_while_verification_page_still_visible_and_cookies_incomplete(self, _mock_sleep):
         page = _FakePage(title="扫码验证", url="https://www.taobao.com/")
@@ -372,6 +429,85 @@ class TestSliderVerificationGuards:
         assert not result
         assert page.activated
         assert slider.last_verification_feedback.get("source") == "keyword"
+    def _configure_solve_slider(self, slider, *, cookies_factory):
+        slider.enable_learning = False
+        slider.headless = True
+        slider.profile_id = "win_chrome_147_1600x900"
+        slider.risk_trigger_scene = "password_login"
+        slider._KEY_COOKIE_NAMES = set()
+        slider.current_trajectory_data = {
+            "random_params": {"strategy": "unit_test"},
+            "trajectory_points": [],
+            "total_steps": 1,
+            "distance": 312,
+            "final_left_px": 312,
+        }
+        slider._snapshot_context_cookies = lambda *args, **kwargs: dict(cookies_factory())
+        slider._harden_password_slider_runtime = lambda *_args, **_kwargs: None
+        slider.calculate_slide_distance = lambda *_args, **_kwargs: 312
+        slider.generate_human_trajectory = lambda distance, attempt=1: [(distance, 0, 0)]
+        slider._probe_context_login_during_slider = lambda *_args, **_kwargs: (False, None)
+        slider._save_failure_record = lambda *_args, **_kwargs: None
+        slider._save_debug_snapshot = lambda *_args, **_kwargs: None
+        slider._save_success_record = lambda *_args, **_kwargs: None
+        slider._update_current_result_meta = lambda *_args, **_kwargs: None
+        slider._analyze_failure = lambda attempt, slide_distance, data: {
+            "attempt": attempt,
+            "slide_distance": slide_distance,
+            "total_steps": data.get("total_steps", 0),
+            "final_left_px": data.get("final_left_px", 0),
+            "verification_feedback": dict(slider.last_verification_feedback),
+        }
+        slider._should_abort_slider_retry_after_failure = lambda: (False, "")
+        return slider
+    @mock.patch("slidex.stealth.time.sleep", return_value=None)
+    def test_solve_slider_finalizes_success_on_punish_when_x5sec_set_even_if_dom_gate_false(self, _mock_sleep):
+        page = _RecoverablePunishPage()
+        cookies = {}
+        slider = self._configure_solve_slider(self._make_slider(page), cookies_factory=lambda: dict(cookies))
+
+        def _simulate_slide(*_args, **_kwargs):
+            cookies["x5sec"] = "ticket"
+            return True
+
+        slider.simulate_slide = _simulate_slide
+
+        def _fake_check_verification_success(_slider_button):
+            slider.last_verification_feedback = {
+                "status": "hard_block",
+                "source": "punish_captcha",
+                "message": "当前命中阿里验证码拦截处罚页（pureCaptcha），且页面不存在可操作滑块",
+            }
+            return False
+
+        slider.check_verification_success_fast = _fake_check_verification_success
+
+        result = slider.solve_slider(max_retries=2)
+
+        assert result is True
+        assert slider.last_verification_feedback.get("source") == "x5sec_on_punish"
+        assert slider.last_verification_feedback.get("status") == "success"
+    @mock.patch("slidex.stealth.time.sleep", return_value=None)
+    def test_solve_slider_does_not_hard_block_retry_after_x5sec_on_empty_punish_page(self, _mock_sleep):
+        page = _PunishPageAfterSuccessfulSlide()
+        cookies = {}
+        slider = self._configure_solve_slider(self._make_slider(page), cookies_factory=lambda: dict(cookies))
+        reset_calls = []
+        slider.click_to_reset_slider = lambda: reset_calls.append("reset") or False
+        page.reload = lambda **_kwargs: reset_calls.append("reload")
+
+        def _simulate_slide(*_args, **_kwargs):
+            cookies["x5sec"] = "ticket"
+            page.solved = True
+            return True
+
+        slider.simulate_slide = _simulate_slide
+
+        result = slider.solve_slider(max_retries=2)
+
+        assert result is True
+        assert slider.last_verification_feedback.get("source") == "x5sec_on_punish"
+        assert reset_calls == []
     @mock.patch("slidex.stealth.time.sleep")
     def test_find_slider_elements_waits_for_punish_slider_dom_before_hard_block(self, mock_sleep):
         page = _DelayedPunishSliderPage()

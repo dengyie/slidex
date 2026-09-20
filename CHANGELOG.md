@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.2] - 2026-09-21
+
+密码登录 stealth 把「处罚页滑块已下发 x5sec、容器消失、父页仍停在 punish URL」误判成失败。
+
+### Fixed
+- 密码登录 `solve_slider`：处罚页 nocaptcha 拖过后容器消失、URL 仍是 `/punish?x5secdata=` 时，若相对基线新下发了 `x5sec`/`x5secdata`，按通过收口，不再 `hard_block` 后交给二维码。无票据的真实拦截仍拒绝。
+
+### Notes
+- 测试：`tests/test_slider_verification_guards.py` 覆盖处罚页 x5sec 通过门。版本 0.6.2。
+
 ## [0.6.1] - 2026-09-20
 
 浏览器路径高可用根因修复：iframe 作用域、profile 锁、关闭超时、cookie 选域、距离语义、timeout_ms。

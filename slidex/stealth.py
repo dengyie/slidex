@@ -3454,6 +3454,7 @@ class XianyuSliderStealth:
         'last_u_xianyu_web',
     )
     _X5_COOKIE_PREFIX = 'x5'
+    _PUNISH_TICKET_COOKIE_NAMES = ('x5sec', 'x5secdata')
 
     def _snapshot_context_cookies_via_cdp(self, context=None, page=None) -> Dict[str, str]:
         """通过 CDP 兜底抓取 Chromium 全量 Cookie，补齐 Playwright context.cookies() 可能遗漏的票据。"""
@@ -5893,6 +5894,66 @@ class XianyuSliderStealth:
         logger.warning(f"【{self.pure_user_id}】Cookie 刷新检测: 无有意义的 Cookie 变化")
         return False
 
+    def _has_post_slide_punish_ticket(
+        self,
+        baseline: Optional[Dict[str, str]] = None,
+        current: Optional[Dict[str, str]] = None,
+    ) -> bool:
+        """处罚页滑块通过后会下发新的 x5sec/x5secdata；这是票据，不是 URL 离开 punish。"""
+        if current is None:
+            try:
+                current = self._snapshot_context_cookies()
+            except Exception:
+                current = {}
+        if baseline is None:
+            baseline = getattr(self, '_slider_cookie_baseline', None) or {}
+        current = current or {}
+        baseline = baseline or {}
+        for name in self._PUNISH_TICKET_COOKIE_NAMES:
+            new_value = current.get(name)
+            if new_value and new_value != baseline.get(name):
+                logger.info(
+                    f"【{self.pure_user_id}】处罚页票据检测: Cookie '{name}' 已新下发"
+                )
+                return True
+        return False
+
+    def _accept_punish_pass_with_ticket(
+        self,
+        current_block: Optional[Dict[str, Any]],
+        *,
+        scene: str = "",
+    ) -> bool:
+        """容器消失后父页仍停在 punish URL 时，有新票据则按通过，无票据才算硬拦截。"""
+        if not current_block or current_block.get('kind') != 'punish_captcha':
+            return False
+        if not self._has_post_slide_punish_ticket():
+            return False
+        scene_note = scene or "滑块动作后"
+        logger.success(
+            f"【{self.pure_user_id}】✅ {scene_note}仍停在处罚页，但已下发 x5sec 票据，按验证成功处理"
+        )
+        self.last_verification_feedback = {
+            "status": "success",
+            "source": "x5sec_on_punish",
+            "message": f"{scene_note}已下发处罚页票据",
+            "url": current_block.get("url") or "",
+            "title": current_block.get("title") or "",
+        }
+        return True
+
+    def _resolve_post_slider_blocking_state(self, target, *, reject_log: str) -> Optional[bool]:
+        """None=无拦截；True=有票据通过；False=真实拦截失败。"""
+        current_block = self._detect_post_slider_blocking_state(target)
+        if not current_block:
+            return None
+        if self._accept_punish_pass_with_ticket(current_block, scene=reject_log.split('，')[0]):
+            return True
+        logger.warning(
+            f"【{self.pure_user_id}】{reject_log.format(kind=current_block['kind'])}"
+        )
+        return False
+
     def _probe_context_login_during_slider(self, fallback_page=None) -> Tuple[bool, Dict[str, str]]:
         """刷新模式下，允许用 context 级登录态确认滑块已间接通过。"""
         if not getattr(self, '_slider_refresh_mode', False):
@@ -7743,6 +7804,8 @@ class XianyuSliderStealth:
                 "主页面滑块探测",
             )
             if current_block:
+                if self._accept_punish_pass_with_ticket(current_block, scene="主页面滑块探测"):
+                    return None, None, None
                 logger.error(
                     f"【{self.pure_user_id}】当前页面命中高风险验证码页[{current_block['kind']}]: "
                     f"{current_block['message']}"
@@ -7777,6 +7840,12 @@ class XianyuSliderStealth:
                             f"Frame {idx} 滑块探测",
                         )
                         if frame_block:
+                            if self._accept_punish_pass_with_ticket(
+                                frame_block,
+                                scene=f"Frame {idx} 滑块探测",
+                            ):
+                                self._detected_slider_frame = frame
+                                return None, None, None
                             logger.error(
                                 f"【{self.pure_user_id}】Frame {idx} 命中高风险验证码页[{frame_block['kind']}]: "
                                 f"{frame_block['message']}"
@@ -8472,11 +8541,13 @@ class XianyuSliderStealth:
                     error_msg = str(frame_check_error).lower()
                     # 如果frame被分离（detached），说明验证成功，容器已消失
                     if 'detached' in error_msg or 'disconnected' in error_msg:
-                        current_block = self._detect_post_slider_blocking_state(self.page)
-                        if current_block:
-                            logger.warning(
-                                f"【{self.pure_user_id}】Frame已分离，但当前命中[{current_block['kind']}]，按验证失败处理"
-                            )
+                        blocked = self._resolve_post_slider_blocking_state(
+                            self.page,
+                            reject_log="Frame已分离，但当前命中[{kind}]，按验证失败处理",
+                        )
+                        if blocked is True:
+                            return True
+                        if blocked is False:
                             return False
                         logger.info(f"【{self.pure_user_id}】✓ Frame已被分离，验证成功")
                         self.last_verification_feedback = {"status": "success", "source": "frame_detached", "message": "Frame已被分离"}
@@ -8539,11 +8610,13 @@ class XianyuSliderStealth:
             
             # 如果容器不存在或不可见，直接返回成功
             if not container_exists or not container_visible:
-                current_block = self._detect_post_slider_blocking_state(target_frame)
-                if current_block:
-                    logger.warning(
-                        f"【{self.pure_user_id}】滑块容器已消失，但当前命中[{current_block['kind']}]，按验证失败处理"
-                    )
+                blocked = self._resolve_post_slider_blocking_state(
+                    target_frame,
+                    reject_log="滑块容器已消失，但当前命中[{kind}]，按验证失败处理",
+                )
+                if blocked is True:
+                    return True
+                if blocked is False:
                     return False
                 logger.info(f"【{self.pure_user_id}】✓ 滑块容器已消失（不存在或不可见），验证成功")
                 self.last_verification_feedback = {"status": "success", "source": "container_missing", "message": "滑块容器已消失"}
@@ -8558,11 +8631,13 @@ class XianyuSliderStealth:
             
             # 如果容器消失了，返回成功
             if not container_exists or not container_visible:
-                current_block = self._detect_post_slider_blocking_state(target_frame)
-                if current_block:
-                    logger.warning(
-                        f"【{self.pure_user_id}】滑块容器二次检查已消失，但当前命中[{current_block['kind']}]，按验证失败处理"
-                    )
+                blocked = self._resolve_post_slider_blocking_state(
+                    target_frame,
+                    reject_log="滑块容器二次检查已消失，但当前命中[{kind}]，按验证失败处理",
+                )
+                if blocked is True:
+                    return True
+                if blocked is False:
                     return False
                 logger.info(f"【{self.pure_user_id}】✓ 滑块容器已消失，验证成功")
                 self.last_verification_feedback = {"status": "success", "source": "container_missing", "message": "滑块容器已消失"}
@@ -8580,11 +8655,13 @@ class XianyuSliderStealth:
             container_exists, container_visible = check_container_status()
             
             if not container_exists or not container_visible:
-                current_block = self._detect_post_slider_blocking_state(target_frame)
-                if current_block:
-                    logger.warning(
-                        f"【{self.pure_user_id}】滑块容器末次检查已消失，但当前命中[{current_block['kind']}]，按验证失败处理"
-                    )
+                blocked = self._resolve_post_slider_blocking_state(
+                    target_frame,
+                    reject_log="滑块容器末次检查已消失，但当前命中[{kind}]，按验证失败处理",
+                )
+                if blocked is True:
+                    return True
+                if blocked is False:
                     return False
                 logger.info(f"【{self.pure_user_id}】✓ 滑块容器已消失，验证成功")
                 self.last_verification_feedback = {"status": "success", "source": "container_missing", "message": "滑块容器已消失"}
@@ -8954,6 +9031,7 @@ class XianyuSliderStealth:
 
         # 快照当前 Cookie 基线（用于验证成功后判定"有意义的刷新"）
         cookie_baseline = self._snapshot_context_cookies()
+        self._slider_cookie_baseline = dict(cookie_baseline or {})
         if cookie_baseline:
             x5_count = sum(1 for k in cookie_baseline if k.lower().startswith('x5'))
             key_count = sum(1 for k in self._KEY_COOKIE_NAMES if k in cookie_baseline)
@@ -8965,6 +9043,22 @@ class XianyuSliderStealth:
             try:
                 last_attempt = attempt
                 logger.info(f"【{self.pure_user_id}】开始处理滑块验证... (第{attempt}/{max_retries}次尝试)")
+
+                if self._has_post_slide_punish_ticket(baseline=self._slider_cookie_baseline):
+                    logger.success(
+                        f"【{self.pure_user_id}】✅ 滑块第{attempt}次尝试前已持有新的处罚页票据，停止重试并按成功收口"
+                    )
+                    self.last_verification_feedback = {
+                        "status": "success",
+                        "source": "x5sec_on_punish",
+                        "message": "重试前已持有新的处罚页票据",
+                    }
+                    return finalize_slider_success(
+                        max(1, attempt - 1),
+                        "处罚页票据已下发，无需继续滑块重试",
+                        cookie_refresh_confirmed=True,
+                        soft_success=False,
+                    )
 
                 current_block = self._detect_special_captcha_block(self.page)
                 current_block = self._wait_for_punish_slider_dom_ready_if_needed(
@@ -8978,6 +9072,16 @@ class XianyuSliderStealth:
                     f"滑块第{attempt}次尝试起始页",
                 )
                 if current_block:
+                    if self._accept_punish_pass_with_ticket(
+                        current_block,
+                        scene=f"滑块第{attempt}次尝试起始页",
+                    ):
+                        return finalize_slider_success(
+                            max(1, attempt - 1) if attempt > 1 else attempt,
+                            "处罚页票据已下发，停止继续滑块重试",
+                            cookie_refresh_confirmed=True,
+                            soft_success=False,
+                        )
                     logger.error(
                         f"【{self.pure_user_id}】当前页面命中高风险验证码页[{current_block['kind']}]: "
                         f"{current_block['message']}，停止继续滑块重试"
@@ -9039,6 +9143,13 @@ class XianyuSliderStealth:
                 slider_container, slider_button, slider_track = self.find_slider_elements(fast_mode=fast_mode)
                 if not all([slider_container, slider_button, slider_track]):
                     logger.error(f"【{self.pure_user_id}】滑块元素查找失败")
+                    if (self.last_verification_feedback or {}).get("source") == "x5sec_on_punish":
+                        return finalize_slider_success(
+                            attempt,
+                            "当前页面已无滑块，但处罚页票据已下发",
+                            cookie_refresh_confirmed=True,
+                            soft_success=False,
+                        )
                     if (self.last_verification_feedback or {}).get("status") == "hard_block":
                         logger.error(f"【{self.pure_user_id}】当前页面已识别为高风险验证码页，停止当前滑块流程")
                         break
@@ -9059,6 +9170,13 @@ class XianyuSliderStealth:
                             attempt,
                             "当前页面已无滑块，但上下文已确认登录",
                             cookie_refresh_confirmed=None,
+                            soft_success=False,
+                        )
+                    if self._has_post_slide_punish_ticket(baseline=self._slider_cookie_baseline):
+                        return finalize_slider_success(
+                            attempt,
+                            "当前页面已无滑块，但处罚页票据已下发",
+                            cookie_refresh_confirmed=True,
                             soft_success=False,
                         )
 
@@ -9092,6 +9210,16 @@ class XianyuSliderStealth:
                     if context_login_success:
                         verification_success = True
                         logger.success(f"【{self.pure_user_id}】✅ 滑块结果未明确成功，但上下文已确认登录，按成功收口")
+                    elif self._has_post_slide_punish_ticket(baseline=self._slider_cookie_baseline):
+                        verification_success = True
+                        self.last_verification_feedback = {
+                            "status": "success",
+                            "source": "x5sec_on_punish",
+                            "message": "页面仍停在处罚页，但已下发 x5sec 票据",
+                        }
+                        logger.success(
+                            f"【{self.pure_user_id}】✅ 滑块 DOM 未明确通过，但已下发处罚页票据，按成功收口"
+                        )
 
                 if verification_success:
                     # 🔑 Cookie 双重校验：页面状态通过后，轮询检查关键 Cookie 是否真正刷新
