@@ -1,4 +1,4 @@
-"""Regression tests for 0.6.1 high-availability root-cause fixes."""
+"""Regression tests for 0.6.1 / 0.6.2 high-availability root-cause fixes."""
 
 from __future__ import annotations
 
@@ -8,9 +8,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
+from slidex._async_budget import await_with_budget
 from slidex._cookies import cookie_domain_for_url, parse_cookie_header, select_cookies_for_url
 from slidex._sanitize import sanitize_pure_user_id
 from slidex._slide_geometry import clamp_travel, points_from_recorded, scale_recorded_points
+from slidex._slide_result import interpret_slide_json
 from slidex.config import SlidexConfig
 from slidex.providers.aliyun import AliyunNoCaptchaProvider
 from slidex.providers.geetest import GeeTestProvider
@@ -21,6 +23,17 @@ from slidex.vision import (
     VisualChallengeRequest,
     VisualChallengeSolver,
 )
+from slidex.vision import solver as vision_solver
+
+
+async def _ignore_cancel_sleep(seconds: float) -> None:
+    """Playwright close/detach 同类：取消后仍继续跑完。"""
+    end = asyncio.get_running_loop().time() + seconds
+    while asyncio.get_running_loop().time() < end:
+        try:
+            await asyncio.sleep(0.05)
+        except asyncio.CancelledError:
+            continue
 
 
 class TestCookieDomainAndSnapshot:
@@ -128,10 +141,66 @@ class TestProfileLockBoundedAcquire:
             started = asyncio.get_running_loop().time()
             ok = await solver._acquire_profile_lock("ha-lock-test")
             elapsed = asyncio.get_running_loop().time() - started
+            assert ok is False
+            assert elapsed < 2.5
+            assert solver._profile_lock_held is False
+            assert lock.locked() is True
+        finally:
+            if lock.locked():
+                lock.release()
+
+    @pytest.mark.asyncio
+    async def test_acquire_success_holds_lock(self):
+        solver = SliderSolver(config=SlidexConfig(wait_timeout=1, telemetry_enabled=False))
+        lock = solver._get_profile_lock("ha-lock-ok")
+        ok = await solver._acquire_profile_lock("ha-lock-ok")
+        try:
+            assert ok is True
+            assert solver._profile_lock_held is True
+            assert lock.locked() is True
+        finally:
+            solver._release_profile_lock("ha-lock-ok")
+        assert solver._profile_lock_held is False
+        assert lock.locked() is False
+
+    @pytest.mark.asyncio
+    async def test_abandon_releases_lock_won_after_timeout_decision(self):
+        """超时判定后 acquire 已完成：必须把锁交回去，不能占死 profile。"""
+        solver = SliderSolver(config=SlidexConfig(wait_timeout=1, telemetry_enabled=False))
+        lock = solver._get_profile_lock("ha-lock-race")
+        task = asyncio.ensure_future(lock.acquire())
+        await task
+        assert lock.locked() is True
+        await solver._abandon_lock_acquire(lock, task, acquired=False)
+        assert solver._profile_lock_held is False
+        assert lock.locked() is False
+
+    @pytest.mark.asyncio
+    async def test_release_does_not_drop_someone_elses_lock(self):
+        solver = SliderSolver(config=SlidexConfig(telemetry_enabled=False))
+        lock = solver._get_profile_lock("ha-lock-other")
+        await lock.acquire()
+        try:
+            solver._profile_lock_held = False
+            solver._release_profile_lock("ha-lock-other")
+            assert lock.locked() is True
         finally:
             lock.release()
+
+    @pytest.mark.asyncio
+    async def test_legacy_on_response_success_false_is_failure(self):
+        solver = SliderSolver(config=SlidexConfig(telemetry_enabled=False))
+        response = type("Response", (), {})()
+        response.url = "https://example.com/_____tmd_____/slide"
+
+        async def body():
+            return b'{"success": false, "code": 0}'
+
+        response.body = body
+        await solver._on_response(response)
+        ok, code = await solver._wait_slide_outcome(0.1, success_code=0)
         assert ok is False
-        assert elapsed < 2.5
+        assert code == 0
 
 
 class TestAliyunProviderHa:
@@ -145,6 +214,16 @@ class TestAliyunProviderHa:
 
         response.body = body
         assert await AliyunNoCaptchaProvider().validate_response(response) is False
+
+    def test_interpret_slide_json_success_false_beats_code_zero(self):
+        assert interpret_slide_json({"success": False, "code": 0}) is False
+        assert interpret_slide_json({"success": "false", "code": 0}) is False
+        assert interpret_slide_json({"success": " FALSE ", "code": 0}) is False
+        assert interpret_slide_json({"code": 0}) is True
+        assert interpret_slide_json({"success": True, "code": 1}) is True
+        assert interpret_slide_json({"code": 1}, success_code=0) is False
+        assert interpret_slide_json([]) is None
+        assert interpret_slide_json("not-json-object") is None
 
     @pytest.mark.asyncio
     async def test_detect_iframe_without_content_frame_is_not_adapted(self):
@@ -270,8 +349,11 @@ class TestVisionTimeout:
     @pytest.mark.asyncio
     async def test_slider_timeout_ms_returns_timeout_error(self):
         class SlowSlider:
+            last = None
+
             def __init__(self, **kwargs):
                 self.closed = False
+                SlowSlider.last = self
 
             async def solve_on_existing_page(self, cdp_endpoint, page_url=""):
                 await asyncio.sleep(1)
@@ -298,6 +380,112 @@ class TestVisionTimeout:
         assert result.success is False
         assert result.error_code == "timeout"
         assert result.retryable is True
+        assert SlowSlider.last.closed is True
+
+    @pytest.mark.asyncio
+    async def test_slider_timeout_does_not_wait_out_hanging_close(self, monkeypatch):
+        monkeypatch.setattr(vision_solver, "_VISION_CLOSE_BUDGET_S", 0.05)
+
+        class HangCloseSlider:
+            def __init__(self, **kwargs):
+                pass
+
+            async def solve_on_existing_page(self, cdp_endpoint, page_url=""):
+                await asyncio.sleep(1)
+                return True, {"session": "late"}
+
+            def get_telemetry_summary(self):
+                return {"run_id": "r", "status": "success"}
+
+            def get_telemetry_dir(self):
+                return "/tmp"
+
+            async def close(self):
+                await _ignore_cancel_sleep(1.2)
+
+        started = asyncio.get_running_loop().time()
+        solver = VisualChallengeSolver(slider_solver_factory=lambda **kw: HangCloseSlider())
+        result = await solver.solve(
+            VisualChallengeRequest(
+                challenge_type=ChallengeType.SLIDER_CAPTCHA,
+                context=VisionContext.CDP,
+                cdp_endpoint="ws://localhost:9222/devtools/browser/1",
+                timeout_ms=50,
+            )
+        )
+        elapsed = asyncio.get_running_loop().time() - started
+        assert result.error_code == "timeout"
+        assert elapsed < 1.0
+
+    @pytest.mark.asyncio
+    async def test_ocr_executor_busy_returns_without_queueing(self, monkeypatch):
+        monkeypatch.setattr(vision_solver, "_vision_slots", __import__("threading").BoundedSemaphore(0))
+        solver = VisualChallengeSolver()
+        result = await solver.solve(
+            VisualChallengeRequest(
+                challenge_type=ChallengeType.OCR_TEXT,
+                context=VisionContext.IMAGE_BYTES,
+                image_bytes=b"x",
+                timeout_ms=80,
+            )
+        )
+        assert result.success is False
+        assert result.error_code == "executor_busy"
+        assert result.retryable is True
+
+    @pytest.mark.asyncio
+    async def test_ocr_timeout_ms_returns_timeout_error(self):
+        import threading
+
+        started = asyncio.get_running_loop().time()
+        entered = threading.Event()
+        release = threading.Event()
+
+        class SlowOcr:
+            def extract(self, **kwargs):
+                entered.set()
+                release.wait(timeout=5)
+                return type(
+                    "R",
+                    (),
+                    {
+                        "text": "late",
+                        "confidence": 1.0,
+                        "provider": "slow",
+                        "language": None,
+                        "boxes": [],
+                        "metadata": {},
+                    },
+                )()
+
+        solver = VisualChallengeSolver(ocr_extractor=SlowOcr())
+        try:
+            result = await solver.solve(
+                VisualChallengeRequest(
+                    challenge_type=ChallengeType.OCR_TEXT,
+                    context=VisionContext.IMAGE_BYTES,
+                    image_bytes=b"not-an-image",
+                    timeout_ms=80,
+                )
+            )
+            elapsed = asyncio.get_running_loop().time() - started
+            assert result.success is False
+            assert result.error_code == "timeout"
+            assert result.retryable is True
+            assert elapsed < 1.0
+            assert entered.wait(timeout=1)
+        finally:
+            release.set()
+
+
+class TestAwaitBudget:
+    @pytest.mark.asyncio
+    async def test_budget_returns_without_waiting_out_uncancellable_work(self):
+        started = asyncio.get_running_loop().time()
+        result = await await_with_budget(_ignore_cancel_sleep(1.2), 0.05)
+        elapsed = asyncio.get_running_loop().time() - started
+        assert result is None
+        assert elapsed < 1.0
 
 
 class TestCloseKillsProcessTree:
@@ -309,7 +497,7 @@ class TestCloseKillsProcessTree:
 
         class HangContext:
             async def close(self):
-                await asyncio.sleep(5)
+                await _ignore_cancel_sleep(1.2)
 
         solver.context = HangContext()
         killed = []
@@ -320,6 +508,9 @@ class TestCloseKillsProcessTree:
 
         monkeypatch.setattr("slidex.solver.kill_chromium_process_tree", fake_kill)
         monkeypatch.setattr("slidex.solver.ensure_profile_chromium_closed", AsyncMock(return_value=0))
+        started = asyncio.get_running_loop().time()
         await solver._close()
+        elapsed = asyncio.get_running_loop().time() - started
         assert killed == [4242]
         assert solver.context is None
+        assert elapsed < 1.0

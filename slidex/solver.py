@@ -18,8 +18,10 @@ from slidex._chromium_lifecycle import (
     find_chromium_pid_by_user_data_dir,
     kill_chromium_process_tree,
 )
+from slidex._async_budget import await_with_budget
 from slidex._cookies import cookie_domain_for_url, parse_cookie_header, select_cookies_for_url
 from slidex._slide_geometry import clamp_travel, points_from_recorded
+from slidex._slide_result import interpret_slide_json
 
 
 # ════════════════════════════════════════════════════════════
@@ -53,7 +55,6 @@ class SliderSolver(ProviderSolverMixin):
     MAX_RETRIES = 3
     OFFSET_CORRECTION_DEFAULT = -35
     OFFSET_CORRECTION_LIMITS = (-100, 100)
-    OFFSET_CONFIRM_TOLERANCE = 5
     CLOSE_TIMEOUT_S = 30.0
 
     # 同 profile（同账号浏览器目录）互斥：进程内串行化，防止并发求解互踩
@@ -94,11 +95,12 @@ class SliderSolver(ProviderSolverMixin):
         self.page = None
         self._cdp = None
         self._browser_pid = None
+        self._profile_lock_held = False
         self._verify_url = ""
         self._result_event = asyncio.Event()
         self._slide_code = None
+        self._slide_ok: Optional[bool] = None
         self._calibration = self._load_calibration()
-        self._pending_offset_correction: Optional[int] = None
         self._telemetry_run_id = uuid.uuid4().hex
         self._telemetry_events: List[Dict] = []
         self._telemetry_summary: Dict[str, object] = {
@@ -338,19 +340,97 @@ class SliderSolver(ProviderSolverMixin):
             return lock
 
     async def _acquire_profile_lock(self, profile_dir: str) -> bool:
-        """有界等待同 profile 互斥锁；超时返回 False（与 concurrency_manager.wait_for_slot 同语义）。"""
+        """有界等待同 profile 互斥锁；超时返回 False（与 concurrency_manager.wait_for_slot 同语义）。
+
+        不用 ``wait_for(lock.acquire())``：3.10 超时可能丢掉已完成的 acquire，锁被占死。
+        也不用 ``wait_for(shield(acquire))``：3.11+ 超时会取消 shield 并一直等到它结束，
+        而 shield 不会把取消传给 acquire，等于卡死。改成 ``asyncio.wait`` 与 sleep 竞速；
+        所有权以 acquire Future 的 done 回调为准，超时/取消时若已拿到则立即释放。
+        """
         lock = self._get_profile_lock(profile_dir)
         timeout = max(1.0, float(self._config.wait_timeout))
+        acquired = False
+
+        def _mark_acquired(fut: asyncio.Future) -> None:
+            nonlocal acquired
+            if fut.cancelled():
+                return
+            try:
+                if fut.exception() is None:
+                    acquired = True
+            except (asyncio.CancelledError, Exception):
+                return
+
+        task = asyncio.ensure_future(lock.acquire())
+        task.add_done_callback(_mark_acquired)
+        timeout_waiter = asyncio.ensure_future(asyncio.sleep(timeout))
         try:
-            await asyncio.wait_for(lock.acquire(), timeout=timeout)
+            await asyncio.wait(
+                {task, timeout_waiter},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except asyncio.CancelledError:
+            await self._await_cancelled(timeout_waiter)
+            await self._abandon_lock_acquire(lock, task, acquired)
+            raise
+
+        await self._await_cancelled(timeout_waiter)
+        got_lock = False
+        if task.done() and not task.cancelled():
+            try:
+                got_lock = task.exception() is None
+            except (asyncio.CancelledError, Exception):
+                got_lock = False
+        if got_lock:
+            self._profile_lock_held = True
             return True
-        except asyncio.TimeoutError:
-            return False
+        await self._abandon_lock_acquire(lock, task, acquired)
+        return False
+
+    @staticmethod
+    async def _await_cancelled(fut: asyncio.Future) -> None:
+        if not fut.done():
+            fut.cancel()
+        try:
+            await fut
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    async def _abandon_lock_acquire(
+        self,
+        lock: asyncio.Lock,
+        task: asyncio.Future,
+        acquired: bool,
+    ) -> None:
+        """超时/取消后：若 acquire 仍在等则取消；若已经拿到锁则立刻释放。"""
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if not acquired and task.done() and not task.cancelled():
+            try:
+                acquired = task.exception() is None
+            except (asyncio.CancelledError, Exception):
+                acquired = False
+        if acquired:
+            try:
+                lock.release()
+            except RuntimeError:
+                pass
+        self._profile_lock_held = False
 
     def _release_profile_lock(self, profile_dir: str) -> None:
+        if not getattr(self, "_profile_lock_held", False):
+            return
+        self._profile_lock_held = False
         lock = self._get_profile_lock(profile_dir)
         if lock.locked():
-            lock.release()
+            try:
+                lock.release()
+            except RuntimeError:
+                pass
 
     # ════════════════════════════════════════════════════════════
     #  主求解入口
@@ -550,17 +630,17 @@ class SliderSolver(ProviderSolverMixin):
                 for attempt in range(1, self.MAX_RETRIES + 1):
                     self._emit_step("legacy", "slide_attempt", "started", mode="recorded", attempt=attempt, distance=distance)
                     await self._do_slide(distance, attempt, recorded_trajectory=recorded)
-                    code = await self._wait_result(6.0)
-                    logger.info(f"[{self.pure_user_id}] recorded replay attempt {attempt}: code={code}")
+                    ok, code = await self._wait_slide_outcome(6.0, success_code)
+                    logger.info(f"[{self.pure_user_id}] recorded replay attempt {attempt}: ok={ok} code={code}")
                     self._emit_step(
                         "legacy",
                         "slide_attempt",
-                        "ok" if code == success_code else "failed",
+                        "ok" if ok else "failed",
                         mode="recorded",
                         attempt=attempt,
                         slide_code=code,
                     )
-                    if code == success_code:
+                    if ok:
                         cookies = await self._get_cookies()
                         logger.success(f"[{self.pure_user_id}] pass! (recorded, attempt={attempt})")
                         return True, cookies
@@ -578,17 +658,17 @@ class SliderSolver(ProviderSolverMixin):
         for attempt in range(1, self.MAX_RETRIES + 1):
             self._emit_step("legacy", "slide_attempt", "started", mode="generated", attempt=attempt, distance=distance)
             await self._do_slide(distance, attempt)
-            code = await self._wait_result(6.0)
-            logger.info(f"[{self.pure_user_id}] generated attempt {attempt}: code={code}")
+            ok, code = await self._wait_slide_outcome(6.0, success_code)
+            logger.info(f"[{self.pure_user_id}] generated attempt {attempt}: ok={ok} code={code}")
             self._emit_step(
                 "legacy",
                 "slide_attempt",
-                "ok" if code == success_code else "failed",
+                "ok" if ok else "failed",
                 mode="generated",
                 attempt=attempt,
                 slide_code=code,
             )
-            if code == success_code:
+            if ok:
                 cookies = await self._get_cookies()
                 logger.success(f"[{self.pure_user_id}] pass! (generated, attempt={attempt})")
                 return True, cookies
@@ -840,28 +920,8 @@ class SliderSolver(ProviderSolverMixin):
         return None
 
     # ════════════════════════════════════════════════════════════
-    #  校准管理
+    #  校准管理（只读已有 calibration.json；JS 已改为上限夹紧，不再学习 offset）
     # ════════════════════════════════════════════════════════════
-    def _register_offset_mismatch(self, img_dist: float, js_dist: float, ratio: float) -> None:
-        """图像/JS 距离失配时学习 offset：连续两次一致才持久化，且限制在合理带宽内，
-        防止单次异常（布局变体/DPR 抖动）把落盘校准永久带歪。"""
-        low, high = self.OFFSET_CORRECTION_LIMITS
-        candidate = max(low, min(high, int(img_dist - js_dist)))
-        if (
-            self._pending_offset_correction is not None
-            and abs(candidate - self._pending_offset_correction) <= self.OFFSET_CONFIRM_TOLERANCE
-        ):
-            self._calibration["offset_correction"] = candidate
-            self._save_calibration()
-            self._pending_offset_correction = None
-            logger.warning(f"[{self.pure_user_id}] image ({img_dist:.0f}) vs JS ({js_dist:.0f}) "
-                           f"mismatch (ratio={ratio:.2f}), calibrated offset={candidate}, using JS")
-        else:
-            self._pending_offset_correction = candidate
-            logger.warning(f"[{self.pure_user_id}] image ({img_dist:.0f}) vs JS ({js_dist:.0f}) "
-                           f"mismatch (ratio={ratio:.2f}), offset candidate={candidate} "
-                           "pending confirmation, using JS")
-
     def _calibration_path(self):
         return Path(self._config.get_calibration_dir()) / self.pure_user_id / "calibration.json"
 
@@ -1117,6 +1177,7 @@ class SliderSolver(ProviderSolverMixin):
 
         self._result_event.clear()
         self._slide_code = None
+        self._slide_ok = None
 
         # ── 录制轨迹回放 ──
         if recorded_trajectory and recorded_trajectory.get("points"):
@@ -1242,10 +1303,20 @@ class SliderSolver(ProviderSolverMixin):
                 body = await response.body()
                 text = body.decode("utf-8", errors="ignore")
                 data = json.loads(text)
-                code = data.get("code", -1)
-                logger.info(f"[{self.pure_user_id}] SLIDE RESPONSE: code={code}")
-                self._emit_telemetry_event("slide_result", slide_code=code, response_url=url[:200])
-                self._slide_code = code
+                success_code = self.selectors.get("success_code", 0)
+                ok = interpret_slide_json(data, success_code=success_code)
+                if ok is None:
+                    return
+                code = data.get("code") if isinstance(data, dict) else None
+                logger.info(f"[{self.pure_user_id}] SLIDE RESPONSE: ok={ok} code={code}")
+                self._emit_telemetry_event(
+                    "slide_result",
+                    slide_ok=ok,
+                    slide_code=code,
+                    response_url=url[:200],
+                )
+                self._slide_ok = ok
+                self._slide_code = -1 if code is None else code
                 self._result_event.set()
             except Exception:
                 pass
@@ -1258,6 +1329,18 @@ class SliderSolver(ProviderSolverMixin):
             return -1
         except Exception:
             return -1
+
+    async def _wait_slide_outcome(self, timeout=5.0, success_code=0):
+        """等滑块校验包：success 标志优先于 code。超时视为失败。"""
+        try:
+            await asyncio.wait_for(self._result_event.wait(), timeout=timeout)
+        except (asyncio.TimeoutError, Exception):
+            return False, -1
+        if self._slide_ok is not None:
+            code = self._slide_code if self._slide_code is not None else -1
+            return bool(self._slide_ok), code
+        code = self._slide_code if self._slide_code is not None else -1
+        return code == success_code, code
 
     async def _save_debug_screenshot(self, tag):
         try:
@@ -1335,13 +1418,13 @@ class SliderSolver(ProviderSolverMixin):
         pid = self._browser_pid or find_chromium_pid_by_user_data_dir(str(self.profile_dir))
         try:
             if self.context:
-                await asyncio.wait_for(self.context.close(), timeout=self.CLOSE_TIMEOUT_S)
+                await await_with_budget(self.context.close(), self.CLOSE_TIMEOUT_S)
         except Exception:
             pass
         self.context = None
         try:
             if self._playwright:
-                await asyncio.wait_for(self._playwright.stop(), timeout=self.CLOSE_TIMEOUT_S)
+                await await_with_budget(self._playwright.stop(), self.CLOSE_TIMEOUT_S)
         except Exception:
             pass
         self._playwright = None
@@ -1361,13 +1444,13 @@ class SliderSolver(ProviderSolverMixin):
         """CDP 模式清理 — 不关闭外部浏览器，只断开连接"""
         if self._cdp:
             try:
-                await asyncio.wait_for(self._cdp.detach(), timeout=self.CLOSE_TIMEOUT_S)
+                await await_with_budget(self._cdp.detach(), self.CLOSE_TIMEOUT_S)
             except Exception:
                 pass
             self._cdp = None
         if self._playwright:
             try:
-                await asyncio.wait_for(self._playwright.stop(), timeout=self.CLOSE_TIMEOUT_S)
+                await await_with_budget(self._playwright.stop(), self.CLOSE_TIMEOUT_S)
             except Exception:
                 pass
             self._playwright = None

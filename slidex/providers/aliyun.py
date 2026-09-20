@@ -9,6 +9,7 @@ from loguru import logger
 from slidex.providers import CaptchaProvider, ProviderElements, SolveResult
 from slidex.vision.models import ChallengeType, ProviderManifest, VisionContext
 from slidex._frames import iter_search_targets, wait_in_targets, query_in_targets
+from slidex._slide_result import interpret_slide_json
 
 
 _SLIDER_BTN = "#nc_1_n1z, .nc_iconfont, [id*=nc_][id*=n1z]"
@@ -200,19 +201,7 @@ class AliyunNoCaptchaProvider(CaptchaProvider):
             body = await response.body()
             text = body.decode("utf-8", errors="ignore")
             data = json.loads(text)
-            if not isinstance(data, dict):
-                return None
-            success_flag = data.get("success")
-            if success_flag in (False, 0, "false", "fail"):
-                return False
-            if success_flag in (True, 1, "success", "ok"):
-                return True
-            code = data.get("code")
-            if code == 0:
-                return True
-            if code is not None:
-                return False
-            return False
+            return interpret_slide_json(data, success_code=0)
         except Exception as e:
             logger.debug(f"validate_response error: {e}")
             return None

@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import inspect
 import asyncio
+import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from slidex._async_budget import await_with_budget, wait_abandoned
 from slidex.ocr import FakeOcrExtractor, OcrTextExtractor
 from slidex.solver import SliderSolver
 from slidex.vision.models import (
@@ -25,6 +29,24 @@ _IMAGE_SLIDER_CONTEXTS = {
     VisionContext.ANDROID_SCREENSHOT_BYTES,
 }
 
+_VISION_WORKER_CAP = max(2, min(8, (os.cpu_count() or 4)))
+_VISION_QUEUE_CAP = _VISION_WORKER_CAP * 2
+_VISION_CLOSE_BUDGET_S = 2.0
+_vision_executor: Optional[ThreadPoolExecutor] = None
+_vision_executor_guard = threading.Lock()
+_vision_slots = threading.BoundedSemaphore(_VISION_QUEUE_CAP)
+
+
+def _get_vision_executor() -> ThreadPoolExecutor:
+    global _vision_executor
+    with _vision_executor_guard:
+        if _vision_executor is None:
+            _vision_executor = ThreadPoolExecutor(
+                max_workers=_VISION_WORKER_CAP,
+                thread_name_prefix="slidex-vision",
+            )
+        return _vision_executor
+
 
 class VisualChallengeSolver:
     def __init__(
@@ -43,14 +65,19 @@ class VisualChallengeSolver:
         if request.challenge_type in {ChallengeType.OCR_TEXT, ChallengeType.IMAGE_TEXT}:
             # OCR extractors are synchronous/CPU-bound. Isolate them so the
             # caller event loop remains responsive under Provider V2 runtime.
-            return await asyncio.to_thread(self._solve_ocr, request, started)
+            # timeout_ms 与滑块路径同一套：超时返回 error_code=timeout。
+            return await self._await_cpu_with_timeout(
+                self._solve_ocr,
+                request,
+                started,
+            )
         if request.challenge_type == ChallengeType.SLIDER_CAPTCHA:
             if request.context in _IMAGE_SLIDER_CONTEXTS:
                 # 纯图片求解是 CPU 密集型，隔离到线程避免阻塞事件循环。
                 # ANDROID_SCREENSHOT_BYTES 也走这里：安卓截图无 CDP/Page，
                 # 只有整屏 bytes，走无块图缺口检测（解 dianping REQ-004）。
-                return await self._await_with_timeout(
-                    asyncio.to_thread(self._solve_slider_image, request, started),
+                return await self._await_cpu_with_timeout(
+                    self._solve_slider_image,
                     request,
                     started,
                 )
@@ -165,35 +192,108 @@ class VisualChallengeSolver:
             metadata={"context": request.context.value},
         )
 
+    async def _await_cpu_with_timeout(
+        self,
+        worker: Callable[[VisualChallengeRequest, float], VisualChallengeResult],
+        request: VisualChallengeRequest,
+        started: float,
+    ) -> VisualChallengeResult:
+        timeout_ms = getattr(request, "timeout_ms", None) or 0
+        if not _vision_slots.acquire(blocking=False):
+            return self._timeout_result(request, started, timeout_ms, error_code="executor_busy")
+        try:
+            cfut = _get_vision_executor().submit(worker, request, started)
+        except Exception:
+            _vision_slots.release()
+            raise
+
+        def _release_slot(_done) -> None:
+            _vision_slots.release()
+
+        cfut.add_done_callback(_release_slot)
+        return await self._await_with_timeout(
+            asyncio.wrap_future(cfut),
+            request,
+            started,
+            wait_cancelled=False,
+        )
+
     async def _await_with_timeout(
         self,
         awaitable,
         request: VisualChallengeRequest,
         started: float,
+        *,
+        wait_cancelled: bool = True,
     ) -> VisualChallengeResult:
         timeout_ms = getattr(request, "timeout_ms", None) or 0
         if timeout_ms <= 0:
             return await awaitable
         task = asyncio.ensure_future(awaitable)
+        timeout_waiter = asyncio.ensure_future(asyncio.sleep(timeout_ms / 1000.0))
         try:
-            return await asyncio.wait_for(task, timeout=timeout_ms / 1000.0)
-        except asyncio.TimeoutError:
-            task.cancel()
+            done, _pending = await asyncio.wait(
+                {task, timeout_waiter},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except asyncio.CancelledError:
+            await self._finish_timeout_waiter(timeout_waiter)
+            await self._cancel_work(task, wait_cancelled=wait_cancelled)
+            raise
+
+        await self._finish_timeout_waiter(timeout_waiter)
+        if task.done() and not task.cancelled():
+            return task.result()
+        await self._cancel_work(task, wait_cancelled=wait_cancelled)
+        return self._timeout_result(request, started, timeout_ms)
+
+    def _timeout_result(
+        self,
+        request: VisualChallengeRequest,
+        started: float,
+        timeout_ms: int,
+        error_code: str = "timeout",
+    ) -> VisualChallengeResult:
+        return VisualChallengeResult(
+            success=False,
+            challenge_type=request.challenge_type,
+            provider=request.provider,
+            duration_ms=self._duration_ms(started),
+            error_code=error_code,
+            retryable=True,
+            cookies=None,
+            artifacts=[],
+            metadata={"context": request.context.value, "timeout_ms": timeout_ms},
+        )
+
+    @staticmethod
+    async def _finish_timeout_waiter(fut: asyncio.Future) -> None:
+        if not fut.done():
+            fut.cancel()
+        try:
+            await fut
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    @staticmethod
+    async def _cancel_work(task: asyncio.Future, *, wait_cancelled: bool) -> None:
+        if task.done():
             try:
-                await task
+                task.exception()
             except (asyncio.CancelledError, Exception):
                 pass
-            return VisualChallengeResult(
-                success=False,
-                challenge_type=request.challenge_type,
-                provider=request.provider,
-                duration_ms=self._duration_ms(started),
-                error_code="timeout",
-                retryable=True,
-                cookies=None,
-                artifacts=[],
-                metadata={"context": request.context.value, "timeout_ms": timeout_ms},
-            )
+            return
+        task.cancel()
+        if not wait_cancelled:
+            def _discard(done: asyncio.Future) -> None:
+                try:
+                    done.exception()
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+            task.add_done_callback(_discard)
+            return
+        await wait_abandoned(task, _VISION_CLOSE_BUDGET_S)
 
     async def _solve_slider(self, request: VisualChallengeRequest, started: float) -> VisualChallengeResult:
         slider = self.slider_solver_factory(
@@ -243,7 +343,7 @@ class VisualChallengeSolver:
                 try:
                     close_result = close()
                     if inspect.isawaitable(close_result):
-                        await asyncio.shield(close_result)
+                        await await_with_budget(close_result, _VISION_CLOSE_BUDGET_S)
                 except Exception:
                     pass
 

@@ -3,12 +3,20 @@
 ## [0.6.2] - 2026-09-21
 
 密码登录 stealth 把「处罚页滑块已下发 x5sec、容器消失、父页仍停在 punish URL」误判成失败。
+顺带收口 0.6.1 复审遗留：profile 锁超时竞态、OCR `timeout_ms`、legacy 结果判定、vision 超时边界。
 
 ### Fixed
 - 密码登录 `solve_slider`：处罚页 nocaptcha 拖过后容器消失、URL 仍是 `/punish?x5secdata=` 时，若相对基线新下发了 `x5sec`/`x5secdata`，按通过收口，不再 `hard_block` 后交给二维码。无票据的真实拦截仍拒绝。
+- Profile 锁：Python 3.10 `asyncio.wait_for(lock.acquire())` 超时可能丢掉已完成的 acquire；`wait_for(shield(acquire))` 在 3.11+ 超时会卡死。改为 `asyncio.wait` 与 sleep 竞速，done 回调记录所有权，超时/取消后若已拿到则立即释放；释放只发生在本实例真正持有锁时。
+- `VisualChallengeRequest.timeout_ms` 覆盖 OCR / IMAGE_TEXT / 图片滑块。CPU 路径走有界 `slidex-vision` 线程池，排队也占槽；满员立即 `error_code=executor_busy`。超时后槽位等到工作线程真正结束才释放。
+- 有界等待不再用 `asyncio.wait_for`：3.11+ 会等到被取消的内层协程真正结束。Playwright `close`/`detach`/`stop` 和 vision `close()` 改成 `asyncio.wait` 与 sleep 竞速，预算到点就放弃。浏览器滑块超时后 `close()` 最多等 2s。
+- Legacy `_on_response` 与 Aliyun provider 共用 `interpret_slide_json`：`success: false` 优先于 `code==0`，避免 provider 失败回落 legacy 后把失败响应当通过。
+
+### Removed
+- `_register_offset_mismatch` 学习链。JS 距离已是上限夹紧，这条路径没有调用方；仍读取已有 `calibration.json`。
 
 ### Notes
-- 测试：`tests/test_slider_verification_guards.py` 覆盖处罚页 x5sec 通过门。版本 0.6.2。
+- 测试：`tests/test_slider_verification_guards.py` 覆盖处罚页 x5sec 通过门；`tests/test_ha_fixes.py` 覆盖锁所有权 / OCR timeout / executor_busy / 忽略 cancel 的 close 预算 / legacy success:false。版本 0.6.2。
 
 ## [0.6.1] - 2026-09-20
 

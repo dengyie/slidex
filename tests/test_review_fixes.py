@@ -186,34 +186,10 @@ class TestCalibrationGuard:
 
         assert s._calibration["offset_correction"] == SliderSolver.OFFSET_CORRECTION_DEFAULT
 
-    def test_single_mismatch_does_not_persist(self, tmp_path):
+    def test_offset_mismatch_learning_was_removed(self, tmp_path):
         s = self._solver(tmp_path)
-        default_offset = s._calibration["offset_correction"]
-
-        s._register_offset_mismatch(400.0, 200.0, 2.0)  # 候选 +200，越界且未确认
-
-        assert s._calibration["offset_correction"] == default_offset
-        assert not s._calibration_path().exists()
-
-    def test_two_consecutive_agreements_persist_within_band(self, tmp_path):
-        s = self._solver(tmp_path)
-
-        s._register_offset_mismatch(280.0, 200.0, 1.4)  # 候选 +80
-        assert not s._calibration_path().exists()
-        s._register_offset_mismatch(283.0, 200.0, 1.415)  # 候选 +83，与前次差 3 ≤ 5
-
-        assert s._calibration["offset_correction"] == 83
-        assert json.loads(s._calibration_path().read_text())["offset_correction"] == 83
-
-    def test_diverging_candidates_never_persist(self, tmp_path):
-        s = self._solver(tmp_path)
-
-        s._register_offset_mismatch(280.0, 200.0, 1.4)   # 候选 +80
-        s._register_offset_mismatch(240.0, 200.0, 1.2)   # 候选 +40，与前次差 40
-        s._register_offset_mismatch(360.0, 200.0, 1.8)   # 候选 +160 → clamp 100，与前次差 60
-
-        assert not s._calibration_path().exists()
-        assert s._calibration["offset_correction"] == SliderSolver.OFFSET_CORRECTION_DEFAULT
+        assert not hasattr(s, "_register_offset_mismatch")
+        assert not hasattr(s, "_pending_offset_correction")
 
 
 class TestTelemetrySummaryArtifact:
