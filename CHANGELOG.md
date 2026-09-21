@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.4] - 2026-09-21
+
+Token-refresh / 人工面板走的是 headless `SliderSolver`，不是密码登录 stealth。0.6.3 的 x5sec 票据门卫挡得住假通过，但下午这条路径根本没滑到：iframe 壳页上 `_wait_slider` 只看主文档，`check_completion` 把「从来没出现过」当成「已经消失」。
+
+### Fixed
+- Legacy `_wait_slider` / 距离计算 / `_do_slide` 通过 `iter_search_targets` 搜索主文档 + iframe，并钉住 `_slider_scope`，避免只等到 iframe、实际还在主文档上拖。
+- `CaptchaRemoteController.check_completion`：从未观察到滑块且没有 `x5sec` 时不再判定完成。`#nc_1_n1z` / `.nc-container` 纳入容器与完成检测。
+- Token-refresh 路径的通过 cookie 只认 `x5sec`，`x5secdata` 仍是挑战参数。
+
+### Notes
+- 测试：`tests/test_ha_fixes.py` 覆盖 iframe wait 钉作用域、从未出现过的远程完成、出现后消失、仅有 x5sec。`tests/test_slider_solver.py` 收紧 validation cookie。版本 0.6.4。
+
 ## [0.6.3] - 2026-09-21
 
 0.6.2 把「已下发 x5sec 仍被 DOM 判失败」修掉了，但通过票过宽：`x5secdata` 是挑战参数，空基线时任何非空 cookie 都会假通过。

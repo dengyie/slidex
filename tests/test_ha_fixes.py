@@ -254,6 +254,115 @@ class TestAliyunProviderHa:
         assert provider._challenge_scope is frame
 
 
+class TestLegacyIframeWait:
+    @pytest.mark.asyncio
+    async def test_wait_slider_pins_iframe_scope(self):
+        btn = object()
+        frame = AsyncMock()
+        frame.query_selector = AsyncMock(return_value=btn)
+        frame.wait_for_selector = AsyncMock(return_value=btn)
+        iframe = AsyncMock()
+        iframe.content_frame = AsyncMock(return_value=frame)
+        page = AsyncMock()
+        page.query_selector = AsyncMock(return_value=None)
+        page.query_selector_all = AsyncMock(return_value=[iframe])
+        page.wait_for_selector = AsyncMock(return_value=None)
+
+        solver = SliderSolver(config=SlidexConfig(telemetry_enabled=False))
+        solver.page = page
+        found = await solver._wait_slider(timeout=1.0)
+        assert found is True
+        assert solver._slider_scope is frame
+
+        handle = await solver._query_in_challenge_scope("#nc_1_n1z")
+        assert handle is btn
+        frame.query_selector.assert_awaited()
+        page.query_selector.assert_not_awaited()
+
+
+class TestRemoteNeverSeenComplete:
+    @pytest.mark.asyncio
+    async def test_check_completion_never_seen_is_incomplete(self):
+        from slidex.remote import captcha_controller
+
+        class FakePage:
+            frames = []
+            main_frame = None
+            context = None
+
+            async def query_selector(self, selector):
+                return None
+
+            async def content(self):
+                return "<html><body>iframe shell</body></html>"
+
+        captcha_controller.active_sessions.clear()
+        captcha_controller.active_sessions["afternoon"] = {
+            "page": FakePage(),
+            "captcha_info": None,
+            "captcha_seen": False,
+            "completed": False,
+            "audit": [],
+        }
+        assert await captcha_controller.check_completion("afternoon") is False
+        assert captcha_controller.active_sessions["afternoon"]["completed"] is False
+
+    @pytest.mark.asyncio
+    async def test_check_completion_seen_then_gone_is_complete(self):
+        from slidex.remote import captcha_controller
+
+        class FakePage:
+            frames = []
+            main_frame = None
+            context = None
+
+            async def query_selector(self, selector):
+                return None
+
+            async def content(self):
+                return "<html><body>done</body></html>"
+
+        captcha_controller.active_sessions.clear()
+        captcha_controller.active_sessions["seen"] = {
+            "page": FakePage(),
+            "captcha_info": {"selector": "#nc_1_n1z"},
+            "captcha_seen": True,
+            "completed": False,
+            "audit": [],
+        }
+        assert await captcha_controller.check_completion("seen") is True
+        assert captcha_controller.active_sessions["seen"]["completed"] is True
+
+    @pytest.mark.asyncio
+    async def test_check_completion_x5sec_without_dom_is_complete(self):
+        from slidex.remote import captcha_controller
+
+        class FakeContext:
+            async def cookies(self):
+                return [{"name": "x5sec", "value": "ticket"}]
+
+        class FakePage:
+            frames = []
+            main_frame = None
+            context = FakeContext()
+
+            async def query_selector(self, selector):
+                return None
+
+            async def content(self):
+                return "<html></html>"
+
+        captcha_controller.active_sessions.clear()
+        captcha_controller.active_sessions["ticket"] = {
+            "page": FakePage(),
+            "captcha_info": None,
+            "captcha_seen": False,
+            "completed": False,
+            "audit": [],
+        }
+        assert await captcha_controller.check_completion("ticket") is True
+
+
 class TestGeeTestFrameScope:
     @pytest.mark.asyncio
     async def test_locate_uses_challenge_scope_not_main_page(self):

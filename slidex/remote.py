@@ -71,6 +71,7 @@ class CaptchaRemoteController:
             'page': page,
             'screenshot': screenshot_base64,
             'captcha_info': session_info,
+            'captcha_seen': bool(session_info),
             'completed': False,
             'viewport': viewport,
             'token': session_token,
@@ -135,15 +136,22 @@ class CaptchaRemoteController:
                 '#nocaptcha',
                 '.scratch-captcha-container',
                 '[id*="captcha"]',
-                '.nc-container'
+                '.nc-container',
+                '#nc_1_n1z',
             ]
+
+            def _box_acceptable(selector: str, box: Dict[str, Any]) -> bool:
+                if not box:
+                    return False
+                min_w, min_h = (10, 10) if selector in {"#nc_1_n1z", ".nc-container"} else (100, 100)
+                return box.get("width", 0) > min_w and box.get("height", 0) > min_h
 
             for selector in container_selectors:
                 try:
                     element = await page.query_selector(selector)
                     if element:
                         box = await element.bounding_box()
-                        if box and box['width'] > 100 and box['height'] > 100:
+                        if _box_acceptable(selector, box):
                             logger.info(f"在主页面找到验证码容器: {selector}, 大小: {box['width']}x{box['height']}")
                             return {
                                 'selector': selector,
@@ -165,7 +173,7 @@ class CaptchaRemoteController:
                             element = await frame.query_selector(selector)
                             if element:
                                 box = await element.bounding_box()
-                                if box and box['width'] > 100 and box['height'] > 100:
+                                if _box_acceptable(selector, box):
                                     logger.info(f"在iframe找到验证码容器: {selector}, 大小: {box['width']}x{box['height']}")
                                     return {
                                         'selector': selector,
@@ -250,55 +258,67 @@ class CaptchaRemoteController:
             logger.error(f"处理鼠标事件失败: {e}")
             return False
 
+    CAPTCHA_SELECTORS = [
+        '#nocaptcha',
+        '#scratch-captcha-btn',
+        '.scratch-captcha-container',
+        '.scratch-captcha-slider',
+        '#nc_1_n1z',
+        '.nc-container',
+    ]
+
+    def _captcha_search_targets(self, page: Page):
+        targets = [page]
+        try:
+            main = getattr(page, "main_frame", None)
+            for frame in getattr(page, "frames", []) or []:
+                if frame is not None and frame is not page and frame is not main:
+                    targets.append(frame)
+        except Exception:
+            pass
+        return targets
+
+    async def _visible_captcha(self, page: Page) -> bool:
+        for target in self._captcha_search_targets(page):
+            for selector in self.CAPTCHA_SELECTORS:
+                try:
+                    element = await target.query_selector(selector)
+                    if element and await element.is_visible():
+                        logger.debug(f"发现可见滑块: {selector}")
+                        return True
+                except Exception:
+                    continue
+        return False
+
+    async def _page_has_x5sec(self, page: Page) -> bool:
+        try:
+            context = getattr(page, "context", None)
+            if context is None:
+                return False
+            cookies = await context.cookies()
+            return any(
+                bool((cookie or {}).get("name") == "x5sec" and (cookie or {}).get("value"))
+                for cookie in cookies or []
+            )
+        except Exception:
+            return False
+
+    def _session_saw_captcha(self, session: Dict[str, Any]) -> bool:
+        if session.get("captcha_seen"):
+            return True
+        info = session.get("captcha_info")
+        return bool(isinstance(info, dict) and info.get("selector"))
+
     async def check_completion(self, session_id: str) -> bool:
         if session_id not in self.active_sessions:
             return False
 
         try:
-            page = self.active_sessions[session_id]['page']
+            session = self.active_sessions[session_id]
+            page = session['page']
 
-            captcha_selectors = [
-                '#nocaptcha',
-                '#scratch-captcha-btn',
-                '.scratch-captcha-container',
-                '.scratch-captcha-slider'
-            ]
-
-            found_visible_captcha = False
-
-            for selector in captcha_selectors:
-                try:
-                    element = await page.query_selector(selector)
-                    if element:
-                        is_visible = await element.is_visible()
-                        if is_visible:
-                            logger.debug(f"主页面发现可见滑块: {selector}")
-                            found_visible_captcha = True
-                            break
-                except Exception:
-                    continue
-
-            if found_visible_captcha:
-                return False
-
-            frames = page.frames
-            for frame in frames:
-                if frame != page.main_frame:
-                    for selector in captcha_selectors:
-                        try:
-                            element = await frame.query_selector(selector)
-                            if element:
-                                is_visible = await element.is_visible()
-                                if is_visible:
-                                    logger.debug(f"iframe中发现可见滑块: {selector}")
-                                    found_visible_captcha = True
-                                    break
-                        except Exception:
-                            continue
-                    if found_visible_captcha:
-                        break
-
-            if found_visible_captcha:
+            if await self._visible_captcha(page):
+                session['captcha_seen'] = True
                 return False
 
             try:
@@ -311,8 +331,18 @@ class CaptchaRemoteController:
             except Exception:
                 pass
 
+            if await self._page_has_x5sec(page):
+                logger.success(f"验证完成（已拿到 x5sec）: {session_id}")
+                session['completed'] = True
+                self.record_audit(session_id, "session_completed")
+                return True
+
+            if not self._session_saw_captcha(session):
+                logger.debug(f"验证未完成（从未观察到滑块）: {session_id}")
+                return False
+
             logger.success(f"验证完成（所有滑块元素已消失）: {session_id}")
-            self.active_sessions[session_id]['completed'] = True
+            session['completed'] = True
             self.record_audit(session_id, "session_completed")
             return True
 

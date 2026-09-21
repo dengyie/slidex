@@ -241,7 +241,7 @@ class TestSliderSolverInit:
         s = SliderSolver(cookie_id="xianyu")
 
         assert s._has_validation_cookie({"x5sec": "ticket"})
-        assert s._has_validation_cookie({"x5secdata": "ticket"})
+        assert not s._has_validation_cookie({"x5secdata": "ticket"})
         assert not s._has_validation_cookie({"cookie2": "abc"})
 
 

@@ -20,6 +20,7 @@ from slidex._chromium_lifecycle import (
 )
 from slidex._async_budget import await_with_budget
 from slidex._cookies import cookie_domain_for_url, parse_cookie_header, select_cookies_for_url
+from slidex._frames import iter_search_targets, query_in_targets, wait_in_targets
 from slidex._slide_geometry import clamp_travel, points_from_recorded
 from slidex._slide_result import interpret_slide_json
 
@@ -97,6 +98,7 @@ class SliderSolver(ProviderSolverMixin):
         self._browser_pid = None
         self._profile_lock_held = False
         self._verify_url = ""
+        self._slider_scope = None
         self._result_event = asyncio.Event()
         self._slide_code = None
         self._slide_ok: Optional[bool] = None
@@ -855,7 +857,8 @@ class SliderSolver(ProviderSolverMixin):
             return travel
 
         try:
-            track_w = await self.page.evaluate(
+            scope = self._challenge_scope()
+            track_w = await scope.evaluate(
                 """(sel) => {
                     const el = document.querySelector(sel);
                     return el ? el.offsetWidth : 0;
@@ -874,8 +877,8 @@ class SliderSolver(ProviderSolverMixin):
         logger.debug(f"[{self.pure_user_id}] calculating distance via image match...")
         await asyncio.sleep(0.5)
         try:
-            bg = await self.page.query_selector(self.selectors["bg_img"])
-            piece = await self.page.query_selector(self.selectors["piece_img"])
+            bg = await self._query_in_challenge_scope(self.selectors["bg_img"])
+            piece = await self._query_in_challenge_scope(self.selectors["piece_img"])
             if not bg or not piece:
                 logger.debug(f"[{self.pure_user_id}] image selectors not found bg={bool(bg)} piece={bool(piece)}")
                 return None
@@ -894,7 +897,8 @@ class SliderSolver(ProviderSolverMixin):
 
     async def _calc_distance_js(self):
         try:
-            d = await self.page.evaluate("""(selectors) => {
+            scope = self._challenge_scope()
+            d = await scope.evaluate("""(selectors) => {
                 const b = document.querySelector(selectors.slider_btn);
                 const t = document.querySelector(selectors.slider_track);
                 if (!b || !t) return {js_dist: 0};
@@ -1133,6 +1137,16 @@ class SliderSolver(ProviderSolverMixin):
                 all_imgs: document.querySelectorAll("img").length,
                 scripts: document.querySelectorAll("script").length,
             })""", self.selectors["slider_btn"])
+            try:
+                targets = await iter_search_targets(self.page)
+                info["search_targets"] = len(targets)
+                if not info.get("slider_btn_visible"):
+                    handle, used = await query_in_targets(targets, self.selectors["slider_btn"])
+                    if handle:
+                        info["slider_btn_visible"] = True
+                        self._slider_scope = used
+            except Exception:
+                pass
             logger.info(f"[{self.pure_user_id}] page state: {info}")
             self._emit_step("page", "page_state", "ok", **info)
         except Exception:
@@ -1140,20 +1154,57 @@ class SliderSolver(ProviderSolverMixin):
             pass
         self._emit_step("page", "page_load", "ok", verify_url=url)
 
+    def _challenge_scope(self):
+        return self._slider_scope or self.page
+
+    def _slider_wait_selectors(self) -> List[str]:
+        ordered = [self.selectors.get("slider_btn"), *(self.selectors.get("slider_alt") or ())]
+        unique: List[str] = []
+        for sel in ordered:
+            if sel and sel not in unique:
+                unique.append(sel)
+        return unique
+
+    async def _query_in_challenge_scope(self, selector: str):
+        scope = self._challenge_scope()
+        if scope is not None:
+            try:
+                handle = await scope.query_selector(selector)
+                if handle:
+                    return handle
+            except Exception:
+                pass
+        if not self.page:
+            return None
+        try:
+            handle, used = await query_in_targets(await iter_search_targets(self.page), selector)
+        except Exception:
+            return None
+        if handle and used is not None:
+            self._slider_scope = used
+        return handle
+
     async def _wait_slider(self, timeout=15.0):
         logger.debug(f"[{self.pure_user_id}] waiting for slider (timeout={timeout}s)")
-        try:
-            await self.page.wait_for_selector(self.selectors["slider_btn"], state="visible", timeout=timeout * 1000)
-            return True
-        except Exception:
-            for alt in self.selectors["slider_alt"]:
-                try:
-                    await self.page.wait_for_selector(alt, state="visible", timeout=3000)
-                    logger.info(f"[{self.pure_user_id}] found slider via: {alt}")
-                    return True
-                except Exception:
-                    pass
+        if not self.page:
             return False
+        selectors = self._slider_wait_selectors()
+        if not selectors:
+            return False
+        try:
+            targets = await iter_search_targets(self.page)
+        except Exception:
+            targets = [self.page]
+        budget_ms = max(500.0, float(timeout) * 1000.0)
+        per_selector = budget_ms / max(len(selectors), 1)
+        for sel in selectors:
+            handle, used = await wait_in_targets(targets, sel, timeout=per_selector)
+            if handle:
+                self._slider_scope = used
+                if sel != self.selectors.get("slider_btn"):
+                    logger.info(f"[{self.pure_user_id}] found slider via: {sel}")
+                return True
+        return False
 
     # ════════════════════════════════════════════════════════════
     #  滑动执行（统一入口）
@@ -1161,9 +1212,9 @@ class SliderSolver(ProviderSolverMixin):
     async def _do_slide(self, distance, attempt, recorded_trajectory=None):
         btn = None
         try:
-            btn = await self.page.query_selector(self.selectors["slider_btn"])
+            btn = await self._query_in_challenge_scope(self.selectors["slider_btn"])
         except Exception:
-            pass
+            btn = None
         if not btn:
             logger.warning(f"[{self.pure_user_id}] slider button gone before slide")
             return
@@ -1395,7 +1446,7 @@ class SliderSolver(ProviderSolverMixin):
 
     @staticmethod
     def _has_validation_cookie(cookies: Optional[Dict[str, str]]) -> bool:
-        return any(bool((cookies or {}).get(key)) for key in ("x5sec", "x5secdata"))
+        return bool((cookies or {}).get("x5sec"))
 
     # ════════════════════════════════════════════════════════════
     #  清理
