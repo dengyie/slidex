@@ -1187,3 +1187,30 @@ class TestSliderVerificationGuards:
 
         assert result is None
         assert slider.last_verification_feedback == {}
+
+    def test_password_login_overrides_inherited_token_refresh_scene(self):
+        # 回归：密码登录从 token_refresh 场景进入时，不能沿用 risk_trigger_scene=token_refresh，
+        # 否则 _should_abort_token_refresh_slider_flow_after_failure 会把密码登录
+        # 误判为后台 token_refresh 流程，命中 hard reject(ncvxn) 后提前放弃剩余重试。
+        slider = XianyuSliderStealth.__new__(XianyuSliderStealth)
+        slider.pure_user_id = "unit_password_scene_test"
+        slider.risk_trigger_scene = "token_refresh"
+        slider._in_password_login_flow = False
+
+        # 直接断言 abort guard 对密码登录内的 ncvxn 反馈不触发
+        slider._in_password_login_flow = True
+        slider.last_verification_feedback = {
+            "status": "failure",
+            "source": "keyword",
+            "message": "验证失败，点击框体重试",
+            "fail_code": "ncvxn",
+        }
+        abort, reason = slider._should_abort_token_refresh_slider_flow_after_failure()
+        assert not abort
+        assert reason == ""
+
+        # 同样的反馈在后台 token_refresh 场景下仍应触发提前结束
+        slider._in_password_login_flow = False
+        abort, reason = slider._should_abort_token_refresh_slider_flow_after_failure()
+        assert abort
+        assert "ncvxn" in reason
