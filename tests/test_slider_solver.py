@@ -265,11 +265,11 @@ async def test_solve_on_page_removes_response_listener_and_detaches_cdp():
             self.goto = mock.AsyncMock()
 
         def on(self, event_name, handler):
-            assert event_name == "response"
+            assert event_name in ("response", "console")
             self.handlers.append(handler)
 
         def remove_listener(self, event_name, handler):
-            assert event_name == "response"
+            assert event_name in ("response", "console")
             self.handlers.remove(handler)
 
     page = FakePage()

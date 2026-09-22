@@ -11,16 +11,26 @@ from loguru import logger
 def generate_trajectory(
     distance: float,
     attempt: int = 1,
+    press_hold_ms: float = 0.0,
+    overshoot_back: bool = False,
 ) -> List[Tuple[float, float, float]]:
     """
     生成人类化滑动轨迹
 
     返回: [(x, y, delay_ms), ...]  相对位移 + 步骤间延迟(ms)
+
+    press_hold_ms: 按下后保持不动的时长（真实人手按下到开始拖动的延迟，
+        kanxue 成功案例用 1200ms；0 走默认 100-200ms 起始停顿）
+    overshoot_back: 终点先过冲 3-6px 再回拖（收尾减速与回拖修正，
+        释放前模拟人手抖动）
     """
     traj = []
 
-    # === 起始停顿 (100-200ms) ===
-    traj.append((0, 0, random.uniform(100, 200)))
+    # === 起始停顿 ===
+    if press_hold_ms > 0:
+        traj.append((0, 0, press_hold_ms))
+    else:
+        traj.append((0, 0, random.uniform(100, 200)))
 
     # === 滑动阶段 ===
     steps = random.randint(10, 15)
@@ -67,6 +77,16 @@ def generate_trajectory(
 
     # === 终点停顿 ===
     traj.append((distance, 0, random.uniform(50, 120)))
+
+    # === 过冲回拖 + 释放前抖动（模拟人手收尾修正） ===
+    if overshoot_back:
+        over = random.uniform(3.0, 6.0)
+        back = random.uniform(2.0, 3.5)
+        jitter = random.uniform(-1.0, 1.0)
+        # 过冲点 → 回拖点 → 释放位（带 ±1px 手抖）
+        traj.append((distance + over, random.uniform(-1.5, 1.5), random.uniform(60, 110)))
+        traj.append((distance + over - back, random.uniform(-1.0, 1.0), random.uniform(50, 90)))
+        traj.append((distance + jitter, 0.0, random.uniform(40, 80)))
 
     total_ms = sum(d for _, _, d in traj)
     logger.debug(

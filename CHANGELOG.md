@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.5] - 2026-09-23
+
+滑块滑到位后校验包 `code=-1` 仍判失败：轨迹行为特征不够"人"（down 后 10-30ms 就拖、释放干脆利落），且阿里新前端成功标志走 console/前端回调而非 `_____tmd_____/slide` 响应，捕获面漏了。
+
+### Added
+- `generate_trajectory`：`press_hold_ms`（按下后按住不动，600-1200ms，看雪 284633 量级）与 `overshoot_back`（终点过冲 3-6px 回拖 + 释放前 ±1px 手抖）。`_do_slide` 两处调用点启用。
+- 录制回放 `_replay_slide`：同样的按下按住 + 释放前抖动。
+- `_on_console` 兜底成功信号：console 出现「验证通过」/`captchaVerifyParam` 时置位成功事件（mucsbr/aliyun-captcha-fake 同款捕获面），`solve_on_page` 生命周期同步挂/卸。
+- `_____tmd_____/slide` 响应体前 200 字节落 INFO 日志，`code=-1` 时可直接分辨捕获的是最终校验包还是中间探测包。
+
+### Notes
+- 测试：`tests/test_slider_solver.py` FakePage 放宽为接受 `response`/`console` 两种事件挂卸（399 绿）。版本 0.6.5。
+
 ## [0.6.4] - 2026-09-21
 
 Token-refresh / 人工面板走的是 headless `SliderSolver`，不是密码登录 stealth。0.6.3 的 x5sec 票据门卫挡得住假通过，但下午这条路径根本没滑到：iframe 壳页上 `_wait_slider` 只看主文档，`check_completion` 把「从来没出现过」当成「已经消失」。

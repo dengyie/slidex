@@ -553,6 +553,7 @@ class SliderSolver(ProviderSolverMixin):
         listener_registered = False
         try:
             self.page.on("response", response_handler)
+            self.page.on("console", self._on_console)
             listener_registered = True
             try:
                 self._cdp = await self.context.new_cdp_session(self.page)
@@ -591,6 +592,10 @@ class SliderSolver(ProviderSolverMixin):
                 if remove_listener:
                     try:
                         remove_listener("response", response_handler)
+                    except Exception:
+                        pass
+                    try:
+                        remove_listener("console", self._on_console)
                     except Exception:
                         pass
             await self._close_cdp_only()
@@ -1038,12 +1043,19 @@ class SliderSolver(ProviderSolverMixin):
             await self.page.mouse.move(sx, sy)
             await asyncio.sleep(random.uniform(0.02, 0.06))
             await self.page.mouse.down()
-            await asyncio.sleep(random.uniform(0.01, 0.03))
+            # 录制回放同样需要"按下按住再拖"的真人停顿（看雪 284633 量级 1200ms）
+            await asyncio.sleep(random.uniform(600, 1200) / 1000.0)
 
             for dx, dy, delay_ms in points:
                 await self.page.mouse.move(sx + dx, sy + dy)
                 await asyncio.sleep(delay_ms / 1000.0)
 
+            # 释放前人手抖动：左右 ±2px 再回到释放位（对齐真人收尾）
+            end_x = sx + points[-1][0]
+            await self.page.mouse.move(end_x - random.uniform(1.5, 2.5), sy + points[-1][1])
+            await asyncio.sleep(random.uniform(0.02, 0.05))
+            await self.page.mouse.move(end_x + random.uniform(1.0, 2.0), sy + points[-1][1])
+            await asyncio.sleep(random.uniform(0.02, 0.05))
             await asyncio.sleep(random.uniform(0.03, 0.08))
             await self.page.mouse.up()
             return True
@@ -1088,6 +1100,7 @@ class SliderSolver(ProviderSolverMixin):
             await self.page.add_init_script(STEALTH_INIT_SCRIPT)
         await self._inject_cookies()
         self.page.on("response", self._on_response)
+        self.page.on("console", self._on_console)
         async def _on_nav(frame):
             if frame == self.page.main_frame:
                 logger.debug(f"[{self.pure_user_id}] page navigated: {frame.url[:100]}")
@@ -1364,16 +1377,23 @@ class SliderSolver(ProviderSolverMixin):
         try:
             sx2 = sx + random.uniform(-2, 2)
             sy2 = sy + random.uniform(-2, 2)
-            traj = generate_trajectory(distance, attempt)
+            # 按下后按住一段再拖 + 终点过冲回拖/释放抖动：对齐真人行为特征
+            # （看雪 284633 成功案例：down 后 1200ms 才动 + 收尾回拖 ±2px）
+            traj = generate_trajectory(
+                distance, attempt,
+                press_hold_ms=random.uniform(600, 1200),
+                overshoot_back=True,
+            )
             pts = trajectory_to_points(traj, sx2, sy2)
             await self.page.mouse.move(sx2 + random.uniform(-8, -3), sy2 + random.uniform(2, 6))
             await asyncio.sleep(random.uniform(0.03, 0.08))
             await self.page.mouse.move(sx2, sy2)
-            init_delay = pts[0][2] / 1000.0 if pts else 0.05
-            await asyncio.sleep(init_delay)
+            await asyncio.sleep(random.uniform(0.02, 0.06))
             await self.page.mouse.down()
-            await asyncio.sleep(random.uniform(0.01, 0.04))
-            for x, y, d in pts:
+            # pts[0] 是按下后按住不动的停顿（press_hold），从第 1 个位移点开始拖
+            hold = pts[0][2] / 1000.0 if pts else 0.8
+            await asyncio.sleep(hold)
+            for x, y, d in pts[1:]:
                 await self.page.mouse.move(x, y)
                 await asyncio.sleep(d / 1000.0)
             await asyncio.sleep(random.uniform(0.03, 0.08))
@@ -1391,6 +1411,9 @@ class SliderSolver(ProviderSolverMixin):
             try:
                 body = await response.body()
                 text = body.decode("utf-8", errors="ignore")
+                # 前 200 字节落日志：code=-1 时可直接判断捕获的是最终校验包
+                # （阿里 100/900 语义）还是中间探测包——决定轨迹层 vs 结果层的排查方向
+                logger.info(f"[{self.pure_user_id}] tmd slide body[:200]: {text[:200]!r}")
                 data = json.loads(text)
                 success_code = self.selectors.get("success_code", 0)
                 ok = interpret_slide_json(data, success_code=success_code)
@@ -1410,6 +1433,22 @@ class SliderSolver(ProviderSolverMixin):
             except Exception:
                 pass
 
+    def _on_console(self, msg):
+        """阿里新前端（CAPTCHA V3）成功标志走 console/前端回调而非 _____tmd_____/slide
+        响应（mucsbr/aliyun-captcha-fake 同款捕获面），这里做兜底成功信号。"""
+        try:
+            text = msg.text or ""
+        except Exception:
+            return
+        if ("验证通过" in text) or ("captchaVerifyParam" in text):
+            logger.info(f"[{self.pure_user_id}] console success marker: {text[:200]!r}")
+            self._emit_telemetry_event(
+                "slide_console_success",
+                marker=text[:200],
+            )
+            self._slide_ok = True
+            self._result_event.set()
+
     async def _wait_result(self, timeout=5.0):
         try:
             await asyncio.wait_for(self._result_event.wait(), timeout=timeout)
@@ -1418,7 +1457,6 @@ class SliderSolver(ProviderSolverMixin):
             return -1
         except Exception:
             return -1
-
     async def _wait_slide_outcome(self, timeout=5.0, success_code=0):
         """等滑块校验包：success 标志优先于 code。超时视为失败。"""
         try:
