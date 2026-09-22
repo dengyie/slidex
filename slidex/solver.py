@@ -5,6 +5,18 @@ from urllib.parse import urlparse, parse_qs
 from loguru import logger
 from playwright.async_api import async_playwright
 
+try:
+    from patchright.async_api import async_playwright as patchright_async_playwright
+except Exception:
+    patchright_async_playwright = None
+
+def _resolve_automation_backend() -> str:
+    """与 stealth.py 相同的 XY_SLIDER_AUTOMATION_BACKEND 约定，供 solver 复用。"""
+    backend_env = os.environ.get("XY_SLIDER_AUTOMATION_BACKEND", "").strip().lower()
+    if backend_env == "patchright" and patchright_async_playwright is not None:
+        return "patchright"
+    return "playwright"
+
 from slidex._stealth_patch import STEALTH_LAUNCH_ARGS, STEALTH_INIT_SCRIPT
 from slidex._trajectory import generate_trajectory, trajectory_to_points
 from slidex._image_match import SliderImageMatcher
@@ -1043,13 +1055,17 @@ class SliderSolver(ProviderSolverMixin):
     #  浏览器初始化与页面加载
     # ════════════════════════════════════════════════════════════
     async def _init_browser(self):
-        self._emit_step("browser", "browser_init", "started", headless=self.headless, proxy_enabled=bool(self.proxy))
+        self.automation_backend = _resolve_automation_backend()
+        self._emit_step("browser", "browser_init", "started", headless=self.headless, proxy_enabled=bool(self.proxy), backend=self.automation_backend)
         await ensure_profile_chromium_closed(str(self.profile_dir))
         self.profile_dir.mkdir(parents=True, exist_ok=True)
 
-        pw = await async_playwright().start()
+        pw = await (patchright_async_playwright if self.automation_backend == "patchright" else async_playwright)().start()
         self._playwright = pw
         kwargs = {"headless": self.headless, "args": STEALTH_LAUNCH_ARGS}
+        if self.automation_backend == "patchright":
+            # patchright 自带反检测注入与 launch 参数处理；多余的 init_script/启动参数反而扩大指纹面
+            kwargs.pop("args", None)
         proxy_host = self.proxy.get("proxy_host")
         proxy_port = self.proxy.get("proxy_port")
         if proxy_host and proxy_port:
@@ -1068,7 +1084,8 @@ class SliderSolver(ProviderSolverMixin):
             record_chromium_pid(pid)
             self._browser_pid = pid
 
-        await self.page.add_init_script(STEALTH_INIT_SCRIPT)
+        if self.automation_backend != "patchright":
+            await self.page.add_init_script(STEALTH_INIT_SCRIPT)
         await self._inject_cookies()
         self.page.on("response", self._on_response)
         async def _on_nav(frame):
@@ -1076,14 +1093,19 @@ class SliderSolver(ProviderSolverMixin):
                 logger.debug(f"[{self.pure_user_id}] page navigated: {frame.url[:100]}")
         self.page.on("framenavigated", _on_nav)
         self.page.on("close", lambda: logger.warning(f"[{self.pure_user_id}] page closed!"))
-        try:
-            self._cdp = await self.page.context.new_cdp_session(self.page)
-            logger.debug(f"[{self.pure_user_id}] CDP session ready")
-            self._emit_step("browser", "cdp_session", "ok")
-        except Exception:
+        if self.automation_backend == "patchright":
+            # patchright 下禁止创建 CDP 会话：Runtime.enable 正是其要规避的检测特征
             self._cdp = None
-            logger.warning(f"[{self.pure_user_id}] CDP session failed")
-            self._emit_step("browser", "cdp_session", "failed")
+            self._emit_step("browser", "cdp_session", "skipped", reason="patchright_backend")
+        else:
+            try:
+                self._cdp = await self.page.context.new_cdp_session(self.page)
+                logger.debug(f"[{self.pure_user_id}] CDP session ready")
+                self._emit_step("browser", "cdp_session", "ok")
+            except Exception:
+                self._cdp = None
+                logger.warning(f"[{self.pure_user_id}] CDP session failed")
+                self._emit_step("browser", "cdp_session", "failed")
         self._emit_step("browser", "browser_init", "ok", profile_dir=str(self.profile_dir))
 
     async def _connect_existing_browser(self, cdp_endpoint: str, page_url: str = ""):
