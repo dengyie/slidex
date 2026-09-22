@@ -1146,9 +1146,25 @@ class SliderSolver(ProviderSolverMixin):
         if cl:
             await self.context.add_cookies(cl)
 
+    @staticmethod
+    async def _goto_page(page, url: str, step_origin: str = "page"):
+        """networkidle 优先；处罚页后台信标可能导致永不 idle，超时降级 domcontentloaded。
+        页面是否真的渲染出滑块由后续 page_state 探测判定，导航等待不是成败判据。"""
+        try:
+            await page.goto(url, wait_until="networkidle", timeout=45000)
+        except Exception as nav_exc:
+            if "Timeout" not in type(nav_exc).__name__ and "TimeoutError" not in str(type(nav_exc)):
+                raise
+            logger.warning(f"goto networkidle timeout, falling back to domcontentloaded: {url[:80]}")
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            except Exception:
+                pass
+            await asyncio.sleep(8)
+
     async def _load_page(self, url):
         self._emit_step("page", "page_load", "started", verify_url=url)
-        await self.page.goto(url, wait_until="networkidle", timeout=45000)
+        await self._goto_page(self.page, url)
         await asyncio.sleep(3)
         try:
             info = await self.page.evaluate("""(sel) => ({
