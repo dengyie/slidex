@@ -95,6 +95,7 @@ class SliderSolver(ProviderSolverMixin):
         self._config = config or SlidexConfig()
         self._notification_callback = notification_callback
         self._is_cdp_mode = False
+        self._scale_slider = False
         self.selectors = {**DEFAULT_SELECTORS, **(selectors or {})}
 
         traj_dir = self._config.get_trajectory_dir()
@@ -853,9 +854,22 @@ class SliderSolver(ProviderSolverMixin):
     #  多源距离计算（链式 fallback + 自适应校准）
     # ════════════════════════════════════════════════════════════
     async def _calc_distance_multi_source(self) -> Optional[float]:
-        """缺口行程来自图像匹配；JS 轨道宽-按钮宽只是可滑动上限，不当缺口。"""
+        """缺口行程来自图像匹配；JS 轨道宽-按钮宽只是可滑动上限，不当缺口。
+        scale 型（nc.js"拖到最右边"，无缺口）例外：满行程即目标，
+        图像匹配出的"缺口"是背景纹理伪匹配（生产实测恒 87px/conf 0.31）。"""
+        self._scale_slider = False
         js_dist = await self._calc_distance_js()
         logger.debug(f"[{self.pure_user_id}] JS max travel: {js_dist}")
+
+        if self._scale_slider and js_dist and js_dist > 0:
+            logger.info(
+                f"[{self.pure_user_id}] scale slider detected: travel=full {js_dist:.0f}px "
+                "(no gap to match — slide to end)"
+            )
+            self._emit_telemetry_event(
+                "distance_detected", distance=float(js_dist), source="scale_full_travel"
+            )
+            return float(js_dist)
 
         img_dist = await self._calc_distance()
         if img_dist and img_dist > 0:
@@ -922,20 +936,25 @@ class SliderSolver(ProviderSolverMixin):
                 if (!b || !t) return {js_dist: 0};
                 const bw = b.getBoundingClientRect();
                 const tw = t.getBoundingClientRect();
+                const st = document.querySelector('#nc_1__scale_text, .nc_scale_text, .nc-lang-cnt, [id*=scale_text]');
                 return {
                     js_dist: tw.width - bw.width,
                     track_width: tw.width,
                     btn_width: bw.width,
+                    scale_slider: !!st || !document.querySelector(selectors.piece_img),
                 };
             }""", {
                 "slider_btn": self.selectors["slider_btn"],
                 "slider_track": self.selectors["slider_track"],
+                "piece_img": self.selectors["piece_img"],
             })
             if isinstance(d, dict):
                 dist = float(d.get("js_dist", 0))
                 if dist > 0:
                     logger.info(f"[{self.pure_user_id}] JS dist={dist:.0f}px "
-                                f"(track={d.get('track_width',0):.0f}, btn={d.get('btn_width',0):.0f})")
+                                f"(track={d.get('track_width',0):.0f}, btn={d.get('btn_width',0):.0f}, "
+                                f"scale={bool(d.get('scale_slider'))})")
+                    self._scale_slider = bool(d.get("scale_slider"))
                     return dist
         except Exception as e:
             logger.debug(f"[{self.pure_user_id}] JS calc error: {e}")

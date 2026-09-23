@@ -319,3 +319,78 @@ async def test_wait_slide_outcome_dumps_net_tap_on_timeout():
     ok, code = await solver._wait_slide_outcome(timeout=0.05)
     assert ok is False and code == -1
     solver._dump_net_tap.assert_awaited_once()
+
+
+# ── ⑤ scale 型滑块（nc.js 拖到最右边）：不做图像匹配，travel=满行程 ──
+
+
+@pytest.mark.asyncio
+async def test_scale_slider_skips_image_match_and_uses_full_travel():
+    """metadata.slider_type=scale 时：不调 find_gap，travel=track-btn。"""
+    solver = SliderSolver.__new__(SliderSolver)
+    solver.pure_user_id = "t"
+    solver._emit_telemetry_event = mock.MagicMock()
+
+    class _El:
+        slider_btn = _FakeBtn()
+        track_width_px = 300
+        metadata = {"slider_type": "scale"}
+
+        class slider_track:
+            @staticmethod
+            async def bounding_box():
+                return {"x": 0.0, "y": 0.0, "width": 300.0, "height": 40.0}
+
+    provider = mock.AsyncMock()
+    provider.name = "aliyun-nocaptcha"
+
+    performed = []
+
+    async def _locate(page):
+        return _El()
+
+    async def _perform(page, elements, travel, points):
+        performed.append((travel, points))
+        raise RuntimeError("stop-before-slide")
+
+    provider.locate_elements = _locate
+    provider.find_gap = mock.AsyncMock(side_effect=AssertionError("find_gap must not run for scale"))
+    provider.perform_slide = _perform
+
+    solver._provider = provider
+    solver._install_url_audit = mock.MagicMock(return_value=mock.MagicMock(uninstall=mock.MagicMock()))
+    solver._install_net_tap = mock.AsyncMock()
+    solver._dump_net_tap = mock.AsyncMock()
+    solver._config = mock.MagicMock()
+    solver._config.get_trajectory_dir.return_value = "/tmp"
+
+    # perform_slide 内的异常被 _solve_with_provider 捕获并返回失败，不外抛
+    ok, _ = await solver._solve_with_provider(object())
+    assert ok is False
+    assert performed and performed[0][0] == 260, f"expected full travel 260, got {performed}"
+
+    evts = [(c.args[0], c.kwargs) for c in solver._emit_telemetry_event.call_args_list]
+    dists = [k for name, k in evts if name == "distance_detected"]
+    assert dists and dists[0].get("slider_type") == "scale"
+    provider.find_gap.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_legacy_scale_slider_uses_full_travel():
+    """legacy: scale 检测命中时直接返回 js_dist，不跑图像匹配。"""
+    solver = SliderSolver.__new__(SliderSolver)
+    solver.pure_user_id = "t"
+    solver._emit_telemetry_event = mock.MagicMock()
+    solver._scale_slider = True
+
+    async def fake_js():
+        solver._scale_slider = True
+        return 258.0
+
+    solver._calc_distance_js = fake_js
+    solver._calc_distance = mock.AsyncMock(side_effect=AssertionError("image match must not run for scale"))
+
+    dist = await solver._calc_distance_multi_source()
+    assert dist == 258.0
+    names = [c.args[0] for c in solver._emit_telemetry_event.call_args_list]
+    assert "distance_detected" in names

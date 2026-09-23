@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.8] - 2026-09-23
+
+0.6.7 net tap 生产数据的结论：滑动窗口内 JS/网络活动**完全为零**（tap 0 事件 + resource timing 40 条里无 /slide），加上图像匹配距离恒 87px/conf 0.31、dist 恒 258px——合并起来指向一个此前误判的事实：**生产渲染的是 AWSC nc 1.97.2 经典 NoCaptcha 缩条滑块（"按住滑块拖到最右边"），不是拼图**。85px 的"缺口"是背景纹理对按钮图标的伪匹配，拖 87px 只走了 1/3 行程就回弹，前端从未提交 verify，`code=-1` 与 Captcha Interception 轮换全是它的下游症状。remote 截图 1940x54 的细条形态、`initialize.jsonp?scene=register` 亦佐证。
+
+### Added
+- **scale 滑块识别**（`providers/aliyun.py locate_elements`）：探测 `#nc_1__scale_text/.nc_scale_text/.nc-lang-cnt/[id*=scale_text]`（或无缺口图），metadata 带 `slider_type="scale"`。
+- **满行程语义**（`_solve_with_provider` scale 分支）：`travel = track.width - btn.width`（生产实测 300-42=258px），跳过图像匹配，`_jigsaw_travel_and_points` 只服务真拼图。
+- **legacy 路径同等识别**（`_calc_distance_js` 页内探测 scale → `_calc_distance_multi_source` 直接返回 js_dist 满行程，不跑 `_calc_distance`）。
+
+### Notes
+- 测试：`tests/test_provider_humanize.py` 新增 2（provider scale 满行程 + find_gap 断言不跑、legacy scale 直返），全套 411 绿。版本 0.6.8。
+
+
 ## [0.6.7] - 2026-09-23
 
 0.6.6 生产验证的结论：URL 审计在每个 provider 周期捕获 **0** 响应（12 秒滑动窗口内 Playwright 完全看不到 HTTP 往返），且 `_on_console` 在 patchright 下也是死路。容器内双探针定位：`page.on("response")` 本身工作正常（`example.com` 导航 1 事件命中，有无 CDP 皆然），但 `page.on("console")` **永远不触发**——它依赖 `Runtime.enable`，正是 patchright 刻意屏蔽的检测特征。所以"0 审计"是真实数据：要么校验请求根本没发出（拖动未被前端接受），要么走了 `page.on` 看不见的通道（sendBeacon / WebSocket / worker）。

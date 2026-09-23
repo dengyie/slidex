@@ -74,58 +74,60 @@ class ProviderSolverMixin:
             metadata_str = f", metadata={elements.metadata}" if elements.metadata else ""
             logger.debug(f"[{self.pure_user_id}] elements located, track_width={elements.track_width_px}px{metadata_str}")
 
-            # 2. 提取图像
-            bg_bytes, piece_bytes = await self._provider.extract_images(page, elements)
-            logger.debug(f"[{self.pure_user_id}] images extracted, bg={len(bg_bytes)} bytes, piece={len(piece_bytes)} bytes")
-
-            # 3. 图像匹配
-            try:
-                gap_x, confidence = await self._provider.find_gap(bg_bytes, piece_bytes)
-            except Exception as e:
-                logger.error(f"[{self.pure_user_id}] find_gap error: {e}")
-                self._emit_telemetry_event("provider_find_gap_failed", provider_name=self._provider.name, reason=str(e))
-                return False, None
-
-            if gap_x is None:
-                logger.warning(f"[{self.pure_user_id}] gap not found")
-                self._emit_telemetry_event("provider_gap_not_found", provider_name=self._provider.name)
-                return False, None
-
-            travel = int(clamp_travel(gap_x, elements.track_width_px))
-            logger.info(
-                f"[{self.pure_user_id}] gap detected at x={gap_x}px, "
-                f"travel={travel}px, confidence={confidence:.2f}"
-            )
-            self._emit_telemetry_event(
-                "distance_detected",
-                distance=travel,
-                source="provider",
-                provider_name=self._provider.name,
-                confidence=round(confidence, 4),
-            )
-
-            # 4. 生成轨迹（相对位移；按 cookie + 目标距离匹配并缩放）
-            try:
-                trajectory_dir = self._config.get_trajectory_dir()
-                trajectory_pool = SliderTrajectoryPool(trajectory_dir)
-                recorded_traj = trajectory_pool.load_best_trajectory(self.pure_user_id, travel)
-                if recorded_traj is None:
-                    recorded_traj = trajectory_pool.load_best_trajectory("default", travel)
-            except Exception as e:
-                logger.warning(f"[{self.pure_user_id}] trajectory pool error: {e}, using synthetic")
-                recorded_traj = None
-
-            points = points_from_recorded(recorded_traj, travel)
-            if points:
-                logger.debug(f"[{self.pure_user_id}] using recorded relative trajectory ({len(points)} points)")
-            else:
-                logger.debug(f"[{self.pure_user_id}] generating synthetic trajectory")
-                trajectory = generate_trajectory(
-                    distance=travel,
-                    attempt=1,
+            # scale 型（nc.js"拖到最右边"）没有缺口：travel=轨道满行程，
+            # 图像匹配出的"缺口"是背景纹理伪匹配（生产实测恒 87px/conf 0.31）
+            slider_type = (elements.metadata or {}).get("slider_type")
+            if slider_type == "scale":
+                btn_box = await elements.slider_btn.bounding_box()
+                track_box = await elements.slider_track.bounding_box()
+                if not btn_box or not track_box:
+                    logger.warning(f"[{self.pure_user_id}] scale slider: cannot get boxes")
+                    self._emit_telemetry_event("provider_gap_not_found", provider_name=self._provider.name)
+                    return False, None
+                travel = int(max(0.0, track_box["width"] - btn_box["width"]))
+                logger.info(
+                    f"[{self.pure_user_id}] scale slider detected: travel=full {travel}px "
+                    f"(track={track_box['width']:.0f}, btn={btn_box['width']:.0f})"
                 )
-                # 合成轨迹转成相对位移；provider.perform_slide 会再加按钮起点
-                points = trajectory_to_points(trajectory, start_x=0, start_y=0)
+                self._emit_telemetry_event(
+                    "distance_detected",
+                    distance=travel,
+                    source="provider",
+                    provider_name=self._provider.name,
+                    slider_type="scale",
+                )
+                points = None  # 走合成轨迹
+            else:
+                travel, points = await self._jigsaw_travel_and_points(page, elements)
+
+            if travel is None or travel <= 0:
+                logger.warning(f"[{self.pure_user_id}] cannot determine travel (travel={travel})")
+                return False, None
+
+            # 4. 生成轨迹（相对位移；按 cookie + 目标距离匹配并缩放；
+            # scale 型已在上一步跳过图像匹配，points=None 走合成轨迹）
+            if points is None:
+                try:
+                    trajectory_dir = self._config.get_trajectory_dir()
+                    trajectory_pool = SliderTrajectoryPool(trajectory_dir)
+                    recorded_traj = trajectory_pool.load_best_trajectory(self.pure_user_id, travel)
+                    if recorded_traj is None:
+                        recorded_traj = trajectory_pool.load_best_trajectory("default", travel)
+                except Exception as e:
+                    logger.warning(f"[{self.pure_user_id}] trajectory pool error: {e}, using synthetic")
+                    recorded_traj = None
+
+                points = points_from_recorded(recorded_traj, travel)
+                if points:
+                    logger.debug(f"[{self.pure_user_id}] using recorded relative trajectory ({len(points)} points)")
+                else:
+                    logger.debug(f"[{self.pure_user_id}] generating synthetic trajectory")
+                    trajectory = generate_trajectory(
+                        distance=travel,
+                        attempt=1,
+                    )
+                    # 合成轨迹转成相对位移；provider.perform_slide 会再加按钮起点
+                    points = trajectory_to_points(trajectory, start_x=0, start_y=0)
 
             try:
                 # 5. 执行滑动（滑动前装页面内网络打点，滑动后读回）
@@ -158,6 +160,40 @@ class ProviderSolverMixin:
         finally:
             audit.uninstall()
             await self._dump_net_tap(page)
+
+    async def _jigsaw_travel_and_points(self, page: Page, elements):
+        """拼图缺口型：图像匹配缺口位置（clip 到轨道行程）。返回 (travel, None)，
+        points 统一在调用点由轨迹池/合成轨迹生成。"""
+        # 2. 提取图像
+        bg_bytes, piece_bytes = await self._provider.extract_images(page, elements)
+        logger.debug(f"[{self.pure_user_id}] images extracted, bg={len(bg_bytes)} bytes, piece={len(piece_bytes)} bytes")
+
+        # 3. 图像匹配
+        try:
+            gap_x, confidence = await self._provider.find_gap(bg_bytes, piece_bytes)
+        except Exception as e:
+            logger.error(f"[{self.pure_user_id}] find_gap error: {e}")
+            self._emit_telemetry_event("provider_find_gap_failed", provider_name=self._provider.name, reason=str(e))
+            return None, None
+
+        if gap_x is None:
+            logger.warning(f"[{self.pure_user_id}] gap not found")
+            self._emit_telemetry_event("provider_gap_not_found", provider_name=self._provider.name)
+            return None, None
+
+        travel = int(clamp_travel(gap_x, elements.track_width_px))
+        logger.info(
+            f"[{self.pure_user_id}] gap detected at x={gap_x}px, "
+            f"travel={travel}px, confidence={confidence:.2f}"
+        )
+        self._emit_telemetry_event(
+            "distance_detected",
+            distance=travel,
+            source="provider",
+            provider_name=self._provider.name,
+            confidence=round(confidence, 4),
+        )
+        return travel, None
 
     # JS 网络打点：patchright 下 page.on("console") 依赖 Runtime.enable，被刻意
     # 屏蔽（容器实测 console.log 零事件），而 page.on("response") 只能看见主进程

@@ -17,6 +17,9 @@ _SLIDER_TRACK = "#nc_1_n1t, .nc_scale, [class*=scale]"
 _BG_IMG = "#nc_1_n1t img, .nc_scale img, img[id*=bg]"
 _PIECE_IMG = ".nc_iconfont, #nc_1_n1z img, img[id*=slide]"
 _WRAPPER = "#nc_1_wrapper, [id^=nc_][id$=_wrapper]"
+# 经典 nc（AWSC nc.js）是"按住滑块拖到最右边"的 scale 条，不是拼图缺口——
+# scale 文案条存在时 travel=轨道满行程，图像匹配出的"缺口"是背景纹理伪匹配
+_SCALE_TEXT = "#nc_1__scale_text, .nc_scale_text, .nc-lang-cnt, [id*=scale_text]"
 
 
 class AliyunNoCaptchaProvider(CaptchaProvider):
@@ -123,13 +126,24 @@ class AliyunNoCaptchaProvider(CaptchaProvider):
         track_width_px = int(track_box["width"]) if track_box else 300
         self._challenge_scope = used or self._challenge_scope
 
+        # scale 型判定：nc 文案条存在（"按住滑块拖到最右边"）或根本没有拼图块图。
+        # 该型的成功条件是拖满行程（track−btn），图像匹配的"缺口"是伪匹配。
+        slider_type = "jigsaw"
+        try:
+            scope = used or self._challenge_scope or page
+            scale_text = await query_in_targets([scope], _SCALE_TEXT)
+            if (scale_text and scale_text[0]) or not piece_img:
+                slider_type = "scale"
+        except Exception:
+            pass
+
         return ProviderElements(
             slider_btn=slider_btn,
             slider_track=slider_track,
             bg_img=bg_img,
             piece_img=piece_img,
             track_width_px=track_width_px,
-            metadata={"in_iframe": used is not None and used is not page},
+            metadata={"in_iframe": used is not None and used is not page, "slider_type": slider_type},
         )
 
     async def extract_images(
