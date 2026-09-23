@@ -1469,18 +1469,33 @@ class SliderSolver(ProviderSolverMixin):
     # ════════════════════════════════════════════════════════════
     async def _on_response(self, response):
         url = response.url
-        # 旁路抓票据头（0.6.10）：优先于 /slide JSON——checkCookie 不跑时这是唯一来源
+        # 旁路抓票据头（0.6.10）：优先于 /slide JSON——checkCookie 不跑时这是唯一来源。
+        # 0.6.11：response.headers 是同步子集，bx-* 可能只在 all_headers() 里。
         try:
             if self._bx_voucher is None and ("_____tmd_____" in url or "/slide" in url):
                 hdr = response.headers.get("bx-x5sec") or response.headers.get("bx-x5sec-root")
+                if not hdr:
+                    try:
+                        allh = await response.all_headers()
+                        hdr = allh.get("bx-x5sec") or allh.get("bx-x5sec-root")
+                    except Exception:
+                        allh = {}
                 if hdr and "x5sec=" in hdr:
                     self._bx_voucher = hdr
                     logger.info(f"[{self.pure_user_id}] bx voucher header captured from {url[:120]}")
                     self._emit_telemetry_event(
                         "bx_voucher_captured",
                         response_url=url[:200],
-                        from_root="bx-x5sec-root" if "bx-x5sec-root" in response.headers else False,
+                        from_root="bx-x5sec-root" in (allh if not hdr else {}) or False,
                     )
+        except Exception:
+            pass
+        # 报文回执旁听（0.6.11）：checkCookie 会向 /report 发 setCookieSuccess/
+        # setCookieFail——通过后如果页面 JS 正常工作，这里能听到成败
+        try:
+            if "_____tmd_____/report" in url and "setCookie" in (url or ""):
+                logger.info(f"[{self.pure_user_id}] checkCookie report: {url[:200]}")
+                self._emit_telemetry_event("checkcookie_report", response_url=url[:200])
         except Exception:
             pass
         patterns = self.selectors["result_url_pattern"]

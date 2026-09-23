@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.11] - 2026-09-24
+
+0.6.10 生产首个周期：滑动照旧通过，但**无 `bx voucher captured`**——旁路没听到票据头。补证据链：scratch-captcha 0.0.50 反读确认 verify XHR 的 `success(c,t,n)` 第三参就是 XHR 对象，`verifySuccess(n)` → `checkCookie(n)` → `n.getResponseHeader("bx-x5sec")`，链路成立；那么头没被听到只剩两种可能：sync `response.headers` 子集没含 bx-*（改用 `all_headers()`），或服务端确实没在 validate 响应里下发（IP/会话仍被拉黑）。
+
+### Changed
+- `_on_response` 票据旁路：headers 为空时回退 `await response.all_headers()`（bx-* 属 late header 时的 sync 子集遗漏）。
+- 新增 `/report?...type=setCookie*` 回执旁听（telemetry `checkcookie_report`）：下一周期形成三态诊断——①voucher 捕获→直接修好；②report setCookieSuccess/Fail 出现→checkCookie 在跑、票据在 jar、轮询该收到（矛盾则查 select_cookies_for_url）；③两者皆无→服务端未下发，问题在风控侧不在代码侧。
+
+### Notes
+- 测试不变（17 通过）。版本 0.6.11。
+
+
 ## [0.6.10] - 2026-09-24
 
 0.6.9 的 settle 轮询/reload 在生产全程跑通但依旧无 x5sec。深挖 punishpage.min.js 后拿到决定性证据：**x5sec 从不走 Set-Cookie**——校验 XHR 的响应携带 `bx-x5sec` / `bx-x5sec-root` 头（形如 `x5sec=xxx; Path=/; ...`），页面 `checkCookie` 回调对比 jar 中现有双份 x5sec 后用 `document.cookie = getResponseHeader("bx-x5sec")` 手工写入。patchright 环境下回调链不稳定/浏览器存活窗口太短，票据只到响应头就断了。另证实 0.6.9 的 reload 兜底无意义：通过后重访 punish URL 落在 "Captcha Interception" 中间页，`getSubmitPathPrefix(t)` 返回 undefined，页面跳 `_____tmd_____/undefined`。
