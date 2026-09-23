@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.10] - 2026-09-24
+
+0.6.9 的 settle 轮询/reload 在生产全程跑通但依旧无 x5sec。深挖 punishpage.min.js 后拿到决定性证据：**x5sec 从不走 Set-Cookie**——校验 XHR 的响应携带 `bx-x5sec` / `bx-x5sec-root` 头（形如 `x5sec=xxx; Path=/; ...`），页面 `checkCookie` 回调对比 jar 中现有双份 x5sec 后用 `document.cookie = getResponseHeader("bx-x5sec")` 手工写入。patchright 环境下回调链不稳定/浏览器存活窗口太短，票据只到响应头就断了。另证实 0.6.9 的 reload 兜底无意义：通过后重访 punish URL 落在 "Captcha Interception" 中间页，`getSubmitPathPrefix(t)` 返回 undefined，页面跳 `_____tmd_____/undefined`。
+
+### Added
+- **票据旁路**（`solver._on_response`）：任何 `_____tmd_____`/`/slide` 响应若带 `bx-x5sec` 或 `bx-x5sec-root` 头且含 `x5sec=` 对，记入 `_bx_voucher` 并发 `bx_voucher_captured` telemetry。
+- **voucher 优先解析**（`_settle_x5sec`）：有 voucher 直接正则取 x5sec 值，注入 context（.goofish.com）并合入返回 cookies（telemetry `x5sec_settled source=bx_header`），跳过轮询；无 voucher 才轮询 8s + 短轮询兜底（移除 reload）。
+
+### Notes
+- 测试：`tests/test_provider_humanize.py` 新增 2（voucher 头优先合并+注入、_on_response 旁路捕获），miss 测试改为断言**不再 reload**，全套 416 绿。版本 0.6.10。
+
+
 ## [0.6.9] - 2026-09-24
 
 0.6.8 后 27 个生产周期完全一致：拖动全过（`ok=True code=300`，sig from bx），但 x5sec 始终缺席 → orchestrator 严格判定失败 → 无限退避。定位：**阿里 punish 流程的放行票据不在 `/slide` 响应里**，而在通过后 nc.js 的页面续行（回跳/重载原 mtop punish 链路）的 Set-Cookie 里下发；slidex 成功后 ~0.8s 即关浏览器，页面没活到跳转链完成。

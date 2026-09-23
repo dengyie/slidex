@@ -168,17 +168,41 @@ class ProviderSolverMixin:
             await self._dump_net_tap(page)
 
     async def _settle_x5sec(self, page: Page, cookies: Optional[Dict]) -> Optional[Dict]:
-        """滑动通过后等待 punish 流程下发 x5sec（0.6.9）。
+        """滑动通过后获取 x5sec（0.6.10 旁路优先）。
 
-        /slide 返回 success 后，nc.js 会回跳/重载原 mtop punish 链路，x5sec 由
-        该跳转链的 Set-Cookie 下发——不在 /slide 响应里，也不立即出现在 context
-        cookies。在浏览器存活窗口内：快轮询 context.cookies()，无果则用原
-        verify_url 重载一次（等价 nc.js 的回跳）再轮询。只对 punish 类 URL 启用；
-        拿不到时原样返回（严格判定由 bot 侧兜底）。
+        真实下发通道：校验 XHR 的 bx-x5sec / bx-x5sec-root 响应头（形如
+        "x5sec=xxx; Path=/; ..."），页面 punishpage 的 checkCookie 回调再
+        document.cookie 写进 jar。不是 Set-Cookie——所以 /slide 响应与
+        context.cookies() 都看不到，除非回调真的跑了。0.6.9 的 reload 也
+        无济于事：通过后重访 punish URL 落在 "Captcha Interception" 中间页
+        （x5step=2 语义已耗尽），页面 JS 跳 _____tmd_____/undefined。
+        因此：优先用 _on_response 抓到的票据头解析 x5sec，注入 context 并合入
+        返回 cookies；退路才是轮询 cookie jar。只对 punish 类 URL 启用。
         """
         merged = dict(cookies or {})
         if merged.get("x5sec") or not self._requires_validation_cookie(self._verify_url or ""):
             return merged
+
+        voucher = getattr(self, "_bx_voucher", None)
+        if voucher:
+            import re as _re
+            m = _re.search(r"x5sec=([^;]+)", voucher)
+            if m:
+                x5 = m.group(1)
+                logger.info(f"[{self.pure_user_id}] x5sec taken from bx voucher header")
+                self._emit_telemetry_event("x5sec_settled", source="bx_header")
+                merged["x5sec"] = x5
+                try:
+                    await page.context.add_cookies([{
+                        "name": "x5sec",
+                        "value": x5,
+                        "domain": ".goofish.com",
+                        "path": "/",
+                    }])
+                except Exception as e:
+                    logger.debug(f"[{self.pure_user_id}] voucher cookie inject skipped: {e}")
+                return merged
+            logger.warning(f"[{self.pure_user_id}] bx voucher present but no x5sec pair: {voucher[:80]!r}")
 
         async def _poll_x5sec(deadline_s: float) -> Optional[Dict]:
             import asyncio as _asyncio
@@ -203,17 +227,11 @@ class ProviderSolverMixin:
             merged.update(fresh)
             return merged
 
-        # nc.js 回跳等价：用原 verify_url 带通过后的会话状态再走一遍 punish 入口
-        try:
-            logger.info(f"[{self.pure_user_id}] x5sec not settled, reloading punish page once")
-            await page.reload(wait_until="load", timeout=20000)
-            await page.wait_for_timeout(1500)
-        except Exception as e:
-            logger.debug(f"[{self.pure_user_id}] punish reload failed: {e}")
+        # 回跳重试意义有限（见上：中间页 + /undefined），缩为一次短轮询兜底
         fresh = await _poll_x5sec(3.0)
         if fresh:
-            logger.info(f"[{self.pure_user_id}] x5sec settled after punish reload")
-            self._emit_telemetry_event("x5sec_settled", source="reload")
+            logger.info(f"[{self.pure_user_id}] x5sec settled in late window")
+            self._emit_telemetry_event("x5sec_settled", source="poll_late")
             merged.update(fresh)
         else:
             logger.warning(f"[{self.pure_user_id}] x5sec still absent after settle window")

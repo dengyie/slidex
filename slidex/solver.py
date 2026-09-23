@@ -115,6 +115,10 @@ class SliderSolver(ProviderSolverMixin):
         self._result_event = asyncio.Event()
         self._slide_code = None
         self._slide_ok: Optional[bool] = None
+        # punish 票据旁路：x5sec 随校验 XHR 的 bx-x5sec / bx-x5sec-root 响应头下发，
+        # 页面 checkCookie 回调才写进 document.cookie——环境不稳时回调不跑，票据
+        # 就只能从这里自取（0.6.10）。
+        self._bx_voucher: Optional[str] = None
         self._calibration = self._load_calibration()
         self._telemetry_run_id = uuid.uuid4().hex
         self._telemetry_events: List[Dict] = []
@@ -1465,6 +1469,20 @@ class SliderSolver(ProviderSolverMixin):
     # ════════════════════════════════════════════════════════════
     async def _on_response(self, response):
         url = response.url
+        # 旁路抓票据头（0.6.10）：优先于 /slide JSON——checkCookie 不跑时这是唯一来源
+        try:
+            if self._bx_voucher is None and ("_____tmd_____" in url or "/slide" in url):
+                hdr = response.headers.get("bx-x5sec") or response.headers.get("bx-x5sec-root")
+                if hdr and "x5sec=" in hdr:
+                    self._bx_voucher = hdr
+                    logger.info(f"[{self.pure_user_id}] bx voucher header captured from {url[:120]}")
+                    self._emit_telemetry_event(
+                        "bx_voucher_captured",
+                        response_url=url[:200],
+                        from_root="bx-x5sec-root" if "bx-x5sec-root" in response.headers else False,
+                    )
+        except Exception:
+            pass
         patterns = self.selectors["result_url_pattern"]
         if any(pat in url for pat in patterns):
             try:
