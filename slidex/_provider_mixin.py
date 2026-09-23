@@ -9,6 +9,7 @@ from slidex.providers.builtin import *  # auto-register built-in providers
 from slidex._trajectory import generate_trajectory, trajectory_to_points
 from slidex._trajectory_pool import SliderTrajectoryPool
 from slidex._slide_geometry import clamp_travel, points_from_recorded
+from slidex._cookies import select_cookies_for_url
 
 
 class ProviderSolverMixin:
@@ -151,7 +152,12 @@ class ProviderSolverMixin:
                 cookie_count=len(result.cookies or {}),
             )
 
-            return result.success, result.cookies
+            if result.success:
+                # 7. x5sec settle：阿里 punish 流程的放行票据在通过后的页面续行
+                # （回跳/重载链的 Set-Cookie）里下发，/slide 响应本身不带。
+                result_cookies = await self._settle_x5sec(page, result.cookies)
+                return True, result_cookies
+            return False, result.cookies
 
         except Exception as e:
             logger.error(f"[{self.pure_user_id}] provider solve error: {e}", exc_info=True)
@@ -160,6 +166,59 @@ class ProviderSolverMixin:
         finally:
             audit.uninstall()
             await self._dump_net_tap(page)
+
+    async def _settle_x5sec(self, page: Page, cookies: Optional[Dict]) -> Optional[Dict]:
+        """滑动通过后等待 punish 流程下发 x5sec（0.6.9）。
+
+        /slide 返回 success 后，nc.js 会回跳/重载原 mtop punish 链路，x5sec 由
+        该跳转链的 Set-Cookie 下发——不在 /slide 响应里，也不立即出现在 context
+        cookies。在浏览器存活窗口内：快轮询 context.cookies()，无果则用原
+        verify_url 重载一次（等价 nc.js 的回跳）再轮询。只对 punish 类 URL 启用；
+        拿不到时原样返回（严格判定由 bot 侧兜底）。
+        """
+        merged = dict(cookies or {})
+        if merged.get("x5sec") or not self._requires_validation_cookie(self._verify_url or ""):
+            return merged
+
+        async def _poll_x5sec(deadline_s: float) -> Optional[Dict]:
+            import asyncio as _asyncio
+            loop = _asyncio.get_event_loop()
+            end = loop.time() + deadline_s
+            while loop.time() < end:
+                try:
+                    jar = await page.context.cookies() or []
+                except Exception:
+                    return None  # 页面/context 已关
+                fresh = select_cookies_for_url([c for c in jar if isinstance(c, dict)], self._verify_url or "")
+                if fresh.get("x5sec"):
+                    return fresh
+                await _asyncio.sleep(0.5)
+            return None
+
+        logger.debug(f"[{self.pure_user_id}] waiting for x5sec settle...")
+        fresh = await _poll_x5sec(8.0)
+        if fresh:
+            logger.info(f"[{self.pure_user_id}] x5sec settled after slide pass")
+            self._emit_telemetry_event("x5sec_settled", source="poll")
+            merged.update(fresh)
+            return merged
+
+        # nc.js 回跳等价：用原 verify_url 带通过后的会话状态再走一遍 punish 入口
+        try:
+            logger.info(f"[{self.pure_user_id}] x5sec not settled, reloading punish page once")
+            await page.reload(wait_until="load", timeout=20000)
+            await page.wait_for_timeout(1500)
+        except Exception as e:
+            logger.debug(f"[{self.pure_user_id}] punish reload failed: {e}")
+        fresh = await _poll_x5sec(3.0)
+        if fresh:
+            logger.info(f"[{self.pure_user_id}] x5sec settled after punish reload")
+            self._emit_telemetry_event("x5sec_settled", source="reload")
+            merged.update(fresh)
+        else:
+            logger.warning(f"[{self.pure_user_id}] x5sec still absent after settle window")
+            self._emit_telemetry_event("x5sec_settle_missed")
+        return merged
 
     async def _jigsaw_travel_and_points(self, page: Page, elements):
         """拼图缺口型：图像匹配缺口位置（clip 到轨道行程）。返回 (travel, None)，

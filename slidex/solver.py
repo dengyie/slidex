@@ -664,6 +664,7 @@ class SliderSolver(ProviderSolverMixin):
                     if ok:
                         cookies = await self._get_cookies()
                         logger.success(f"[{self.pure_user_id}] pass! (recorded, attempt={attempt})")
+                        cookies = await self._settle_x5sec(self.page, cookies)
                         return True, cookies
                     if attempt < self.MAX_RETRIES:
                         await asyncio.sleep(2 + random.uniform(1, 2))
@@ -692,6 +693,7 @@ class SliderSolver(ProviderSolverMixin):
             if ok:
                 cookies = await self._get_cookies()
                 logger.success(f"[{self.pure_user_id}] pass! (generated, attempt={attempt})")
+                cookies = await self._settle_x5sec(self.page, cookies)
                 return True, cookies
             if attempt < self.MAX_RETRIES:
                 await asyncio.sleep(2 + random.uniform(1, 2))

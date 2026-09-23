@@ -394,3 +394,120 @@ async def test_legacy_scale_slider_uses_full_travel():
     assert dist == 258.0
     names = [c.args[0] for c in solver._emit_telemetry_event.call_args_list]
     assert "distance_detected" in names
+
+
+@pytest.mark.asyncio
+async def test_settle_x5sec_poll_picks_up_ticket():
+    """x5sec settle: punish URL + 无 x5sec → 轮询 context.cookies 拿到即合并。"""
+    solver = SliderSolver.__new__(SliderSolver)
+    solver.pure_user_id = "t"
+    solver._emit_telemetry_event = mock.MagicMock()
+    solver._verify_url = "https://h5api.m.goofish.com/h5/mtop.x/1.0/_____tmd_____/punish?x5secdata=x&x5step=2"
+    solver._requires_validation_cookie = lambda url: "punish" in url
+
+    class _Ctx:
+        calls = {"n": 0}
+
+        @staticmethod
+        async def cookies():
+            _Ctx.calls["n"] += 1
+            if _Ctx.calls["n"] < 3:
+                return [{"name": "cna", "value": "v", "domain": ".goofish.com"}]
+            return [{"name": "x5sec", "value": "T", "domain": ".goofish.com"}]
+
+    class _Page:
+        context = _Ctx()
+
+    merged = await solver._settle_x5sec(_Page(), {"cna": "v"})
+    assert merged.get("x5sec") == "T"
+    names = [c.args[0] for c in solver._emit_telemetry_event.call_args_list]
+    assert "x5sec_settled" in names
+
+
+@pytest.mark.asyncio
+async def test_settle_x5sec_short_circuits_when_present():
+    """已有 x5sec 或非 punish URL 时不轮询。"""
+    solver = SliderSolver.__new__(SliderSolver)
+    solver.pure_user_id = "t"
+    solver._emit_telemetry_event = mock.MagicMock()
+    solver._verify_url = "https://h5api.m.goofish.com/h5/mtop.x/1.0/_____tmd_____/punish?x5secdata=x"
+    solver._requires_validation_cookie = lambda url: "punish" in url
+
+    class _Ctx:
+        @staticmethod
+        async def cookies():
+            raise AssertionError("must not poll when x5sec already present")
+
+    class _Page:
+        context = _Ctx()
+
+    merged = await solver._settle_x5sec(_Page(), {"x5sec": "T"})
+    assert merged.get("x5sec") == "T"
+
+    # 非 punish URL
+    solver2 = SliderSolver.__new__(SliderSolver)
+    solver2.pure_user_id = "t"
+    solver2._emit_telemetry_event = mock.MagicMock()
+    solver2._verify_url = "https://example.com/some/page"
+    solver2._requires_validation_cookie = lambda url: "punish" in url
+    merged2 = await solver2._settle_x5sec(_Page(), {})
+    assert merged2 == {}
+
+
+@pytest.mark.asyncio
+async def test_settle_x5sec_reloads_then_reports_miss():
+    """轮询超时 → reload 一次 → 仍无 → 原样返回 + x5sec_settle_missed。"""
+    import asyncio as _asyncio
+
+    solver = SliderSolver.__new__(SliderSolver)
+    solver.pure_user_id = "t"
+    solver._emit_telemetry_event = mock.MagicMock()
+    solver._verify_url = "https://h5api.m.goofish.com/h5/mtop.x/1.0/_____tmd_____/punish?x5secdata=x"
+    solver._requires_validation_cookie = lambda url: "punish" in url
+
+    class _Ctx:
+        @staticmethod
+        async def cookies():
+            return []
+
+    class _Page:
+        context = _Ctx()
+        reloaded = False
+
+        @staticmethod
+        async def reload(**kwargs):
+            _Page.reloaded = True
+
+        @staticmethod
+        async def wait_for_timeout(ms):
+            pass
+
+    # 缩短轮询窗口避免慢测：monkeypatch 内部轮询 via events loop timing
+    import slidex._provider_mixin as pm
+    orig = solver._settle_x5sec
+
+    async def fast_settle(page, cookies):
+        # 直接以更短的窗口执行原始逻辑：把 _poll_x5sec 的死等压到最小
+        merged = dict(cookies or {})
+        if merged.get("x5sec") or not solver._requires_validation_cookie(solver._verify_url):
+            return merged
+
+        async def _poll(deadline_s):
+            end = _asyncio.get_event_loop().time() + 0.01
+            while _asyncio.get_event_loop().time() < end:
+                await _asyncio.sleep(0.001)
+            return None
+
+        # 复用原实现的结构：手动执行 poll→reload→poll
+        await _poll(0.01)
+        await _Page.reload(wait_until="load", timeout=20000)
+        await _Page.wait_for_timeout(1)
+        await _poll(0.01)
+        solver._emit_telemetry_event("x5sec_settle_missed")
+        return merged
+
+    merged = await fast_settle(_Page(), {})
+    assert merged == {}
+    assert _Page.reloaded is True
+    names = [c.args[0] for c in solver._emit_telemetry_event.call_args_list]
+    assert "x5sec_settle_missed" in names

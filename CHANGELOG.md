@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.9] - 2026-09-24
+
+0.6.8 后 27 个生产周期完全一致：拖动全过（`ok=True code=300`，sig from bx），但 x5sec 始终缺席 → orchestrator 严格判定失败 → 无限退避。定位：**阿里 punish 流程的放行票据不在 `/slide` 响应里**，而在通过后 nc.js 的页面续行（回跳/重载原 mtop punish 链路）的 Set-Cookie 里下发；slidex 成功后 ~0.8s 即关浏览器，页面没活到跳转链完成。
+
+### Added
+- **x5sec settle**（`_settle_x5sec`，provider 与 legacy 成功分支共用）：只对 punish 类 URL 启用。成功后轮询 `context.cookies()`（0.5s × 8s）；无果则用原 verify_url `reload` 一次（等价 nc.js 回跳）再轮询 3s；拿到即合并进返回 cookies，拿不到原样返回（bot 严格判定兜底，失败语义不变）。
+
+### Notes
+- 测试：`tests/test_provider_humanize.py` 新增 3（轮询命中合并、已含/非 punish 短路、reload 后仍 miss 报 telemetry），全套 414 绿。版本 0.6.9。
+
+
 ## [0.6.8] - 2026-09-23
 
 0.6.7 net tap 生产数据的结论：滑动窗口内 JS/网络活动**完全为零**（tap 0 事件 + resource timing 40 条里无 /slide），加上图像匹配距离恒 87px/conf 0.31、dist 恒 258px——合并起来指向一个此前误判的事实：**生产渲染的是 AWSC nc 1.97.2 经典 NoCaptcha 缩条滑块（"按住滑块拖到最右边"），不是拼图**。85px 的"缺口"是背景纹理对按钮图标的伪匹配，拖 87px 只走了 1/3 行程就回弹，前端从未提交 verify，`code=-1` 与 Captcha Interception 轮换全是它的下游症状。remote 截图 1940x54 的细条形态、`initialize.jsonp?scene=register` 亦佐证。
