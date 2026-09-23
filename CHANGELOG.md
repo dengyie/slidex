@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.6.7] - 2026-09-23
+
+0.6.6 生产验证的结论：URL 审计在每个 provider 周期捕获 **0** 响应（12 秒滑动窗口内 Playwright 完全看不到 HTTP 往返），且 `_on_console` 在 patchright 下也是死路。容器内双探针定位：`page.on("response")` 本身工作正常（`example.com` 导航 1 事件命中，有无 CDP 皆然），但 `page.on("console")` **永远不触发**——它依赖 `Runtime.enable`，正是 patchright 刻意屏蔽的检测特征。所以"0 审计"是真实数据：要么校验请求根本没发出（拖动未被前端接受），要么走了 `page.on` 看不见的通道（sendBeacon / WebSocket / worker）。
+
+### Added
+- **页面内网络打点（net tap）**（`_install_net_tap`/`_dump_net_tap`，provider 滑动前 `page.evaluate` 装入、legacy `_wait_slide_outcome` 超时后 dump）：页面内包装 `fetch`/`XMLHttpRequest`/`sendBeacon`/`WebSocket` + `console.log/info/warn/error`，记录进 `window.__slidexNet`。dump 读回后落 `provider_net_tap` telemetry；0 事件时明确告警"校验请求很可能根本没发出"；命中「验证通过」/`captchaVerifyParam` 时作为 **console 兜底成功信号**（patchright 下这是唯一能捕获该标志的通道）。dump 后重置缓冲，重试从零计数。
+- **Resource Timing 兜底清点**：dump 时同步读 `performance.getEntriesByType("resource")` 尾部 15 条（含 worker 发起的请求，tap 记不到的），落 `resource |` 日志。
+
+### Fixed
+- legacy 求解循环在 `_wait_slider` 成功后装入 net tap，超时路径 `_wait_slide_outcome` 调用 dump——legacy 重试的每次 `code=-1` 不再零诊断。
+
+### Notes
+- 容器内探针（`scripts/audit_probe*.py`）：patchright 1.63.0 下 response 事件正常、console 事件恒零；CDP `Network.enable` 可用但生产后端为规避指纹不建 CDP 会话。
+- 测试：`tests/test_provider_humanize.py` 新增 4（roundtrip 含缓冲重置与成功标志、零事件、读失败静默、超时路径 dump），全套 409 绿。版本 0.6.7。
+
 ## [0.6.6] - 2026-09-23
 
 0.6.5 生产烟测暴露三个缺口：provider 模式（生产 `provider="auto"` 每周期先走的那条路）完全没吃到人形化；结果捕获面全 miss 时无从知道滑动期间真实经过了哪些校验端点；容器 recreate 时陈旧 SingletonLock 让所有后续浏览器启动全挂。

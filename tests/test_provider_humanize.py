@@ -233,3 +233,89 @@ def test_heal_noop_without_lock(tmp_path):
     profile.mkdir()
     solver.profile_dir = str(profile)
     solver._heal_stale_singleton_lock()  # 不抛异常即可
+
+
+# ── ④ 页面内网络打点（patchright 下 page.on("console") 失效的替代捕获面） ──
+
+
+class _EvalPage:
+    """记录 evaluate 调用的假页面；JS 字符串原样返回，由测试解析。"""
+
+    def __init__(self):
+        self.evaluated = []
+
+    async def evaluate(self, js, *args):
+        self.evaluated.append(js)
+        return []
+
+
+@pytest.mark.asyncio
+async def test_net_tap_install_and_dump_roundtrip():
+    """install 调 evaluate 装脚本；dump 读回 entries 并落 telemetry。"""
+    solver = SliderSolver.__new__(SliderSolver)
+    solver.pure_user_id = "t"
+    solver._emit_telemetry_event = mock.MagicMock()
+
+    class _Page:
+        def __init__(self):
+            self.js = []
+            self.buffer = ["fetch GET https://x/slide", "console.log 验证通过！参数: abc"]
+
+        async def evaluate(self, js, *args):
+            self.js.append(js)
+            if "__slidexNet || []" in js:  # read JS
+                buf, self.buffer = self.buffer, []
+                return buf
+            return None  # install/reset JS
+
+    page = _Page()
+    await solver._dump_net_tap(page)
+    # dump 后必须重置缓冲（re-install），下次尝试从零计数
+    assert sum(1 for js in page.js if "window.__slidexNet" in js and "log.length" not in js) == 1
+    # 命中 console 成功标志
+    events = [c.args[0] for c in solver._emit_telemetry_event.call_args_list]
+    assert "slide_console_success" in events
+    assert "provider_net_tap" in events
+
+
+@pytest.mark.asyncio
+async def test_net_tap_zero_events_reports_empty():
+    solver = SliderSolver.__new__(SliderSolver)
+    solver.pure_user_id = "t"
+    solver._emit_telemetry_event = mock.MagicMock()
+    page = _EvalPage()
+    await solver._dump_net_tap(page)
+    events = [c.args[0] for c in solver._emit_telemetry_event.call_args_list]
+    assert events == ["provider_net_tap"]
+    count = solver._emit_telemetry_event.call_args.kwargs.get("count")
+    assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_net_tap_read_failure_is_silent():
+    solver = SliderSolver.__new__(SliderSolver)
+    solver.pure_user_id = "t"
+    solver._emit_telemetry_event = mock.MagicMock()
+
+    class _DeadPage:
+        async def evaluate(self, js, *args):
+            raise RuntimeError("page closed")
+
+    await solver._dump_net_tap(_DeadPage())
+    assert not solver._emit_telemetry_event.called
+
+
+@pytest.mark.asyncio
+async def test_wait_slide_outcome_dumps_net_tap_on_timeout():
+    """legacy 超时路径必须调用 net tap dump（捕获面 miss 的诊断出口）。"""
+    solver = SliderSolver.__new__(SliderSolver)
+    solver.pure_user_id = "t"
+    solver._result_event = asyncio.Event()
+    solver._slide_ok = None
+    solver._slide_code = None
+    solver._dump_net_tap = mock.AsyncMock()
+    solver.page = object()
+
+    ok, code = await solver._wait_slide_outcome(timeout=0.05)
+    assert ok is False and code == -1
+    solver._dump_net_tap.assert_awaited_once()

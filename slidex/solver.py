@@ -627,6 +627,7 @@ class SliderSolver(ProviderSolverMixin):
             self._emit_step("legacy", "slider_wait", "failed", reason="slider_not_found")
             await self._save_debug_screenshot("slider_not_found")
             return await self._fallback_or_fail(verify_url)
+        await self._install_net_tap(self.page)
         self._emit_step("legacy", "slider_wait", "ok")
 
         self._emit_step("legacy", "distance_detection", "started")
@@ -1499,6 +1500,9 @@ class SliderSolver(ProviderSolverMixin):
         try:
             await asyncio.wait_for(self._result_event.wait(), timeout=timeout)
         except (asyncio.TimeoutError, Exception):
+            # 结果捕获面 miss（patchright 下 page.on("console") 死、response 只见
+            # 主进程 HTTP）：读回页面内 tap 的 fetch/XHR/beacon/WS/console 记录
+            await self._dump_net_tap(self.page)
             return False, -1
         if self._slide_ok is not None:
             code = self._slide_code if self._slide_code is not None else -1

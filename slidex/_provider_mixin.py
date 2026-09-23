@@ -128,7 +128,8 @@ class ProviderSolverMixin:
                 points = trajectory_to_points(trajectory, start_x=0, start_y=0)
 
             try:
-                # 5. 执行滑动
+                # 5. 执行滑动（滑动前装页面内网络打点，滑动后读回）
+                await self._install_net_tap(page)
                 await self._provider.perform_slide(page, elements, travel, points)
                 logger.debug(f"[{self.pure_user_id}] slide performed")
 
@@ -156,6 +157,123 @@ class ProviderSolverMixin:
             return False, None
         finally:
             audit.uninstall()
+            await self._dump_net_tap(page)
+
+    # JS 网络打点：patchright 下 page.on("console") 依赖 Runtime.enable，被刻意
+    # 屏蔽（容器实测 console.log 零事件），而 page.on("response") 只能看见主进程
+    # 的 HTTP 往返——sendBeacon/WS/worker 内请求全部不可见。滑动前在页面里装
+    # tap 记录 fetch/XHR/beacon/WS/console，失败后 evaluate 读回，即可分辨
+    # “校验请求根本没发出” vs “走了 page.on 看不见的通道”。
+    _NET_TAP_JS = """
+    () => {
+      if (window.__slidexNet) { window.__slidexNet.length = 0; return; }
+      const log = (window.__slidexNet = []);
+      const rec = (kind, detail) => {
+        try { if (log.length < 400) log.push(kind + ' ' + String(detail).slice(0, 250)); } catch (e) {}
+      };
+      const origFetch = window.fetch;
+      if (origFetch) {
+        window.fetch = function (input, init) {
+          try {
+            const url = typeof input === 'string' ? input : (input && input.url) || '';
+            const m = (init && init.method) || (input && input.method) || 'GET';
+            rec('fetch', m + ' ' + url);
+          } catch (e) {}
+          return origFetch.apply(this, arguments);
+        };
+      }
+      const OrigOpen = XMLHttpRequest.prototype.open;
+      XMLHttpRequest.prototype.open = function (method, url) {
+        try { rec('xhr', method + ' ' + url); } catch (e) {}
+        return OrigOpen.apply(this, arguments);
+      };
+      try {
+        const origBeacon = navigator.sendBeacon;
+        if (origBeacon) {
+          navigator.sendBeacon = function (url, data) {
+            try { rec('beacon', url); } catch (e) {}
+            return origBeacon.apply(this, arguments);
+          };
+        }
+      } catch (e) {}
+      try {
+        const OrigWS = window.WebSocket;
+        if (OrigWS) {
+          window.WebSocket = function (url, protocols) {
+            try { rec('ws', url); } catch (e) {}
+            return new OrigWS(url, protocols);
+          };
+          window.WebSocket.prototype = OrigWS.prototype;
+        }
+      } catch (e) {}
+      const origLog = {};
+      ['log', 'info', 'warn', 'error'].forEach((level) => {
+        origLog[level] = console[level];
+        console[level] = function () {
+          try { rec('console.' + level, Array.prototype.slice.call(arguments).join(' ')); } catch (e) {}
+          return origLog[level].apply(console, arguments);
+        };
+      });
+    }
+    """
+
+    _NET_TAP_READ_JS = "() => (window.__slidexNet || []).slice()"
+
+    # Resource Timing 清点：worker / service worker 内的请求不经过页面 window 的
+    # fetch/XHR，tap 记不到，但主 frame 的 resource entries 里会有
+    _RESOURCE_TIMING_JS = """
+    () => {
+      try {
+        return performance.getEntriesByType('resource').slice(-30).map((e) =>
+          (e.initiatorType || '?') + ' ' + (e.name || '').slice(0, 200));
+      } catch (err) { return []; }
+    }
+    """
+
+    async def _install_net_tap(self, page: Page) -> None:
+        try:
+            await page.evaluate(self._NET_TAP_JS)
+        except Exception as e:
+            logger.debug(f"[{self.pure_user_id}] net tap install failed: {e}")
+
+    async def _dump_net_tap(self, page: Page) -> None:
+        try:
+            entries = await page.evaluate(self._NET_TAP_READ_JS)
+        except Exception as e:
+            logger.debug(f"[{self.pure_user_id}] net tap read failed: {e}")
+            return
+        if not entries:
+            logger.warning(
+                f"[{self.pure_user_id}] net tap: 0 events — 页面在滑动窗口内没有任何 "
+                "fetch/XHR/beacon/WS/console 活动（校验请求很可能根本没发出）"
+            )
+            self._emit_telemetry_event("provider_net_tap", count=0)
+        else:
+            logger.info(f"[{self.pure_user_id}] net tap: {len(entries)} events during slide window")
+            for line in entries[:60]:
+                logger.info(f"[{self.pure_user_id}] net tap | {line}")
+            # console 兜底成功信号：page.on("console") 在 patchright 下失效，页面内
+            # wrapper 是唯一能捕获「验证通过」标志的通道
+            for line in entries:
+                text = str(line)
+                if "验证通过" in text or "captchaVerifyParam" in text:
+                    logger.success(f"[{self.pure_user_id}] net tap console SUCCESS marker: {text[:200]}")
+                    self._emit_telemetry_event("slide_console_success", source="net_tap", detail=text[:200])
+                    break
+            self._emit_telemetry_event(
+                "provider_net_tap", count=len(entries), sample=[str(x)[:200] for x in entries[-20:]]
+            )
+        # 重置缓冲：下次尝试从零计数，不重复上报
+        await self._install_net_tap(page)
+        # Resource Timing 兜底清点（page 主 frame 视角，含 worker 发起的请求）
+        try:
+            resources = await page.evaluate(self._RESOURCE_TIMING_JS)
+            if resources:
+                logger.info(f"[{self.pure_user_id}] resource timing tail: {len(resources)} entries")
+                for line in resources[-15:]:
+                    logger.info(f"[{self.pure_user_id}] resource | {line}")
+        except Exception as e:
+            logger.debug(f"[{self.pure_user_id}] resource timing read failed: {e}")
 
     def _install_url_audit(self, page: Page):
         """滑动窗口全量响应审计：结果捕获面 miss（code=-1 且无 tmd slide 包）
