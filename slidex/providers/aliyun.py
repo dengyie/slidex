@@ -169,7 +169,15 @@ class AliyunNoCaptchaProvider(CaptchaProvider):
         gap_x: int,
         trajectory: List[Tuple[int, int, int]],
     ) -> None:
-        """执行滑动。trajectory 为相对位移 (dx, dy, delay_ms)。"""
+        """执行滑动。trajectory 为相对位移 (dx, dy, delay_ms)。
+
+        人形化收尾：press-hold（down 后按住再拖）、终点过冲回拖、
+        释放前手抖——与 legacy _slide_playwright 对齐。录制轨迹若首点
+        是 (0,0,delay) 按住停顿则透传为 hold，不再被统一截到 50ms。
+        """
+        import asyncio
+        import random
+
         self.bind_response_listener(page)
 
         btn_box = await elements.slider_btn.bounding_box()
@@ -179,17 +187,43 @@ class AliyunNoCaptchaProvider(CaptchaProvider):
         start_x = btn_box["x"] + btn_box["width"] / 2
         start_y = btn_box["y"] + btn_box["height"] / 2
 
+        await page.mouse.move(
+            start_x + random.uniform(-8, -3),
+            start_y + random.uniform(2, 6),
+        )
+        await page.wait_for_timeout(random.randint(30, 80))
         await page.mouse.move(start_x, start_y)
+        await page.wait_for_timeout(random.randint(20, 60))
         await page.mouse.down()
-        await page.wait_for_timeout(50)
 
-        for x, y, ts_ms in trajectory:
+        # 按下后按住不动（看雪 284633 量级 600-1200ms）；录制轨迹自带
+        # 按住首点则用其 delay，否则随机合成
+        hold_ms = 0.0
+        if trajectory and trajectory[0][0] == 0 and trajectory[0][1] == 0 and trajectory[0][2] > 0:
+            hold_ms = float(trajectory[0][2])
+            slide_points = trajectory[1:]
+        else:
+            hold_ms = random.uniform(600, 1200)
+            slide_points = trajectory
+        await page.wait_for_timeout(int(hold_ms))
+
+        for x, y, ts_ms in slide_points:
             await page.mouse.move(start_x + x, start_y + y)
-            delay = 10 if ts_ms is None else max(0, min(int(ts_ms), 50))
+            delay = 10 if ts_ms is None else max(0.0, float(ts_ms))
             if delay:
-                await page.wait_for_timeout(delay)
+                await page.wait_for_timeout(int(delay))
 
-        await page.wait_for_timeout(50)
+        # 终点过冲 3-6px → 回拖 2-3.5px → 释放位 ±1px 手抖
+        end_x = start_x + slide_points[-1][0] if slide_points else start_x
+        end_y = start_y + slide_points[-1][1] if slide_points else start_y
+        overshoot = random.uniform(3.0, 6.0)
+        back = random.uniform(2.0, 3.5)
+        await page.mouse.move(end_x + overshoot, end_y + random.uniform(-1.5, 1.5))
+        await page.wait_for_timeout(random.randint(60, 110))
+        await page.mouse.move(end_x + overshoot - back, end_y + random.uniform(-1.0, 1.0))
+        await page.wait_for_timeout(random.randint(50, 90))
+        await page.mouse.move(end_x + random.uniform(-1.0, 1.0), end_y)
+        await page.wait_for_timeout(random.randint(40, 80))
         await page.mouse.up()
 
     async def validate_response(self, response: Response) -> Optional[bool]:

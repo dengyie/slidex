@@ -67,6 +67,7 @@ class ProviderSolverMixin:
         if not self._provider:
             raise RuntimeError("Provider not initialized")
 
+        audit = self._install_url_audit(page)
         try:
             # 1. 定位元素
             elements = await self._provider.locate_elements(page)
@@ -153,6 +154,52 @@ class ProviderSolverMixin:
             logger.error(f"[{self.pure_user_id}] provider solve error: {e}", exc_info=True)
             self._emit_telemetry_event("provider_solve_error", provider_name=self._provider.name, reason=str(e))
             return False, None
+        finally:
+            audit.uninstall()
+
+    def _install_url_audit(self, page: Page):
+        """滑动窗口全量响应审计：结果捕获面 miss（code=-1 且无 tmd slide 包）
+        时，这里落出滑动期间真实经过的 verify 端点，供下一步钉 pattern。"""
+        state = {"responses": []}
+
+        def _on_response(response):
+            try:
+                state["responses"].append(
+                    {
+                        "url": response.url[:300],
+                        "status": response.status,
+                        "method": response.request.method,
+                    }
+                )
+            except Exception:
+                pass
+
+        try:
+            page.on("response", _on_response)
+        except Exception:
+            pass
+
+        class _Audit:
+            def uninstall(self_inner):
+                try:
+                    page.remove_listener("response", _on_response)
+                except Exception:
+                    pass
+                hits = state["responses"]
+                if hits:
+                    summary = [f"{r['method']} {r['status']} {r['url']}" for r in hits[-40:]]
+                    logger.info(
+                        f"[{self.pure_user_id}] url audit: {len(hits)} responses during provider slide"
+                    )
+                    for line in summary:
+                        logger.info(f"[{self.pure_user_id}] url audit | {line}")
+                    self._emit_telemetry_event(
+                        "provider_url_audit",
+                        count=len(hits),
+                        sample=[r["url"] for r in hits[-20:]],
+                    )
+
+        return _Audit()
 
     @classmethod
     def register_provider(cls, name: str, provider_class, detection_priority: int = 100):

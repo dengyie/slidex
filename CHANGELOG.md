@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.6] - 2026-09-23
+
+0.6.5 生产烟测暴露三个缺口：provider 模式（生产 `provider="auto"` 每周期先走的那条路）完全没吃到人形化；结果捕获面全 miss 时无从知道滑动期间真实经过了哪些校验端点；容器 recreate 时陈旧 SingletonLock 让所有后续浏览器启动全挂。
+
+### Fixed
+- **provider 路径人形化**（`providers/aliyun.py perform_slide`）：press-hold（录制轨迹 `(0,0,hold)` 首点透传，否则随机 600-1200ms）+ 终点过冲 3-6px 回拖 + 释放前 ±1px 手抖 + 接近段两步 move。**删掉每步 `min(delay, 50)` 截断**——它会把 press-hold 剪成 50ms，真人 300-400ms 的步间停顿也被压扁。
+- **陈旧 SingletonLock 自愈**（`_heal_stale_singleton_lock`，launch 前调用）：锁目标 hostname 非本机（容器 recreate 场景）或 pid 已死时，清 `SingletonLock/Cookie/Socket` 三件套。根因：07:44 force-recreate 时有头 Chromium 正在验证中被杀，锁留在 profile 卷里，新容器 Chromium 全部拒绝启动（`profile in use by another computer`，无对话框工具静默死）。
+
+### Added
+- **滑动窗口 URL 审计**（`_install_url_audit`，provider 求解全程挂/finally 卸）：捕获面 miss（`code=-1` 且无 tmd slide 包）时，teardown 落出滑动期间全部响应（method/status/url，最多 40 条）+ `provider_url_audit` telemetry——下一步钉真实 verify pattern 的数据源。
+
+### Notes
+- 测试：`tests/test_provider_humanize.py` 新增 9（6 过 + 3 symlink 特权 skip on Windows，Linux CI 全跑），全套 405 绿。版本 0.6.6。
+
 ## [0.6.5] - 2026-09-23
 
 滑块滑到位后校验包 `code=-1` 仍判失败：轨迹行为特征不够"人"（down 后 10-30ms 就拖、释放干脆利落），且阿里新前端成功标志走 console/前端回调而非 `_____tmd_____/slide` 响应，捕获面漏了。

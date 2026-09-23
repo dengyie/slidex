@@ -1,4 +1,4 @@
-import asyncio, json, os, re, threading, time, random, shutil, psutil, uuid
+import asyncio, json, os, re, socket, threading, time, random, shutil, psutil, uuid
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List, Callable
 from urllib.parse import urlparse, parse_qs
@@ -1066,6 +1066,42 @@ class SliderSolver(ProviderSolverMixin):
     # ════════════════════════════════════════════════════════════
     #  浏览器初始化与页面加载
     # ════════════════════════════════════════════════════════════
+    def _heal_stale_singleton_lock(self):
+        """容器 recreate 时若上次验证还在跑，profile 卷里会留下指向旧容器
+        hostname 的 SingletonLock——新 Chromium 拒绝启动且无对话框工具可
+        提示（process_singleton_posix 'profile in use by another computer'）。
+        这里在 launch 前自愈：锁目标 hostname 不是本机、或 pid 已无进程时清锁。"""
+        try:
+            profile = Path(str(self.profile_dir))
+            lock = profile / "SingletonLock"
+            if not lock.is_symlink():
+                return
+            target = os.readlink(str(lock))  # e.g. "oldhost-3486"
+            host, _, pid_str = target.rpartition("-")
+            stale = False
+            if host and host != socket.gethostname():
+                stale = True
+            else:
+                try:
+                    stale = not psutil.pid_exists(int(pid_str))
+                except ValueError:
+                    stale = False
+            if not stale:
+                return
+            for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                p = profile / name
+                try:
+                    if p.is_symlink() or p.exists():
+                        p.unlink()
+                except Exception:
+                    pass
+            logger.warning(
+                f"[{self.pure_user_id}] removed stale chromium SingletonLock "
+                f"(target={target!r}, hostname={socket.gethostname()!r})"
+            )
+        except Exception as e:
+            logger.debug(f"[{self.pure_user_id}] singleton lock heal skipped: {e}")
+
     async def _init_browser(self):
         self.automation_backend = _resolve_automation_backend()
         self._emit_step("browser", "browser_init", "started", headless=self.headless, proxy_enabled=bool(self.proxy), backend=self.automation_backend)
@@ -1085,6 +1121,7 @@ class SliderSolver(ProviderSolverMixin):
             if pt in ("none", ""):
                 pt = "http"
             kwargs["proxy"] = {"server": f"{pt}://{proxy_host}:{proxy_port}"}
+        self._heal_stale_singleton_lock()
         self.context = await pw.chromium.launch_persistent_context(
             user_data_dir=str(self.profile_dir),
             viewport={"width": 1920, "height": 1080},
