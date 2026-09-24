@@ -28,6 +28,7 @@ from slidex._chromium_lifecycle import (
     ensure_profile_chromium_closed,
     record_chromium_pid,
     find_chromium_pid_by_user_data_dir,
+    find_chromium_pids_by_user_data_dir,
     kill_chromium_process_tree,
 )
 from slidex._async_budget import await_with_budget
@@ -69,6 +70,11 @@ class SliderSolver(ProviderSolverMixin):
     OFFSET_CORRECTION_DEFAULT = -35
     OFFSET_CORRECTION_LIMITS = (-100, 100)
     CLOSE_TIMEOUT_S = 30.0
+    # solve 全程硬看门狗：须大于内部各段预算之和（profile 锁等待 60 + 页面加载
+    # ~60 + provider/legacy 重试 ~120 + remote 人工会话 180）。生产（1GB VPS）
+    # 曾在死驱动连接上挂死 16h+，局部预算防不住挂在不同协议调用上的死等。
+    SOLVE_WATCHDOG_TIMEOUT_S = float(os.environ.get("SLIDEX_SOLVE_WATCHDOG", "600"))
+    SCREENSHOT_BUDGET_S = 10.0
 
     # 同 profile（同账号浏览器目录）互斥：进程内串行化，防止并发求解互踩
     _profile_locks: Dict[str, asyncio.Lock] = {}
@@ -455,7 +461,35 @@ class SliderSolver(ProviderSolverMixin):
     #  主求解入口
     # ════════════════════════════════════════════════════════════
     async def solve(self, verify_url):
-        """启动自己的浏览器求解"""
+        """启动自己的浏览器求解
+
+        全程硬看门狗：超预算即 cancel 求解任务（其 finally 里预算化清理与
+        profile 锁释放通常仍会执行；若任务被遗弃则此处补发），并 OS 级强杀
+        浏览器进程树后返回失败——调用方（编排器）随即降级 remote/DrissionPage，
+        token 刷新不会因单个挂死的 solve 永久卡住。
+        """
+        result = await await_with_budget(
+            self._solve_impl(verify_url), self.SOLVE_WATCHDOG_TIMEOUT_S
+        )
+        if result is None:
+            logger.error(
+                f"[{self.pure_user_id}] solve watchdog fired after "
+                f"{self.SOLVE_WATCHDOG_TIMEOUT_S:.0f}s, hard-killing browser"
+            )
+            self._emit_step("solve", "solve_watchdog", "failed", timeout_s=self.SOLVE_WATCHDOG_TIMEOUT_S)
+            self._emit_telemetry_event("solve_watchdog_fired", timeout_s=self.SOLVE_WATCHDOG_TIMEOUT_S)
+            self._finalize_telemetry(
+                success=False,
+                status="watchdog_timeout",
+                cookies=None,
+                extra={"failure_reason": "solve_watchdog_timeout"},
+            )
+            await self._hard_kill_browser()
+            self._release_profile_lock(str(self.profile_dir))
+            return False, None
+        return result
+
+    async def _solve_impl(self, verify_url):
         self.last_fallback_used = None
         self._is_cdp_mode = False
         self._emit_telemetry_event("solve_started", mode="browser", verify_url=verify_url)
@@ -508,6 +542,9 @@ class SliderSolver(ProviderSolverMixin):
     ) -> Tuple[bool, Optional[dict]]:
         """连接已有浏览器求解（CDP 模式）
 
+        同样受 solve 看门狗约束；外部浏览器不属于本实例，超时只做预算化断开
+        （_close_cdp_only），绝不杀浏览器进程。
+
         Args:
             cdp_endpoint: CDP WebSocket 地址，如 ws://localhost:9222/devtools/browser/xxx
             page_url: 如果提供，先导航到此 URL
@@ -515,6 +552,35 @@ class SliderSolver(ProviderSolverMixin):
         Returns:
             (success, cookies)
         """
+        result = await await_with_budget(
+            self._solve_on_existing_impl(cdp_endpoint, page_url),
+            self.SOLVE_WATCHDOG_TIMEOUT_S,
+        )
+        if result is None:
+            logger.error(
+                f"[{self.pure_user_id}] CDP solve watchdog fired after "
+                f"{self.SOLVE_WATCHDOG_TIMEOUT_S:.0f}s"
+            )
+            self._emit_step("solve", "solve_watchdog", "failed", timeout_s=self.SOLVE_WATCHDOG_TIMEOUT_S, mode="cdp")
+            self._emit_telemetry_event("solve_watchdog_fired", timeout_s=self.SOLVE_WATCHDOG_TIMEOUT_S, mode="cdp")
+            try:
+                await self._close_cdp_only()
+            except Exception:
+                pass
+            self._finalize_telemetry(
+                success=False,
+                status="watchdog_timeout",
+                cookies=None,
+                extra={"failure_reason": "solve_watchdog_timeout"},
+            )
+            return False, None
+        return result
+
+    async def _solve_on_existing_impl(
+        self,
+        cdp_endpoint: str,
+        page_url: str = "",
+    ) -> Tuple[bool, Optional[dict]]:
         self.last_fallback_used = None
         self._is_cdp_mode = True
         self._verify_url = page_url or ""
@@ -1571,7 +1637,15 @@ class SliderSolver(ProviderSolverMixin):
             debug_dir.mkdir(parents=True, exist_ok=True)
             ts = dt_mod.datetime.now().strftime("%Y%m%d_%H%M%S")
             path = debug_dir / "{}_{}_{}.png".format(self.pure_user_id, tag, ts)
-            await self.page.screenshot(path=str(path), full_page=False)
+            # 死驱动连接上 page.screenshot 可能永不返回（生产挂死点之一），加预算
+            shot = await await_with_budget(
+                self.page.screenshot(path=str(path), full_page=False),
+                self.SCREENSHOT_BUDGET_S,
+            )
+            if shot is None:
+                logger.warning("[{}] screenshot timed out (budget {}s)".format(
+                    self.pure_user_id, self.SCREENSHOT_BUDGET_S))
+                return
             logger.info("[{}] screenshot saved: {}".format(self.pure_user_id, path))
         except Exception as e:
             logger.warning("[{}] screenshot failed: {}".format(self.pure_user_id, e))
@@ -1635,6 +1709,30 @@ class SliderSolver(ProviderSolverMixin):
             await self._close_cdp_only()
         else:
             await self._close()
+
+    async def _hard_kill_browser(self):
+        """OS 级兜底回收：断开驱动 + 按 profile 杀掉全部 chromium 进程。
+
+        供 solve 看门狗超时路径使用：被取消/遗弃的求解任务其 finally 清理可能
+        没跑完，协议层 close 不可信时只有进程级回收能保证 chromium 不驻留
+        （1GB 内存机器上一个僵尸 chromium 就能拖死整机）。
+        """
+        try:
+            if self._playwright:
+                await await_with_budget(self._playwright.stop(), 10.0)
+        except Exception:
+            pass
+        self._playwright = None
+        self.context = None
+        pids = set(find_chromium_pids_by_user_data_dir(str(self.profile_dir)))
+        if self._browser_pid:
+            pids.add(self._browser_pid)
+        for pid in pids:
+            try:
+                kill_chromium_process_tree(pid)
+            except Exception:
+                pass
+        self._browser_pid = None
 
     async def _close(self):
         pid = self._browser_pid or find_chromium_pid_by_user_data_dir(str(self.profile_dir))

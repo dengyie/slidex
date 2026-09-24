@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.14] - 2026-09-25
+
+0.6.13 生产 10 小时观察：重试环代码正确但**从未到达**——浏览器路径在拖动之前就死了。周期画像：`page_load` networkidle 45s 超时降级 domcontentloaded → `page.page_state failed`（渲染进程在内存饥饿下崩溃）→ `No provider detected` → legacy 15s 找不到滑块 → **solve 挂死**（不同周期挂在不同的协议调用上：`_save_debug_screenshot` 的 `page.screenshot`、死驱动连接上的等待均可能永不返回），最长挂死 16h+，token 刷新任务随之整体卡死、僵尸 chromium 驻留。局部预算（`CLOSE_TIMEOUT_S` 等）只护清理段，防不住挂在主流程上的死等。
+
+### Added
+- **solve 全程硬看门狗**（`SOLVE_WATCHDOG_TIMEOUT_S=600s`，env `SLIDEX_SOLVE_WATCHDOG` 可调）：`solve()` / `solve_on_existing_page()` 包 `await_with_budget`。超预算 → cancel 求解任务（其 finally 的预算化清理与 profile 锁释放通常仍执行；若任务被遗弃则由看门狗补发）→ OS 级强杀浏览器进程树（`_hard_kill_browser`：预算化 `playwright.stop()` + 按 user-data-dir 枚举并 `kill_chromium_process_tree`）→ 返回 `(False, None)`，编排器随即降级 remote/DrissionPage。CDP 模式只断开不杀外部浏览器。telemetry `solve_watchdog_fired`。
+- `_save_debug_screenshot` 加 10s 预算（生产挂死点之一）。
+
+### Notes
+- 测试 422 绿（新增 `tests/test_solve_watchdog.py` 5 例）。1GB VPS 的根因是内存饥饿导致渲染崩溃 + 死等无界；看门狗保证"挂死必回收、失败必降级"，但页面能否渲染出滑块仍取决于当刻内存。
 ## [0.6.13] - 2026-09-24
 
 0.6.12 生产首个周期验证了判定修正（`SLIDE RESPONSE: ok=False code=300`，如实失败不再假通过），但暴露了下一个问题：provider 模式单次失败后直接进 remote fallback，**没有重试拖**——而 scratch.js 前端自己都会 verifyFail 后 3 秒 verifyRefresh 重试。服务端依旧回 300（other-punish，非 302 dragFast/303 deny，是"综合判定不干净"）。
