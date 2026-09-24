@@ -1,6 +1,8 @@
 """Provider-aware SliderSolver integration layer"""
 
 from typing import Optional, Tuple, Dict
+import random
+
 from loguru import logger
 from playwright.async_api import Page
 
@@ -13,6 +15,9 @@ from slidex._cookies import select_cookies_for_url
 
 
 class ProviderSolverMixin:
+    # 300（other-punish）后的重拖次数上限：等价 scratch.js verifyRefresh 循环
+    PROVIDER_SLIDE_RETRIES = 3
+
     """
     Provider 集成 Mixin，为 SliderSolver 添加 provider 支持。
 
@@ -70,91 +75,107 @@ class ProviderSolverMixin:
 
         audit = self._install_url_audit(page)
         try:
-            # 1. 定位元素
-            elements = await self._provider.locate_elements(page)
-            metadata_str = f", metadata={elements.metadata}" if elements.metadata else ""
-            logger.debug(f"[{self.pure_user_id}] elements located, track_width={elements.track_width_px}px{metadata_str}")
-
-            # scale 型（nc.js"拖到最右边"）没有缺口：travel=轨道满行程，
-            # 图像匹配出的"缺口"是背景纹理伪匹配（生产实测恒 87px/conf 0.31）
-            slider_type = (elements.metadata or {}).get("slider_type")
-            if slider_type == "scale":
-                btn_box = await elements.slider_btn.bounding_box()
-                track_box = await elements.slider_track.bounding_box()
-                if not btn_box or not track_box:
-                    logger.warning(f"[{self.pure_user_id}] scale slider: cannot get boxes")
-                    self._emit_telemetry_event("provider_gap_not_found", provider_name=self._provider.name)
+            # 300（other-punish）时 scratch.js 前端 verifyRefresh 3s 后重试；
+            # 这里等价复刻：等 reset 完成、重定位、换轨迹重拖
+            for attempt in range(1, self.PROVIDER_SLIDE_RETRIES + 1):
+                # 1. 定位元素
+                elements = await self._provider.locate_elements(page)
+                if not elements:
+                    logger.warning(f"[{self.pure_user_id}] elements not found (attempt {attempt})")
                     return False, None
-                travel = int(max(0.0, track_box["width"] - btn_box["width"]))
-                logger.info(
-                    f"[{self.pure_user_id}] scale slider detected: travel=full {travel}px "
-                    f"(track={track_box['width']:.0f}, btn={btn_box['width']:.0f})"
-                )
-                self._emit_telemetry_event(
-                    "distance_detected",
-                    distance=travel,
-                    source="provider",
-                    provider_name=self._provider.name,
-                    slider_type="scale",
-                )
-                points = None  # 走合成轨迹
-            else:
-                travel, points = await self._jigsaw_travel_and_points(page, elements)
+                metadata_str = f", metadata={elements.metadata}" if elements.metadata else ""
+                logger.debug(f"[{self.pure_user_id}] elements located, track_width={elements.track_width_px}px{metadata_str}")
 
-            if travel is None or travel <= 0:
-                logger.warning(f"[{self.pure_user_id}] cannot determine travel (travel={travel})")
-                return False, None
-
-            # 4. 生成轨迹（相对位移；按 cookie + 目标距离匹配并缩放；
-            # scale 型已在上一步跳过图像匹配，points=None 走合成轨迹）
-            if points is None:
-                try:
-                    trajectory_dir = self._config.get_trajectory_dir()
-                    trajectory_pool = SliderTrajectoryPool(trajectory_dir)
-                    recorded_traj = trajectory_pool.load_best_trajectory(self.pure_user_id, travel)
-                    if recorded_traj is None:
-                        recorded_traj = trajectory_pool.load_best_trajectory("default", travel)
-                except Exception as e:
-                    logger.warning(f"[{self.pure_user_id}] trajectory pool error: {e}, using synthetic")
-                    recorded_traj = None
-
-                points = points_from_recorded(recorded_traj, travel)
-                if points:
-                    logger.debug(f"[{self.pure_user_id}] using recorded relative trajectory ({len(points)} points)")
-                else:
-                    logger.debug(f"[{self.pure_user_id}] generating synthetic trajectory")
-                    trajectory = generate_trajectory(
-                        distance=travel,
-                        attempt=1,
+                # scale 型（nc.js"拖到最右边"）没有缺口：travel=轨道满行程，
+                # 图像匹配出的"缺口"是背景纹理伪匹配（生产实测恒 87px/conf 0.31）
+                slider_type = (elements.metadata or {}).get("slider_type")
+                if slider_type == "scale":
+                    btn_box = await elements.slider_btn.bounding_box()
+                    track_box = await elements.slider_track.bounding_box()
+                    if not btn_box or not track_box:
+                        logger.warning(f"[{self.pure_user_id}] scale slider: cannot get boxes")
+                        self._emit_telemetry_event("provider_gap_not_found", provider_name=self._provider.name)
+                        return False, None
+                    travel = int(max(0.0, track_box["width"] - btn_box["width"]))
+                    logger.info(
+                        f"[{self.pure_user_id}] scale slider detected: travel=full {travel}px "
+                        f"(track={track_box['width']:.0f}, btn={btn_box['width']:.0f})"
                     )
-                    # 合成轨迹转成相对位移；provider.perform_slide 会再加按钮起点
-                    points = trajectory_to_points(trajectory, start_x=0, start_y=0)
+                    self._emit_telemetry_event(
+                        "distance_detected",
+                        distance=travel,
+                        source="provider",
+                        provider_name=self._provider.name,
+                        slider_type="scale",
+                    )
+                    points = None  # 走合成轨迹
+                else:
+                    travel, points = await self._jigsaw_travel_and_points(page, elements)
 
-            try:
-                # 5. 执行滑动（滑动前装页面内网络打点，滑动后读回）
-                await self._install_net_tap(page)
-                await self._provider.perform_slide(page, elements, travel, points)
-                logger.debug(f"[{self.pure_user_id}] slide performed")
+                if travel is None or travel <= 0:
+                    logger.warning(f"[{self.pure_user_id}] cannot determine travel (travel={travel})")
+                    return False, None
 
-                # 6. 等待结果
-                result = await self._provider.get_result(page, timeout_ms=5000)
-            finally:
-                await self._provider.cleanup_after_result(page)
+                # 4. 生成轨迹（相对位移；按 cookie + 目标距离匹配并缩放；
+                # scale 型已在上一步跳过图像匹配，points=None 走合成轨迹）
+                if points is None:
+                    try:
+                        trajectory_dir = self._config.get_trajectory_dir()
+                        trajectory_pool = SliderTrajectoryPool(trajectory_dir)
+                        recorded_traj = trajectory_pool.load_best_trajectory(self.pure_user_id, travel)
+                        if recorded_traj is None:
+                            recorded_traj = trajectory_pool.load_best_trajectory("default", travel)
+                    except Exception as e:
+                        logger.warning(f"[{self.pure_user_id}] trajectory pool error: {e}, using synthetic")
+                        recorded_traj = None
+
+                    points = points_from_recorded(recorded_traj, travel)
+                    if points:
+                        logger.debug(f"[{self.pure_user_id}] using recorded relative trajectory ({len(points)} points)")
+                    else:
+                        logger.debug(f"[{self.pure_user_id}] generating synthetic trajectory")
+                        trajectory = generate_trajectory(
+                            distance=travel,
+                            attempt=attempt,
+                        )
+                        # 合成轨迹转成相对位移；provider.perform_slide 会再加按钮起点
+                        points = trajectory_to_points(trajectory, start_x=0, start_y=0)
+
+                try:
+                    # 5. 执行滑动（滑动前装页面内网络打点，滑动后读回）
+                    await self._install_net_tap(page)
+                    await self._provider.perform_slide(page, elements, travel, points)
+                    logger.debug(f"[{self.pure_user_id}] slide performed")
+
+                    # 6. 等待结果
+                    result = await self._provider.get_result(page, timeout_ms=5000)
+                finally:
+                    await self._provider.cleanup_after_result(page)
+                if result.success:
+                    logger.success(f"[{self.pure_user_id}] provider solve success! (attempt={attempt})")
+                    break
+                logger.warning(f"[{self.pure_user_id}] provider solve failed (attempt={attempt}): {result.error}")
+                self._emit_telemetry_event(
+                    "provider_result",
+                    provider_name=self._provider.name,
+                    success=result.success,
+                    error=result.error,
+                    cookie_count=len(result.cookies or {}),
+                    attempt=attempt,
+                )
+                if attempt < self.PROVIDER_SLIDE_RETRIES:
+                    # 等前端 verifyRefresh/reset 完成（3s 附近），再进下一轮重定位
+                    await page.wait_for_timeout(random.uniform(2800, 3600))
+                    try:
+                        if not await self._wait_slider(10.0):
+                            logger.debug(f"[{self.pure_user_id}] slider gone after retry wait, stopping")
+                            break
+                    except Exception as e:
+                        logger.debug(f"[{self.pure_user_id}] retry wait failed: {e}")
+                        break
+
             if result.success:
-                logger.success(f"[{self.pure_user_id}] provider solve success!")
-            else:
-                logger.warning(f"[{self.pure_user_id}] provider solve failed: {result.error}")
-            self._emit_telemetry_event(
-                "provider_result",
-                provider_name=self._provider.name,
-                success=result.success,
-                error=result.error,
-                cookie_count=len(result.cookies or {}),
-            )
-
-            if result.success:
-                # 7. x5sec settle：阿里 punish 流程的放行票据在通过后的页面续行
-                # （回跳/重载链的 Set-Cookie）里下发，/slide 响应本身不带。
+                # 7. x5sec settle：票据旁路（bx-x5sec 头）优先，cookie jar 轮询兜底
                 result_cookies = await self._settle_x5sec(page, result.cookies)
                 return True, result_cookies
             return False, result.cookies

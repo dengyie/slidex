@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.13] - 2026-09-24
+
+0.6.12 生产首个周期验证了判定修正（`SLIDE RESPONSE: ok=False code=300`，如实失败不再假通过），但暴露了下一个问题：provider 模式单次失败后直接进 remote fallback，**没有重试拖**——而 scratch.js 前端自己都会 verifyFail 后 3 秒 verifyRefresh 重试。服务端依旧回 300（other-punish，非 302 dragFast/303 deny，是"综合判定不干净"）。
+
+### Changed
+- `_solve_with_provider` 重构为重试循环（`PROVIDER_SLIDE_RETRIES=3`）：失败后等前端 reset（2.8-3.6s）→ slider 仍在则重定位元素、重新加载/生成轨迹（attempt 递增换采样）→ 重拖。等价 scratch.js verifyRefresh 循环，给 baxia 多次采样机会。
+- 成功分支收口到循环后统一 `_settle_x5sec`；telemetry `provider_result` 加 `attempt`。
+
+### Notes
+- 测试不变（417 绿）。版本 0.6.13。若 0.6.13 后仍恒 300：方向为轨迹拟人度（attempt 采样已换）或环境指纹/会话侧。
+
+
 ## [0.6.12] - 2026-09-24
 
 **终局根因（决定性）**：scratch-captcha 0.0.50 反读出 verify 判定枚举：`success=0, other=300, deny=303, dragFast=302, secdataTimeout=305`。前端判 `c.code===e.success`（即 **0**）才 `verifySuccess → checkCookie → bx-x5sec 头 → x5sec`；**code=300 走 verifyFail + 3s 后 verifyRefresh 重试**。生产 27 周期的 `{"code":300,"success":true,"sig":"from bx"}` 里 `success:true` 只是 baxia 网关"已受理"——slidex 被它带偏，把 300 当成功，**轨迹从未真正过验**，票据自然从未下发（bx-x5sec 头、setCookie 回执、context cookie 三处全空，与 0.6.11 诊断完全自洽）。滑块初始页能出（action=captcha）但每次提交都被判 other——下一步若 0.6.12 后仍 300，则方向是轨迹拟人度/环境指纹。
