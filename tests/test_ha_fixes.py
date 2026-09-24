@@ -220,10 +220,25 @@ class TestAliyunProviderHa:
         assert interpret_slide_json({"success": "false", "code": 0}) is False
         assert interpret_slide_json({"success": " FALSE ", "code": 0}) is False
         assert interpret_slide_json({"code": 0}) is True
-        assert interpret_slide_json({"success": True, "code": 1}) is True
+        # 0.6.12：success 真但 code 非 0 一律失败（网关受理码不算过验）
+        assert interpret_slide_json({"success": True, "code": 1}) is False
         assert interpret_slide_json({"code": 1}, success_code=0) is False
         assert interpret_slide_json([]) is None
         assert interpret_slide_json("not-json-object") is None
+
+    def test_interpret_slide_json_gateway_accept_is_not_success(self):
+        """0.6.12：success:true + code!=0 是 baxia 网关受理码（other-punish），
+        前端 scratch-captcha 判 verifyFail —— 不得算成功。"""
+        # 生产 27 周期假通过的确切响应
+        assert interpret_slide_json(
+            {"code": 300, "dt": "success", "ec": 200, "result": {"code": 300, "sig": "from bx"}, "success": True}
+        ) is False
+        # result.code 也不行
+        assert interpret_slide_json({"code": 1, "result": {"code": 0}, "success": True}) is False
+        # success:true + code==0 才是真成功
+        assert interpret_slide_json({"code": 0, "success": True}) is True
+        # 裸 success:true（无 code 字段）保持兼容旧式纯布尔响应
+        assert interpret_slide_json({"success": True}) is True
 
     @pytest.mark.asyncio
     async def test_detect_iframe_without_content_frame_is_not_adapted(self):

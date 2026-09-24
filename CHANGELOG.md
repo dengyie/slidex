@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.12] - 2026-09-24
+
+**终局根因（决定性）**：scratch-captcha 0.0.50 反读出 verify 判定枚举：`success=0, other=300, deny=303, dragFast=302, secdataTimeout=305`。前端判 `c.code===e.success`（即 **0**）才 `verifySuccess → checkCookie → bx-x5sec 头 → x5sec`；**code=300 走 verifyFail + 3s 后 verifyRefresh 重试**。生产 27 周期的 `{"code":300,"success":true,"sig":"from bx"}` 里 `success:true` 只是 baxia 网关"已受理"——slidex 被它带偏，把 300 当成功，**轨迹从未真正过验**，票据自然从未下发（bx-x5sec 头、setCookie 回执、context cookie 三处全空，与 0.6.11 诊断完全自洽）。滑块初始页能出（action=captcha）但每次提交都被判 other——下一步若 0.6.12 后仍 300，则方向是轨迹拟人度/环境指纹。
+
+### Changed
+- `interpret_slide_json` 语义修正：`success` 为真 **且** `code == success_code`（默认 0）才算成功；`success:true code:300` 判失败（触发正常重试/换轨迹）。
+
+### Notes
+- 测试：新增 `test_interpret_slide_json_gateway_accept_is_not_success`（含生产确切响应），修正 1 处旧断言，全套 417 绿。版本 0.6.12。
+
+
 ## [0.6.11] - 2026-09-24
 
 0.6.10 生产首个周期：滑动照旧通过，但**无 `bx voucher captured`**——旁路没听到票据头。补证据链：scratch-captcha 0.0.50 反读确认 verify XHR 的 `success(c,t,n)` 第三参就是 XHR 对象，`verifySuccess(n)` → `checkCookie(n)` → `n.getResponseHeader("bx-x5sec")`，链路成立；那么头没被听到只剩两种可能：sync `response.headers` 子集没含 bx-*（改用 `all_headers()`），或服务端确实没在 validate 响应里下发（IP/会话仍被拉黑）。
