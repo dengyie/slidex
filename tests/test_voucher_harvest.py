@@ -107,6 +107,7 @@ async def test_solve_on_existing_impl_resets_stale_voucher():
 
     async def _fake_loop(verify_url):
         seen["voucher"] = solver._bx_voucher
+        seen["t0"] = getattr(solver, "_solve_t0", None)
         return True, {"x5sec": "1"}
 
     async def _fake_close():
@@ -119,6 +120,7 @@ async def test_solve_on_existing_impl_resets_stale_voucher():
     ok, cookies = await solver._solve_on_existing_impl("http://127.0.0.1:9222", "")
     assert (ok, cookies) == (True, {"x5sec": "1"})
     assert seen["voucher"] is None
+    assert seen["t0"] is not None  # 0.6.20: 入口必须记录起算时间供人工等待预算截断
 
 
 @pytest.mark.asyncio
@@ -213,3 +215,47 @@ async def test_cdp_manual_wait_exits_when_page_closed():
 
     ok, cookies = await solver._fallback_or_fail("https://x/punish?x5secdata=1")
     assert (ok, cookies) == (False, None)
+
+
+@pytest.mark.asyncio
+async def test_cdp_manual_wait_capped_by_watchdog_budget():
+    """0.6.20: 自动阶段吃掉看门狗预算后，人工等待按剩余时间截断，
+    不能等到一半被看门狗 cancel（cancel 出口不结算票据，成果整体丢弃）。"""
+    import time as _time
+    solver = _make_solver()
+    solver.MANUAL_VOUCHER_WAIT_S = 300.0
+    solver.SOLVE_WATCHDOG_TIMEOUT_S = 600.0
+    # 自动阶段已耗 590s：剩余 10s 再扣 15s 余量 → 等待应立即让位（0s）
+    solver._solve_t0 = _time.monotonic() - 590.0
+
+    async def _fake_cookies():
+        return {"unb": "1"}
+
+    solver._get_cookies = _fake_cookies
+    solver.page = _LivePage()
+
+    t0 = _time.monotonic()
+    ok, cookies = await solver._fallback_or_fail("https://x/punish?x5secdata=1")
+    assert (ok, cookies) == (False, None)
+    assert _time.monotonic() - t0 < 5.0  # 未按 300s 空等
+
+
+@pytest.mark.asyncio
+async def test_cdp_manual_wait_uncapped_when_budget_plenty():
+    """自动阶段很快（典型 ~90s）时，人工等待仍是足额配置值（此处用 1.2s 验证不被截断逻辑波及）。"""
+    import time as _time
+    solver = _make_solver()
+    solver.MANUAL_VOUCHER_WAIT_S = 1.2
+    solver.SOLVE_WATCHDOG_TIMEOUT_S = 600.0
+    solver._solve_t0 = _time.monotonic() - 90.0  # 剩余 495s > 1.2s，不截断
+
+    async def _fake_cookies():
+        return {"unb": "1"}
+
+    solver._get_cookies = _fake_cookies
+    solver.page = _LivePage()
+
+    t0 = _time.monotonic()
+    ok, cookies = await solver._fallback_or_fail("https://x/punish?x5secdata=1")
+    assert (ok, cookies) == (False, None)
+    assert _time.monotonic() - t0 >= 1.0  # 足额等待，未被预算逻辑提前砍掉

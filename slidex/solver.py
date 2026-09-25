@@ -496,6 +496,7 @@ class SliderSolver(ProviderSolverMixin):
         self.last_fallback_used = None
         self._is_cdp_mode = False
         self._bx_voucher = None
+        self._solve_t0 = time.monotonic()
         self._emit_telemetry_event("solve_started", mode="browser", verify_url=verify_url)
         self._emit_step("solve", "solve_started", "started", mode="browser", verify_url=verify_url)
         logger.info(f"[{self.pure_user_id}] solving (mode={self.trajectory_mode})...")
@@ -588,6 +589,7 @@ class SliderSolver(ProviderSolverMixin):
         self.last_fallback_used = None
         self._is_cdp_mode = True
         self._bx_voucher = None
+        self._solve_t0 = time.monotonic()
         self._verify_url = page_url or ""
         self._emit_telemetry_event("solve_started", mode="cdp", page_url=page_url)
         self._emit_step("solve", "solve_started", "started", mode="cdp", page_url=page_url)
@@ -621,6 +623,7 @@ class SliderSolver(ProviderSolverMixin):
         self.last_fallback_used = None
         self._is_cdp_mode = True
         self._bx_voucher = None
+        self._solve_t0 = time.monotonic()
         self.page = page
         self.context = page.context
         self._verify_url = page_url or getattr(page, "url", "") or ""
@@ -809,6 +812,18 @@ class SliderSolver(ProviderSolverMixin):
             # 票据头出现（checkCookie 链走通）或 x5sec 直接落 jar 即收割。
             # 人工拖动后若仍无果才返回失败。须留足 solve 看门狗预算。
             wait_s = max(0.0, self.MANUAL_VOUCHER_WAIT_S)
+            # 人工等待必须让位 solve 硬看门狗：自动阶段已耗掉的时间从预算里扣。
+            # 否则等待中途被看门狗 cancel，用户临门一脚的拖动成果随 cancel 丢弃
+            # （看门狗出口不结算票据，直接 False/None）。
+            _t0 = getattr(self, "_solve_t0", None)
+            if _t0 is not None:
+                remaining = self.SOLVE_WATCHDOG_TIMEOUT_S - (time.monotonic() - _t0) - 15.0
+                if remaining < wait_s:
+                    wait_s = max(0.0, remaining)
+                    logger.info(
+                        f"[{self.pure_user_id}] manual wait capped to {wait_s:.0f}s "
+                        f"by solve watchdog budget"
+                    )
             logger.info(f"[{self.pure_user_id}] CDP mode: waiting up to {wait_s:.0f}s for manual pass on the visible page")
             self._emit_step("solve", "manual_wait", "started", timeout_s=wait_s)
             loop = asyncio.get_event_loop()

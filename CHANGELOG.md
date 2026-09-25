@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.20] - 2026-09-25
+
+二轮 review 发现的预算错配：CDP 人工等待期（默认 300s）不感知 solve 硬看门狗（600s）——自动拖动阶段一旦耗掉 300s+，人工等待会在中途被看门狗 cancel，用户临门一脚拖过的成果随 cancel 整体丢弃（看门狗出口只断开连接并返回 False/None，不结算票据）。
+
+### Changed
+- 三个 solve 入口（`_solve_impl` / `_solve_on_existing_impl` / `solve_on_page`）记录 `self._solve_t0`（monotonic）。
+- `_fallback_or_fail` CDP 分支的人工等待按剩余看门狗预算截断：`min(MANUAL_VOUCHER_WAIT_S, SOLVE_WATCHDOG_TIMEOUT_S - elapsed - 15s)`，截断时打日志。自动阶段快时等待仍是足额 300s，只有自动阶段慢时才让位——宁可短等，不可被硬 cancel。
+
+### Notes
+- 测试新增预算截断用例（`_solve_t0` 回拨 590s → 等待立即让位）；入口重置用例补验 `_solve_t0` 已记录。
+
 ## [0.6.19] - 2026-09-25
 
 生产实测：用户 Chrome 开着省内存模式时，`connect_over_cdp` 默认 180s 超时会在"附加冻结标签"阶段挂满（裸 CDP 与逐 target 探针均正常，仅附加挂起），白白损失一个周期。用户决定保留省内存模式，故在代码侧收敛损失。
