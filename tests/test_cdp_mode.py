@@ -50,7 +50,8 @@ class _FakeChromium:
     def __init__(self, browser):
         self._browser = browser
 
-    async def connect_over_cdp(self, endpoint):
+    async def connect_over_cdp(self, endpoint, timeout=None):
+        # 0.6.19 起带 timeout 参数（冻结标签快速失败）；fakes 需兼容
         return self._browser
 
 
