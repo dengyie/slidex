@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.6.22] - 2026-09-25
+
+容器浏览器指纹加固：CDP 真机模式已 2/2 实战过滑，本版针对"VPS 容器浏览器"这一兜底环节——真人拖也 code=300 的环境指纹问题。
+
+### Added
+- **浏览器 channel 升级**：`_resolve_browser_channel()` auto 探测 `google-chrome-stable`（自动切 `channel="chrome"`）；约定与 stealth.py 相同的 `XY_SLIDER_BROWSER_CHANNEL` env（显式 `chromium/none/off` 强制回自带 Chromium）。容器自带 Chromium 的 `userAgentData.brands` 露 "Chromium" 是强自动化信号，真 Chrome 无此问题。
+- **指纹自审计**：`_init_browser` 容器模式末尾一条只读 evaluate，把 UA / brands / platformVersion / WebGL 渲染串 / 字体集 / 时区 / 硬件并发等硬信号量化成一行 INFO 日志（`XY_SLIDER_FINGERPRINT_AUDIT=0` 可关；CDP 真机模式不跑——真机是对照组）。配套独立探针 `slidex/scripts/fingerprint_probe.py`（支持 `--connect-cdp` 审计外部真机作对照）。
+
+### Changed
+- **环境一致性旗标**：新增 `ENV_CONSISTENCY_LAUNCH_ARGS`（`--use-angle=gl` 让 ANGLE 走桌面 GL——配合镜像内 `libgl1-mesa-dri` 即 Mesa llvmpipe，真实 Linux 无加速机器的合法特征，替代基本只在自动化环境出现的 "Google SwiftShader"；`--lang=zh-CN --accept-lang=zh-CN` 对齐账号真实客户端语言）。patchright 后端下只补这组旗标，反检测面继续交给 patchright 本体。
+
+### Notes
+- 需镜像侧配合：bot Dockerfile 安装 google-chrome-stable（amd64）+ `libgl1-mesa-dri` + `fonts-noto-cjk`（中文平台会话无 CJK 字体是矛盾信号）。
+- 测试：`tests/test_browser_fingerprint.py` ×9（channel 解析 / patchright 旗标最小面 / env 强制 chromium / 审计开关与失败不阻断）。
+
 ## [0.6.21] - 2026-09-25
 
 生产级 review 修复：CDP 模式的两个结构性缺口——并发失控与页面劫持。

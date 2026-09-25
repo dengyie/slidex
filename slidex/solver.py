@@ -17,7 +17,23 @@ def _resolve_automation_backend() -> str:
         return "patchright"
     return "playwright"
 
-from slidex._stealth_patch import STEALTH_LAUNCH_ARGS, STEALTH_INIT_SCRIPT
+
+def _resolve_browser_channel() -> Optional[str]:
+    """浏览器 channel：优先真 Google Chrome。
+
+    容器自带 Chromium 的 `userAgentData.brands` 露 "Chromium"（真 Chrome 用户极少
+    用 Chromium 上网），是强自动化信号；装 google-chrome-stable 后 auto 模式自动
+    升级为 chrome channel。约定与 stealth.py 相同的 XY_SLIDER_BROWSER_CHANNEL env，
+    显式设 chromium/none/off 可强制回自带 Chromium。
+    """
+    explicit = os.environ.get("XY_SLIDER_BROWSER_CHANNEL", "").strip().lower()
+    if explicit:
+        return None if explicit in ("chromium", "none", "off") else explicit
+    if shutil.which("google-chrome-stable") or shutil.which("google-chrome"):
+        return "chrome"
+    return None
+
+from slidex._stealth_patch import STEALTH_LAUNCH_ARGS, STEALTH_INIT_SCRIPT, ENV_CONSISTENCY_LAUNCH_ARGS
 from slidex._trajectory import generate_trajectory, slide_end_hold_range, trajectory_to_points
 from slidex._image_match import SliderImageMatcher
 from slidex._trajectory_pool import SliderTrajectoryPool
@@ -70,6 +86,8 @@ class SliderSolver(ProviderSolverMixin):
     OFFSET_CORRECTION_DEFAULT = -35
     OFFSET_CORRECTION_LIMITS = (-100, 100)
     CLOSE_TIMEOUT_S = 30.0
+    # 容器浏览器指纹自审计单次预算：一条 evaluate + 一行日志，超时视为审计失败不阻断 solve
+    FINGERPRINT_AUDIT_TIMEOUT_S = 15.0
     # solve 全程硬看门狗：须大于内部各段预算之和（profile 锁等待 60 + 页面加载
     # ~60 + provider/legacy 重试 ~120 + remote 人工会话 180）。生产（1GB VPS）
     # 曾在死驱动连接上挂死 16h+，局部预算防不住挂在不同协议调用上的死等。
@@ -1303,16 +1321,22 @@ class SliderSolver(ProviderSolverMixin):
 
     async def _init_browser(self):
         self.automation_backend = _resolve_automation_backend()
-        self._emit_step("browser", "browser_init", "started", headless=self.headless, proxy_enabled=bool(self.proxy), backend=self.automation_backend)
+        channel = _resolve_browser_channel()
+        self.browser_channel = channel
+        self._emit_step("browser", "browser_init", "started", headless=self.headless, proxy_enabled=bool(self.proxy), backend=self.automation_backend, channel=channel or "bundled-chromium")
         await ensure_profile_chromium_closed(str(self.profile_dir))
         self.profile_dir.mkdir(parents=True, exist_ok=True)
 
         pw = await (patchright_async_playwright if self.automation_backend == "patchright" else async_playwright)().start()
         self._playwright = pw
-        kwargs = {"headless": self.headless, "args": STEALTH_LAUNCH_ARGS}
+        kwargs = {"headless": self.headless,
+                  "args": list(STEALTH_LAUNCH_ARGS) + list(ENV_CONSISTENCY_LAUNCH_ARGS)}
         if self.automation_backend == "patchright":
-            # patchright 自带反检测注入与 launch 参数处理；多余的 init_script/启动参数反而扩大指纹面
-            kwargs.pop("args", None)
+            # patchright 自带反检测注入与 launch 参数处理；多余的 init_script/启动参数
+            # 反而扩大指纹面。只补环境一致性旗标（GL 渲染后端/语言），反检测面交给本体。
+            kwargs["args"] = list(ENV_CONSISTENCY_LAUNCH_ARGS)
+        if channel:
+            kwargs["channel"] = channel
         proxy_host = self.proxy.get("proxy_host")
         proxy_port = self.proxy.get("proxy_port")
         if proxy_host and proxy_port:
@@ -1356,6 +1380,98 @@ class SliderSolver(ProviderSolverMixin):
                 logger.warning(f"[{self.pure_user_id}] CDP session failed")
                 self._emit_step("browser", "cdp_session", "failed")
         self._emit_step("browser", "browser_init", "ok", profile_dir=str(self.profile_dir))
+        await self._audit_browser_fingerprint()
+
+    # 指纹自审计：CDP 模式（用户真机）不跑——真机是对照组不是被审计对象
+    _FINGERPRINT_AUDIT_JS = r"""
+(async () => {
+  const out = {};
+  out.ua = navigator.userAgent;
+  out.webdriver = navigator.webdriver;
+  out.platform = navigator.platform;
+  out.languages = (navigator.languages || []).join(',');
+  out.hwConcurrency = navigator.hardwareConcurrency;
+  out.deviceMemory = navigator.deviceMemory;
+  out.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  out.tzOffset = new Date().getTimezoneOffset();
+  out.screen = screen.width + 'x' + screen.height + '@' + screen.colorDepth + ' dpr=' + devicePixelRatio;
+  out.viewport = innerWidth + 'x' + innerHeight;
+  out.plugins = navigator.plugins ? navigator.plugins.length : -1;
+  out.pdfViewer = !!navigator.pdfViewerEnabled;
+  out.chromeKeys = (window.chrome && typeof window.chrome === 'object') ? Object.keys(window.chrome).join('|') : '';
+  try {
+    const uad = navigator.userAgentData;
+    if (uad) {
+      out.brands = (uad.brands || []).map(b => b.brand + ' ' + b.version).join(' / ');
+      out.uadPlatform = uad.platform;
+      const he = await uad.getHighEntropyValues(['platformVersion', 'architecture', 'bitness', 'model', 'uaFullVersion']);
+      out.platformVersion = he.platformVersion;
+      out.arch = he.architecture;
+      out.bitness = he.bitness;
+      out.uaFullVersion = he.uaFullVersion;
+    }
+  } catch (e) { out.uadError = String(e).slice(0, 80); }
+  try {
+    const c = document.createElement('canvas');
+    const gl = c.getContext('webgl2') || c.getContext('webgl');
+    if (gl) {
+      const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+      out.glVendor = dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR);
+      out.glRenderer = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+    } else { out.glRenderer = '(no webgl)'; }
+  } catch (e) { out.glRenderer = 'err:' + String(e).slice(0, 60); }
+  try {
+    const probe = ['Segoe UI', 'Microsoft YaHei', 'SimSun', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', 'Arial', 'Times New Roman', 'Helvetica', 'Roboto', 'Ubuntu', 'DejaVu Sans', 'Liberation Sans'];
+    const s = document.createElement('span');
+    s.style.cssText = 'position:absolute;visibility:hidden;font-size:48px';
+    s.textContent = 'mmmmmmmmmmlli';
+    document.body.appendChild(s);
+    const base = {};
+    for (const b of ['monospace', 'serif', 'sans-serif']) { s.style.fontFamily = b; base[b] = s.offsetWidth; }
+    const found = [];
+    for (const f of probe) {
+      for (const b of ['monospace', 'serif', 'sans-serif']) {
+        s.style.fontFamily = f + ',' + b;
+        if (s.offsetWidth !== base[b]) { found.push(f); break; }
+      }
+    }
+    s.remove();
+    out.fonts = found.join('|') || '(none)';
+  } catch (e) { out.fonts = 'err:' + String(e).slice(0, 60); }
+  return out;
+})()
+"""
+
+    async def _audit_browser_fingerprint(self):
+        """容器浏览器指纹自审计：把 UA/brands/WebGL 渲染串/字体/时区等硬信号量化进日志。
+
+        容器路径的滑块被拒已定位为环境指纹问题（真人拖也 code=300，见部署文档
+        0.6.15 节）；先看清容器浏览器在风控眼里长什么样，再决定下一轮迭代。
+        一次性 evaluate + 一行 INFO，XY_SLIDER_FINGERPRINT_AUDIT=0 可关。
+        """
+        if os.environ.get("XY_SLIDER_FINGERPRINT_AUDIT", "1").strip().lower() in {"0", "false", "off", "no"}:
+            return
+        if not getattr(self, "page", None):
+            return
+        try:
+            info = await await_with_budget(
+                self.page.evaluate(self._FINGERPRINT_AUDIT_JS), self.FINGERPRINT_AUDIT_TIMEOUT_S
+            )
+        except Exception as e:
+            logger.warning(f"[{self.pure_user_id}] fingerprint audit failed: {e}")
+            return
+        if not isinstance(info, dict):
+            logger.warning(f"[{self.pure_user_id}] fingerprint audit returned non-dict: {type(info).__name__}")
+            return
+        order = (
+            "ua", "brands", "uadPlatform", "platformVersion", "arch", "bitness", "uaFullVersion",
+            "platform", "webdriver", "glVendor", "glRenderer", "languages", "timezone", "tzOffset",
+            "hwConcurrency", "deviceMemory", "screen", "viewport", "plugins", "pdfViewer",
+            "chromeKeys", "fonts",
+        )
+        parts = [f"{k}={info[k]}" for k in order if info.get(k) not in (None, "")]
+        extra = [f"{k}={v}" for k, v in info.items() if k.endswith("Error")]
+        logger.info(f"[{self.pure_user_id}] browser fingerprint | " + " | ".join(parts + extra))
 
     async def _connect_existing_browser(self, cdp_endpoint: str, page_url: str = ""):
         """连接已有浏览器（CDP 模式）— 不启动新浏览器"""

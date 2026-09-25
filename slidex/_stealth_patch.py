@@ -45,6 +45,16 @@ STEALTH_LAUNCH_ARGS = [
     '--disable-notifications',
 ]
 
+# 环境一致性旗标（两个后端都补，含 patchright）：容器无 GPU 时 Chromium 默认落
+# SwiftShader，"Google SwiftShader" 渲染串基本只在自动化环境出现；--use-angle=gl
+# 让 ANGLE 走桌面 GL（容器装 libgl1-mesa-dri 后即 Mesa llvmpipe）——真实 Linux
+# 无加速机器的合法特征。语言对齐账号真实客户端（中文平台的会话里 en-US 是矛盾信号）。
+ENV_CONSISTENCY_LAUNCH_ARGS = [
+    '--use-angle=gl',
+    '--lang=zh-CN',
+    '--accept-lang=zh-CN,zh;q=0.9',
+]
+
 # 反检测 JS 脚本 - 在 page.add_init_script() 中注入
 STEALTH_INIT_SCRIPT = r"""
 // ====== NoCaptcha 反检测脚本 ======
