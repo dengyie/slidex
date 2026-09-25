@@ -1277,7 +1277,14 @@ class SliderSolver(ProviderSolverMixin):
             logger.warning(f"[{self.pure_user_id}] CDP session failed (existing browser)")
 
         if page_url:
-            await self.page.goto(page_url, wait_until="networkidle", timeout=45000)
+            # CDP 模式也要带账号会话 cookie：punish 的 x5secdata 绑定 bot 侧会话，
+            # 借外部真实浏览器（用户 PC Chrome）的是设备指纹，会话身份必须仍是
+            # bot 账号——否则票据发到浏览器自己的会话上，bot 合并无效。
+            try:
+                await self._inject_cookies()
+            except Exception as e:
+                logger.warning(f"[{self.pure_user_id}] CDP cookie inject failed: {e}")
+            await self._goto_page(self.page, page_url)
             await asyncio.sleep(3)
 
     async def _inject_cookies(self):

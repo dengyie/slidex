@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.15] - 2026-09-25
+
+重新扫码验证给出决定性证据：**全新登录态 3 秒内即触发 FAIL_SYS_USER_VALIDATE**，且人工面板里的真人轨迹同样被拒（code=300）。风控标记不在 cookie，在设备/会话层——VPS 容器内 headless Chromium 的设备指纹与账号历史登录设备（用户 PC）完全不匹配是主嫌疑。轨迹拟人化在此前提下收益有限。
+
+### Added
+- **CDP 模式会话身份保障**：`_connect_existing_browser` 连接外部真实浏览器后、导航前注入 bot 的账号会话 cookie（`_inject_cookies`，按 verify_url 域解析 `cookies_str`）。punish 的 x5secdata 绑定 bot 会话——借外部浏览器（用户 PC Chrome 经 `ssh -R` 反向隧道）的是**设备指纹**，会话身份必须仍是 bot 账号，否则票据发到浏览器自己的会话上。
+- CDP 导航改用 `_goto_page`（networkidle 超时降级 domcontentloaded），与浏览器模式一致。
+
+### Notes
+- 配套 bot 侧 `XY_SLIDER_CDP_ENDPOINT` 开关（同 commit 链）。测试 424 绿（新增 test_cdp_mode 2 例）。
 ## [0.6.14] - 2026-09-25
 
 0.6.13 生产 10 小时观察：重试环代码正确但**从未到达**——浏览器路径在拖动之前就死了。周期画像：`page_load` networkidle 45s 超时降级 domcontentloaded → `page.page_state failed`（渲染进程在内存饥饿下崩溃）→ `No provider detected` → legacy 15s 找不到滑块 → **solve 挂死**（不同周期挂在不同的协议调用上：`_save_debug_screenshot` 的 `page.screenshot`、死驱动连接上的等待均可能永不返回），最长挂死 16h+，token 刷新任务随之整体卡死、僵尸 chromium 驻留。局部预算（`CLOSE_TIMEOUT_S` 等）只护清理段，防不住挂在主流程上的死等。
