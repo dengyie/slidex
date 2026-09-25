@@ -492,6 +492,7 @@ class SliderSolver(ProviderSolverMixin):
     async def _solve_impl(self, verify_url):
         self.last_fallback_used = None
         self._is_cdp_mode = False
+        self._bx_voucher = None
         self._emit_telemetry_event("solve_started", mode="browser", verify_url=verify_url)
         self._emit_step("solve", "solve_started", "started", mode="browser", verify_url=verify_url)
         logger.info(f"[{self.pure_user_id}] solving (mode={self.trajectory_mode})...")
@@ -583,6 +584,7 @@ class SliderSolver(ProviderSolverMixin):
     ) -> Tuple[bool, Optional[dict]]:
         self.last_fallback_used = None
         self._is_cdp_mode = True
+        self._bx_voucher = None
         self._verify_url = page_url or ""
         self._emit_telemetry_event("solve_started", mode="cdp", page_url=page_url)
         self._emit_step("solve", "solve_started", "started", mode="cdp", page_url=page_url)
@@ -615,6 +617,7 @@ class SliderSolver(ProviderSolverMixin):
         """在调用方持有的 Playwright Page 上求解，不接管浏览器生命周期。"""
         self.last_fallback_used = None
         self._is_cdp_mode = True
+        self._bx_voucher = None
         self.page = page
         self.context = page.context
         self._verify_url = page_url or getattr(page, "url", "") or ""
@@ -775,6 +778,28 @@ class SliderSolver(ProviderSolverMixin):
         return await self._fallback_or_fail(verify_url)
 
     async def _fallback_or_fail(self, verify_url):
+        # 手动通过收割：checkCookie 链已在页面层走通并发出 bx-x5sec 票据
+        # （典型场景：CDP 模式下真人在外部浏览器拖过了滑块），但 provider 的
+        # 结果等待器只认自己流水线的完成信号，legacy 循环又只见"滑块已消失"，
+        # 全部重试耗尽走到这里 —— 页面层验证其实是成功的。此时绝不能把已捕获
+        # 的票据当失败丢弃：结算成 x5sec 返回，bot 侧才能合并并重试 token API。
+        if self._bx_voucher:
+            logger.info(f"[{self.pure_user_id}] bx voucher captured earlier — harvesting page-level pass")
+            self._emit_telemetry_event("manual_voucher_harvested", source="fallback_or_fail")
+            self._emit_step("solve", "voucher_harvest", "started", reason="voucher_captured_before_fail")
+            try:
+                cookies = await self._get_cookies()
+                cookies = await self._settle_x5sec(self.page, cookies)
+            except Exception as e:
+                logger.warning(f"[{self.pure_user_id}] voucher harvest settle failed: {e}")
+                self._emit_step("solve", "voucher_harvest", "failed", reason=str(e))
+                cookies = None
+            if self._has_validation_cookie(cookies):
+                logger.success(f"[{self.pure_user_id}] pass! (manual voucher harvest)")
+                self._emit_step("solve", "voucher_harvest", "ok")
+                return True, cookies
+            logger.warning(f"[{self.pure_user_id}] voucher present but x5sec did not settle")
+            self._emit_step("solve", "voucher_harvest", "failed", reason="x5sec_absent")
         if self._is_cdp_mode:
             logger.warning(f"[{self.pure_user_id}] CDP mode: skipping remote fallback")
             self._emit_telemetry_event("fallback_skipped", reason="cdp_mode")

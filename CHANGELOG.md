@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.16] - 2026-09-25
+
+CDP 模式首个生产周期（用户 PC Chrome 经反向隧道）出现决定性一幕：**真人在外部浏览器拖过滑块，`checkCookie` 链走通、`bx voucher header captured`**（0.6.10 旁路票据链首次被打通）——但 provider 结果等待器只认自己流水线的完成信号（`timeout waiting for result`），legacy 循环只见"滑块已消失"（人已拖过），全部重试耗尽走 `_fallback_or_fail`，**把已捕获的 bx-x5sec 票据当失败丢弃**，返回 `(False, None)`。
+
+### Added
+- **手动通过收割**：`_fallback_or_fail` 失败出口先检查 `_bx_voucher`——已捕获则走既有 `_settle_x5sec` 结算（bx_header → x5sec 注入 context 并合入 cookies），x5sec 落地才返回成功；结算异常或无 x5sec 照旧返回失败，不谎报。telemetry `manual_voucher_harvested`、step `voucher_harvest`。
+- 每个 solve 入口（`_solve_impl` / `_solve_on_existing_impl` / `solve_on_page`）重置 `_bx_voucher`，防止上一轮残留票据跨轮误判。
+
+### Notes
+- 测试 429 绿（新增 `tests/test_voucher_harvest.py` 5 例）。
+- 结论性验证：设备指纹假设部分成立——真手 + 真机 + 家宽直连能过（code=0 → voucher），VPS 容器内合成轨迹始终 300。剩余问题只是"自动流水线没接住人工通过"，本版修复。
+
 ## [0.6.15] - 2026-09-25
 
 重新扫码验证给出决定性证据：**全新登录态 3 秒内即触发 FAIL_SYS_USER_VALIDATE**，且人工面板里的真人轨迹同样被拒（code=300）。风控标记不在 cookie，在设备/会话层——VPS 容器内 headless Chromium 的设备指纹与账号历史登录设备（用户 PC）完全不匹配是主嫌疑。轨迹拟人化在此前提下收益有限。
