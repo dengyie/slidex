@@ -163,6 +163,37 @@ async def test_init_browser_env_forces_chromium(monkeypatch, tmp_path):
     assert s.browser_channel is None
 
 
+@pytest.mark.asyncio
+async def test_init_browser_channel_launch_failure_falls_back(monkeypatch, tmp_path):
+    monkeypatch.delenv("XY_SLIDER_AUTOMATION_BACKEND", raising=False)
+    monkeypatch.delenv("XY_SLIDER_BROWSER_CHANNEL", raising=False)
+    monkeypatch.setattr(solver_module.shutil, "which", lambda name: "/usr/bin/google-chrome-stable" if name.startswith("google-chrome") else None)
+
+    class _FlakyChromium(_FakeChromium):
+        async def launch_persistent_context(self, user_data_dir, **kwargs):
+            if "channel" in kwargs:
+                self._captured.setdefault("failed_kwargs", []).append(dict(kwargs))
+                raise RuntimeError("browserType.launch: chrome executable not found")
+            return await super().launch_persistent_context(user_data_dir, **kwargs)
+
+    class _FlakyPW(_FakePW):
+        def __init__(self, captured):
+            self.chromium = _FlakyChromium(captured)
+
+    captured = {}
+    monkeypatch.setattr(solver_module, "async_playwright", lambda: _FlakyPW(captured))
+    rec = _Recorder()
+    monkeypatch.setattr(solver_module, "logger", rec)
+
+    s = _make_solver(tmp_path)
+    await s._init_browser()
+
+    assert s.browser_channel is None
+    assert any("channel" in k for k in captured.get("failed_kwargs", []))
+    assert "channel" not in captured  # 重试成功的那次 launch 已无 channel
+    assert any("falling back to bundled chromium" in m for m in rec.warnings)
+
+
 # ---------- 指纹自审计 ----------
 
 @pytest.mark.asyncio

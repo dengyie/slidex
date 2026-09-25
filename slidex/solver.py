@@ -1345,11 +1345,23 @@ class SliderSolver(ProviderSolverMixin):
                 pt = "http"
             kwargs["proxy"] = {"server": f"{pt}://{proxy_host}:{proxy_port}"}
         self._heal_stale_singleton_lock()
-        self.context = await pw.chromium.launch_persistent_context(
-            user_data_dir=str(self.profile_dir),
-            viewport={"width": 1920, "height": 1080},
-            **kwargs,
-        )
+        launch_kwargs = {"user_data_dir": str(self.profile_dir), "viewport": {"width": 1920, "height": 1080}, **kwargs}
+        try:
+            self.context = await pw.chromium.launch_persistent_context(**launch_kwargs)
+        except Exception as e:
+            # channel 启动失败（如 chrome 可执行路径解析异常）时回退自带 Chromium：
+            # 滑块路径不能因升级引入的单点故障整体瘫痪；profile 锁类错误重试同样无益，原样抛出
+            if channel and "channel" in kwargs and "profile in use" not in str(e).lower():
+                logger.warning(f"[{self.pure_user_id}] channel={channel} launch failed ({e}); falling back to bundled chromium")
+                self.browser_channel = None
+                kwargs.pop("channel")
+                self.context = await pw.chromium.launch_persistent_context(
+                    user_data_dir=str(self.profile_dir),
+                    viewport={"width": 1920, "height": 1080},
+                    **kwargs,
+                )
+            else:
+                raise
         self.page = await self.context.new_page()
         pid = find_chromium_pid_by_user_data_dir(str(self.profile_dir))
         if pid:
