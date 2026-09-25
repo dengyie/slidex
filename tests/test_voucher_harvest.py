@@ -15,6 +15,11 @@ import pytest
 from slidex.solver import SliderSolver
 
 
+class _LivePage:
+    def is_closed(self):
+        return False
+
+
 def _make_solver() -> SliderSolver:
     solver = SliderSolver.__new__(SliderSolver)
     solver.pure_user_id = "t"
@@ -114,3 +119,97 @@ async def test_solve_on_existing_impl_resets_stale_voucher():
     ok, cookies = await solver._solve_on_existing_impl("http://127.0.0.1:9222", "")
     assert (ok, cookies) == (True, {"x5sec": "1"})
     assert seen["voucher"] is None
+
+
+@pytest.mark.asyncio
+async def test_cdp_manual_wait_settles_voucher_when_user_drags():
+    """0.6.17: 自动拖动耗尽后进入人工等待期，等待期间票据到达 → 收割成功。"""
+    solver = _make_solver()
+    solver.MANUAL_VOUCHER_WAIT_S = 5.0
+
+    calls = {"n": 0}
+
+    async def _fake_cookies():
+        calls["n"] += 1
+        # 第 2 次轮询时模拟用户拖过：票据头已被 _on_response 捕获
+        if calls["n"] >= 2:
+            solver._bx_voucher = "x5sec=manual_pass; Path=/;"
+        return {"unb": "1"}
+
+    async def _fake_settle(page, cookies):
+        return {"unb": "1", "x5sec": "manual_pass"}
+
+    solver._get_cookies = _fake_cookies
+    solver._settle_x5sec = _fake_settle
+    solver.page = _LivePage()
+
+    ok, cookies = await solver._fallback_or_fail("https://x/punish?x5secdata=1")
+    assert ok is True
+    assert cookies == {"unb": "1", "x5sec": "manual_pass"}
+    steps = [c.args[1:3] for c in solver._emit_step.call_args_list]
+    assert ("manual_wait", "ok") in steps
+
+
+@pytest.mark.asyncio
+async def test_cdp_manual_wait_harvests_x5sec_from_jar():
+    """人工拖过后 checkCookie 把 x5sec 写进 jar（无票据头）→ 轮询捕获。"""
+    solver = _make_solver()
+    solver.MANUAL_VOUCHER_WAIT_S = 5.0
+
+    calls = {"n": 0}
+
+    async def _fake_cookies():
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            return {"unb": "1", "x5sec": "jar_pass"}
+        return {"unb": "1"}
+
+    async def _fake_settle(page, cookies):
+        raise AssertionError("settle should not be called without voucher")
+
+    solver._get_cookies = _fake_cookies
+    solver._settle_x5sec = _fake_settle
+    solver.page = _LivePage()
+
+    ok, cookies = await solver._fallback_or_fail("https://x/punish?x5secdata=1")
+    assert ok is True
+    assert cookies == {"unb": "1", "x5sec": "jar_pass"}
+
+
+@pytest.mark.asyncio
+async def test_cdp_manual_wait_expires_returns_failure():
+    """等待期内用户始终没拖 → 超时返回失败，流程照旧降级。"""
+    import time as _time
+    solver = _make_solver()
+    solver.MANUAL_VOUCHER_WAIT_S = 0.5
+
+    async def _fake_cookies():
+        return {"unb": "1"}
+
+    solver._get_cookies = _fake_cookies
+    solver.page = _LivePage()
+
+    t0 = _time.monotonic()
+    ok, cookies = await solver._fallback_or_fail("https://x/punish?x5secdata=1")
+    assert (ok, cookies) == (False, None)
+    assert _time.monotonic() - t0 >= 0.4
+
+
+@pytest.mark.asyncio
+async def test_cdp_manual_wait_exits_when_page_closed():
+    """用户中途关掉 Chrome → 立即退出等待，不再空转。"""
+    solver = _make_solver()
+    solver.MANUAL_VOUCHER_WAIT_S = 30.0
+
+    async def _fake_cookies():
+        return {"unb": "1"}
+
+    class _ClosedPage:
+        def is_closed(self):
+            return True
+
+    solver._get_cookies = _fake_cookies
+    solver.page = _ClosedPage()
+
+    ok, cookies = await solver._fallback_or_fail("https://x/punish?x5secdata=1")
+    assert (ok, cookies) == (False, None)

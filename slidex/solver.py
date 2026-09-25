@@ -75,6 +75,9 @@ class SliderSolver(ProviderSolverMixin):
     # 曾在死驱动连接上挂死 16h+，局部预算防不住挂在不同协议调用上的死等。
     SOLVE_WATCHDOG_TIMEOUT_S = float(os.environ.get("SLIDEX_SOLVE_WATCHDOG", "600"))
     SCREENSHOT_BUDGET_S = 10.0
+    # CDP 模式人工等待期：自动拖动全部失败后，页面留在用户真实浏览器里，
+    # 保持监听等人工拖过（真手通过率远高于合成轨迹）。须小于 solve 看门狗。
+    MANUAL_VOUCHER_WAIT_S = float(os.environ.get("SLIDEX_MANUAL_VOUCHER_WAIT", "300"))
 
     # 同 profile（同账号浏览器目录）互斥：进程内串行化，防止并发求解互踩
     _profile_locks: Dict[str, asyncio.Lock] = {}
@@ -800,8 +803,43 @@ class SliderSolver(ProviderSolverMixin):
                 return True, cookies
             logger.warning(f"[{self.pure_user_id}] voucher present but x5sec did not settle")
             self._emit_step("solve", "voucher_harvest", "failed", reason="x5sec_absent")
-        if self._is_cdp_mode:
-            logger.warning(f"[{self.pure_user_id}] CDP mode: skipping remote fallback")
+        if self._is_cdp_mode and self.page is not None:
+            # CDP 模式最后一张牌：自动拖动耗尽后不立即放弃——页面开在用户
+            # 真实浏览器里，人工随时可能拖过。保持响应监听轮询等待：
+            # 票据头出现（checkCookie 链走通）或 x5sec 直接落 jar 即收割。
+            # 人工拖动后若仍无果才返回失败。须留足 solve 看门狗预算。
+            wait_s = max(0.0, self.MANUAL_VOUCHER_WAIT_S)
+            logger.info(f"[{self.pure_user_id}] CDP mode: waiting up to {wait_s:.0f}s for manual pass on the visible page")
+            self._emit_step("solve", "manual_wait", "started", timeout_s=wait_s)
+            loop = asyncio.get_event_loop()
+            deadline = loop.time() + wait_s
+            while loop.time() < deadline:
+                if self.page is not None and callable(getattr(self.page, "is_closed", None)) and self.page.is_closed():
+                    logger.warning(f"[{self.pure_user_id}] page closed during manual wait")
+                    self._emit_step("solve", "manual_wait", "failed", reason="page_closed")
+                    break
+                if self._bx_voucher:
+                    try:
+                        cookies = await self._get_cookies()
+                        cookies = await self._settle_x5sec(self.page, cookies)
+                    except Exception as e:
+                        logger.warning(f"[{self.pure_user_id}] manual wait settle failed: {e}")
+                        cookies = None
+                    if self._has_validation_cookie(cookies):
+                        logger.success(f"[{self.pure_user_id}] pass! (manual pass during wait)")
+                        self._emit_step("solve", "manual_wait", "ok")
+                        return True, cookies
+                try:
+                    jar = await self._get_cookies()
+                except Exception:
+                    jar = {}
+                if jar.get("x5sec"):
+                    logger.success(f"[{self.pure_user_id}] pass! (x5sec landed in jar during manual wait)")
+                    self._emit_step("solve", "manual_wait", "ok")
+                    return True, jar
+                await asyncio.sleep(1.5)
+            logger.warning(f"[{self.pure_user_id}] manual wait expired without a pass")
+            self._emit_step("solve", "manual_wait", "failed", reason="no_manual_pass")
             self._emit_telemetry_event("fallback_skipped", reason="cdp_mode")
             self._emit_step("remote", "remote_fallback", "skipped", reason="cdp_mode")
             return False, None

@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.17] - 2026-09-25
+
+0.6.16 生产验证：CDP 连接被 Chrome **省内存模式冻结的后台标签**卡死（`connect_over_cdp: Timeout 180s`——`<ws connected>` 后附加冻结 target 挂起；裸 CDP `Browser.getVersion` 与逐 target 探针确认隧道/协议层完好，仅 3 个冻结页挂）。经 `/json/new` + `/json/close` 重建标签后连接秒过。另一时序问题：自动拖动窗口仅 ~60s，用户拖过时监听已关闭（第二次票据流失）。
+
+### Added
+- **CDP 人工等待期**：自动拖动全部失败后不立即返回失败，保持响应监听轮询至多 `SLIDEX_MANUAL_VOUCHER_WAIT`（默认 300s，须小于 solve 看门狗 600s）：票据头出现 → 结算收割；x5sec 直接落 jar → 收割；页面关闭 → 提前退出。收割成功返回 `(True, cookies)`，超时才降级。telemetry/step `manual_wait`。仅 `_is_cdp_mode` 且 page 存在时启用（page=None 保持旧语义，兼容既有测试与无页面场景）。
+
+### Notes
+- 测试 433 绿（新增 `tests/test_voucher_harvest.py` 4 例：等待期收割票据、jar 直收、超时降级、页面关闭提前退出）。
+- 运维建议：用户侧 Chrome 关闭省内存模式（`chrome://settings/performance`），否则冻结标签仍会使 connect 挂起（connect_over_cdp 180s 超时内 solve 看门狗 600s 不会触发，损失一个周期后自愈）。
+
 ## [0.6.16] - 2026-09-25
 
 CDP 模式首个生产周期（用户 PC Chrome 经反向隧道）出现决定性一幕：**真人在外部浏览器拖过滑块，`checkCookie` 链走通、`bx voucher header captured`**（0.6.10 旁路票据链首次被打通）——但 provider 结果等待器只认自己流水线的完成信号（`timeout waiting for result`），legacy 循环只见"滑块已消失"（人已拖过），全部重试耗尽走 `_fallback_or_fail`，**把已捕获的 bx-x5sec 票据当失败丢弃**，返回 `(False, None)`。
