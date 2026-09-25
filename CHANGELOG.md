@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.21] - 2026-09-25
+
+生产级 review 修复：CDP 模式的两个结构性缺口——并发失控与页面劫持。
+
+### Added
+- **CDP 端点互斥**：`solve_on_existing_page` 按 endpoint 键控 `asyncio.Lock` 串行化。并发管理器只覆盖容器内浏览器路径（stealth），CDP 并发进入会互抢页面、互注账号 cookie——多账号同时被罚时会在同一真实浏览器里互相污染会话。同 endpoint 排队（busy 打日志），不同 endpoint 互不阻塞；排队等待不占自己的看门狗预算。
+
+### Changed
+- **专用标签页**：`_connect_existing_browser` 不再复用 `pages[0]`——原实现把用户已打开的页面导航到 punish 页（原内容被顶掉），且 pages[0] 可能是被省内存模式冻结的页。改为 `context.new_page()` 开专用页（`_cdp_owned_page` 标记），solve 结束后 `_close_cdp_only` 预算化关闭自开页（调用方持有页与用户原页绝不动）。
+
+### Notes
+- 测试：`test_cdp_mode.py` fakes 支持 `new_page`/`close` 语义；断言改为"不劫持用户页"；新增同 endpoint 串行 / 跨 endpoint 并行 / 自开页关闭三例。
+
 ## [0.6.20] - 2026-09-25
 
 二轮 review 发现的预算错配：CDP 人工等待期（默认 300s）不感知 solve 硬看门狗（600s）——自动拖动阶段一旦耗掉 300s+，人工等待会在中途被看门狗 cancel，用户临门一脚拖过的成果随 cancel 整体丢弃（看门狗出口只断开连接并返回 False/None，不结算票据）。

@@ -79,6 +79,19 @@ class SliderSolver(ProviderSolverMixin):
     # 保持监听等人工拖过（真手通过率远高于合成轨迹）。须小于 solve 看门狗。
     MANUAL_VOUCHER_WAIT_S = float(os.environ.get("SLIDEX_MANUAL_VOUCHER_WAIT", "300"))
 
+    # CDP 互斥：同一外部浏览器（同一 endpoint）同时只允许一个 solve。并发管理器
+    # 只覆盖容器内浏览器路径（stealth），CDP 并发进入会互抢页面、互注账号 cookie
+    # （多账号同时被罚时会在同一真实浏览器里互相污染会话）。
+    _cdp_solve_locks: dict = {}
+
+    @classmethod
+    def _cdp_solve_lock(cls, cdp_endpoint: str) -> asyncio.Lock:
+        lock = cls._cdp_solve_locks.get(cdp_endpoint)
+        if lock is None:
+            lock = asyncio.Lock()
+            cls._cdp_solve_locks[cdp_endpoint] = lock
+        return lock
+
     # 同 profile（同账号浏览器目录）互斥：进程内串行化，防止并发求解互踩
     _profile_locks: Dict[str, asyncio.Lock] = {}
     _profile_locks_guard = threading.Lock()
@@ -114,6 +127,7 @@ class SliderSolver(ProviderSolverMixin):
         self.profile_dir = profile_root / f"slider_{self.pure_user_id}"
         # profile_dir creation deferred to _init_browser (not needed in CDP mode)
         self._playwright = None
+        self._cdp_owned_page = False
         self.context = None
         self.page = None
         self._cdp = None
@@ -557,10 +571,17 @@ class SliderSolver(ProviderSolverMixin):
         Returns:
             (success, cookies)
         """
-        result = await await_with_budget(
-            self._solve_on_existing_impl(cdp_endpoint, page_url),
-            self.SOLVE_WATCHDOG_TIMEOUT_S,
-        )
+        # 同一外部浏览器串行：排队等待不占自己的看门狗预算（预算只覆盖本 solve）
+        lock = self._cdp_solve_lock(cdp_endpoint)
+        if lock.locked():
+            logger.warning(
+                f"[{self.pure_user_id}] CDP endpoint busy, queuing solve (same external browser)"
+            )
+        async with lock:
+            result = await await_with_budget(
+                self._solve_on_existing_impl(cdp_endpoint, page_url),
+                self.SOLVE_WATCHDOG_TIMEOUT_S,
+            )
         if result is None:
             logger.error(
                 f"[{self.pure_user_id}] CDP solve watchdog fired after "
@@ -1349,10 +1370,11 @@ class SliderSolver(ProviderSolverMixin):
             raise RuntimeError(f"No contexts found on CDP endpoint: {cdp_endpoint}")
         self.context = browser.contexts[0]
 
-        if self.context.pages:
-            self.page = self.context.pages[0]
-        else:
-            self.page = await self.context.new_page()
+        # 专用标签页：不再复用 pages[0]——那会把用户已打开的页面导航到 punish
+        # 页（原内容被顶掉），且 pages[0] 可能是被省内存模式冻结的页。solve
+        # 结束后由 _close_cdp_only 关闭自开页。
+        self.page = await self.context.new_page()
+        self._cdp_owned_page = True
 
         await self.page.add_init_script(STEALTH_INIT_SCRIPT)
         self.page.on("response", self._on_response)
@@ -1865,7 +1887,23 @@ class SliderSolver(ProviderSolverMixin):
         self._cleanup_profiles()
 
     async def _close_cdp_only(self):
-        """CDP 模式清理 — 不关闭外部浏览器，只断开连接"""
+        """CDP 模式清理 — 不关闭外部浏览器，只断开连接与关闭自开标签页"""
+        if getattr(self, "_cdp_owned_page", False):
+            self._cdp_owned_page = False
+            owned = getattr(self, "page", None)
+            if owned is not None:
+                is_closed = getattr(owned, "is_closed", None)
+                already_closed = False
+                if callable(is_closed):
+                    try:
+                        already_closed = bool(is_closed())
+                    except Exception:
+                        already_closed = False
+                if not already_closed:
+                    try:
+                        await await_with_budget(owned.close(), self.CLOSE_TIMEOUT_S)
+                    except Exception:
+                        pass
         if self._cdp:
             try:
                 await await_with_budget(self._cdp.detach(), self.CLOSE_TIMEOUT_S)
