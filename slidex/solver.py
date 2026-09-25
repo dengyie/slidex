@@ -33,7 +33,7 @@ def _resolve_browser_channel() -> Optional[str]:
         return "chrome"
     return None
 
-from slidex._stealth_patch import STEALTH_LAUNCH_ARGS, STEALTH_INIT_SCRIPT, ENV_CONSISTENCY_LAUNCH_ARGS
+from slidex._stealth_patch import STEALTH_LAUNCH_ARGS, STEALTH_INIT_SCRIPT, ENV_CONSISTENCY_LAUNCH_ARGS, MEMORY_GUARD_LAUNCH_ARGS
 from slidex._trajectory import generate_trajectory, slide_end_hold_range, trajectory_to_points
 from slidex._image_match import SliderImageMatcher
 from slidex._trajectory_pool import SliderTrajectoryPool
@@ -731,6 +731,12 @@ class SliderSolver(ProviderSolverMixin):
                 success, cookies = await self._solve_with_provider(self.page)
                 if success:
                     return True, cookies
+                if self._bx_voucher:
+                    # 拖动已挣到票据，但 provider 结果等待器只认自家流水线完成信号
+                    # （"timeout waiting for result"）。跳过 legacy 全套仪式
+                    # （15s 找滑块 + 重试轮）直达收割——生产实测这段白耗 ~40s。
+                    logger.info(f"[{self.pure_user_id}] voucher captured during provider solve — skipping legacy ceremony")
+                    return await self._fallback_or_fail(verify_url)
                 logger.warning(f"[{self.pure_user_id}] provider mode failed, falling back to legacy")
             else:
                 logger.warning(f"[{self.pure_user_id}] provider detection failed, using legacy mode")
@@ -784,6 +790,10 @@ class SliderSolver(ProviderSolverMixin):
                         logger.success(f"[{self.pure_user_id}] pass! (recorded, attempt={attempt})")
                         cookies = await self._settle_x5sec(self.page, cookies)
                         return True, cookies
+                    if self._bx_voucher:
+                        # 本轮拖动实际已过（checkCookie 链发出票据），outcome 等待器
+                        # 没看到而已——立即收割，不再空耗剩余重试
+                        return await self._fallback_or_fail(verify_url)
                     if attempt < self.MAX_RETRIES:
                         await asyncio.sleep(2 + random.uniform(1, 2))
                         if not await self._wait_slider(10.0):
@@ -813,6 +823,9 @@ class SliderSolver(ProviderSolverMixin):
                 logger.success(f"[{self.pure_user_id}] pass! (generated, attempt={attempt})")
                 cookies = await self._settle_x5sec(self.page, cookies)
                 return True, cookies
+            if self._bx_voucher:
+                # 同 recorded 路径：票据已出现即收割，不空耗剩余重试
+                return await self._fallback_or_fail(verify_url)
             if attempt < self.MAX_RETRIES:
                 await asyncio.sleep(2 + random.uniform(1, 2))
                 if not await self._wait_slider(10.0):
@@ -829,8 +842,8 @@ class SliderSolver(ProviderSolverMixin):
         # 全部重试耗尽走到这里 —— 页面层验证其实是成功的。此时绝不能把已捕获
         # 的票据当失败丢弃：结算成 x5sec 返回，bot 侧才能合并并重试 token API。
         if self._bx_voucher:
-            logger.info(f"[{self.pure_user_id}] bx voucher captured earlier — harvesting page-level pass")
-            self._emit_telemetry_event("manual_voucher_harvested", source="fallback_or_fail")
+            logger.info(f"[{self.pure_user_id}] bx voucher captured — harvesting page-level pass")
+            self._emit_telemetry_event("voucher_harvested", source="fallback_or_fail")
             self._emit_step("solve", "voucher_harvest", "started", reason="voucher_captured_before_fail")
             try:
                 cookies = await self._get_cookies()
@@ -840,7 +853,10 @@ class SliderSolver(ProviderSolverMixin):
                 self._emit_step("solve", "voucher_harvest", "failed", reason=str(e))
                 cookies = None
             if self._has_validation_cookie(cookies):
-                logger.success(f"[{self.pure_user_id}] pass! (manual voucher harvest)")
+                # 标签澄清：该路径的票据绝大多数来自自动拖动（0.6.15-0.6.21 两战
+                # 均全自动），"manual" 旧标签曾误导排查——"manual pass" 专属
+                # CDP 人工等待期真人拖过的分支
+                logger.success(f"[{self.pure_user_id}] pass! (auto voucher harvest)")
                 self._emit_step("solve", "voucher_harvest", "ok")
                 return True, cookies
             logger.warning(f"[{self.pure_user_id}] voucher present but x5sec did not settle")
@@ -1330,11 +1346,11 @@ class SliderSolver(ProviderSolverMixin):
         pw = await (patchright_async_playwright if self.automation_backend == "patchright" else async_playwright)().start()
         self._playwright = pw
         kwargs = {"headless": self.headless,
-                  "args": list(STEALTH_LAUNCH_ARGS) + list(ENV_CONSISTENCY_LAUNCH_ARGS)}
+                  "args": list(STEALTH_LAUNCH_ARGS) + list(ENV_CONSISTENCY_LAUNCH_ARGS) + list(MEMORY_GUARD_LAUNCH_ARGS)}
         if self.automation_backend == "patchright":
             # patchright 自带反检测注入与 launch 参数处理；多余的 init_script/启动参数
-            # 反而扩大指纹面。只补环境一致性旗标（GL 渲染后端/语言），反检测面交给本体。
-            kwargs["args"] = list(ENV_CONSISTENCY_LAUNCH_ARGS)
+            # 反而扩大指纹面。只补环境一致性旗标与内存守卫，反检测面交给本体。
+            kwargs["args"] = list(ENV_CONSISTENCY_LAUNCH_ARGS) + list(MEMORY_GUARD_LAUNCH_ARGS)
         if channel:
             kwargs["channel"] = channel
         proxy_host = self.proxy.get("proxy_host")

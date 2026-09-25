@@ -51,7 +51,7 @@ async def test_fallback_or_fail_harvests_captured_voucher():
     assert ok is True
     assert cookies == {"unb": "1", "x5sec": "abc_def"}
     names = [c.args[0] for c in solver._emit_telemetry_event.call_args_list]
-    assert "manual_voucher_harvested" in names
+    assert "voucher_harvested" in names
     assert "fallback_skipped" not in names
 
 
@@ -61,7 +61,7 @@ async def test_fallback_or_fail_without_voucher_cdp_returns_failure():
     ok, cookies = await solver._fallback_or_fail("https://x/punish?x5secdata=1")
     assert (ok, cookies) == (False, None)
     names = [c.args[0] for c in solver._emit_telemetry_event.call_args_list]
-    assert "manual_voucher_harvested" not in names
+    assert "voucher_harvested" not in names
 
 
 @pytest.mark.asyncio
@@ -259,3 +259,107 @@ async def test_cdp_manual_wait_uncapped_when_budget_plenty():
     ok, cookies = await solver._fallback_or_fail("https://x/punish?x5secdata=1")
     assert (ok, cookies) == (False, None)
     assert _time.monotonic() - t0 >= 1.0  # 足额等待，未被预算逻辑提前砍掉
+
+
+@pytest.mark.asyncio
+async def test_provider_fail_with_voucher_skips_legacy_ceremony():
+    """0.6.23: provider 拖动挣到票据但结果等待器没等到 → 直接收割，
+    不再进 legacy 空耗 ~40s（15s 找滑块 + 重试轮；生产实测 17:59:04→17:59:47）。"""
+    solver = _make_solver()
+    solver._use_provider_mode = True
+    solver.page = object()
+    solver._provider = mock.MagicMock()
+    solver._provider.name = "fake"
+
+    async def _fake_detect(page):
+        return True
+
+    async def _fake_provider_solve(page):
+        solver._bx_voucher = "x5sec=auto_pass; Path=/;"
+        return False, None
+
+    async def _legacy_should_not_run(url):
+        raise AssertionError("legacy ceremony must be skipped when voucher captured")
+
+    async def _fake_fallback(url):
+        return True, {"unb": "1", "x5sec": "auto_pass"}
+
+    solver._detect_and_init_provider = _fake_detect
+    solver._solve_with_provider = _fake_provider_solve
+    solver._run_legacy_solve_loop = _legacy_should_not_run
+    solver._fallback_or_fail = _fake_fallback
+
+    ok, cookies = await solver._run_solve_loop("https://x/punish?x5secdata=1")
+    assert ok is True
+    assert cookies == {"unb": "1", "x5sec": "auto_pass"}
+
+
+@pytest.mark.asyncio
+async def test_provider_fail_without_voucher_still_falls_back_to_legacy():
+    """无票据时保持原语义：provider 失败仍进 legacy。"""
+    solver = _make_solver()
+    solver._use_provider_mode = True
+    solver.page = object()
+    solver._provider = mock.MagicMock()
+    solver._provider.name = "fake"
+
+    async def _fake_detect(page):
+        return True
+
+    async def _fake_provider_solve(page):
+        return False, None
+
+    async def _fake_legacy(url):
+        return False, None
+
+    solver._detect_and_init_provider = _fake_detect
+    solver._solve_with_provider = _fake_provider_solve
+    solver._run_legacy_solve_loop = _fake_legacy
+
+    ok, cookies = await solver._run_solve_loop("https://x/punish?x5secdata=1")
+    assert (ok, cookies) == (False, None)
+
+
+@pytest.mark.asyncio
+async def test_generated_loop_harvests_voucher_mid_retries():
+    """legacy 重试轮中票据出现（拖动实际已过、outcome 等待器没看到）→ 立即收割。"""
+    solver = _make_solver()
+    solver.page = object()
+    solver.selectors = {"success_code": 0}
+    solver.MAX_RETRIES = 3
+    solver.trajectory_mode = "generated"  # 跳过 Phase A，直接进 generated 循环
+
+    async def _true_wait(*a, **k):
+        return True
+
+    async def _noop_tap(page):
+        return None
+
+    async def _distance():
+        return 258
+
+    async def _noop_slide(distance, attempt, recorded_trajectory=None):
+        return None
+
+    attempts = {"n": 0}
+
+    async def _fail_outcome(timeout, success_code):
+        attempts["n"] += 1
+        if attempts["n"] >= 2:
+            solver._bx_voucher = "x5sec=mid_retry; Path=/;"
+        return False, -1
+
+    async def _fake_fallback(url):
+        return True, {"unb": "1", "x5sec": "mid_retry"}
+
+    solver._wait_slider = _true_wait
+    solver._install_net_tap = _noop_tap
+    solver._calc_distance_multi_source = _distance
+    solver._do_slide = _noop_slide
+    solver._wait_slide_outcome = _fail_outcome
+    solver._fallback_or_fail = _fake_fallback
+
+    ok, cookies = await solver._run_legacy_solve_loop("https://x/punish?x5secdata=1")
+    assert ok is True
+    assert cookies == {"unb": "1", "x5sec": "mid_retry"}
+    assert attempts["n"] == 2  # 第 2 次失败后即短路，不再烧第 3 次

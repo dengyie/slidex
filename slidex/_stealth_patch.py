@@ -55,6 +55,16 @@ ENV_CONSISTENCY_LAUNCH_ARGS = [
     '--accept-lang=zh-CN,zh;q=0.9',
 ]
 
+# 1GB VPS 内存守卫（与 bot 侧 qr 验证路径 1e7fb80 同款旗标，已在生产验证多年）：
+# renderer 进程数上限 + JS 堆封顶，削掉每次求解的浏览器内存突发——宿主慢性内存
+# 饥饿（available 常 <150MB）下，一次突发换页风暴即把 load 打到 25+（PSI mem
+# full 曾达 54%@5min）。进程结构与堆上限不构成 JS 可见指纹面。
+MEMORY_GUARD_LAUNCH_ARGS = [
+    '--renderer-process-limit=2',
+    '--js-flags=--max-old-space-size=256',
+]
+
+
 # 反检测 JS 脚本 - 在 page.add_init_script() 中注入
 STEALTH_INIT_SCRIPT = r"""
 // ====== NoCaptcha 反检测脚本 ======

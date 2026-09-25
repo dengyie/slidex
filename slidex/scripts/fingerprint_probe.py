@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from slidex.solver import SliderSolver, _resolve_automation_backend, _resolve_browser_channel  # noqa: E402
-from slidex._stealth_patch import STEALTH_LAUNCH_ARGS, ENV_CONSISTENCY_LAUNCH_ARGS  # noqa: E402
+from slidex._stealth_patch import STEALTH_LAUNCH_ARGS, ENV_CONSISTENCY_LAUNCH_ARGS, MEMORY_GUARD_LAUNCH_ARGS  # noqa: E402
 
 
 async def _probe_local(headless: bool) -> dict:
@@ -34,8 +34,8 @@ async def _probe_local(headless: bool) -> dict:
     else:
         from playwright.async_api import async_playwright
 
-    args = (list(ENV_CONSISTENCY_LAUNCH_ARGS) if backend == "patchright"
-            else list(STEALTH_LAUNCH_ARGS) + list(ENV_CONSISTENCY_LAUNCH_ARGS))
+    args = (list(ENV_CONSISTENCY_LAUNCH_ARGS) + list(MEMORY_GUARD_LAUNCH_ARGS) if backend == "patchright"
+            else list(STEALTH_LAUNCH_ARGS) + list(ENV_CONSISTENCY_LAUNCH_ARGS) + list(MEMORY_GUARD_LAUNCH_ARGS))
     kwargs = {"headless": headless, "args": args}
     if channel:
         kwargs["channel"] = channel

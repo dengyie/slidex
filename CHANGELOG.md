@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.23] - 2026-09-25
+
+性能优化批：自愈链耗时与 1GB VPS 内存突发双管齐下。
+
+### Added
+- **voucher 短路收割**：provider 失败后若 `_bx_voucher` 已捕获（拖动实际通过、结果等待器没等到自家信号），跳过 legacy 全套仪式直达收割——生产实测这段空耗 ~40s（17:59:04 票据 → 17:59:47 收割）；legacy recorded/generated 重试轮内票据一出现也立即收割，不再烧剩余 attempt。
+- **内存守卫旗标** `MEMORY_GUARD_LAUNCH_ARGS`（`--renderer-process-limit=2` + `--js-flags=--max-old-space-size=256`，与 bot 侧 qr 路径 1e7fb80 同款）：削掉每次求解的浏览器内存突发——宿主慢性内存饥饿下（available 常 <150MB、swap 1.27G），一次突发即引发换页风暴（实测 load 25+、PSI mem full 54%@5min）。
+
+### Changed
+- 误导标签澄清：`pass! (manual voucher harvest)` → `pass! (auto voucher harvest)`（该路径票据绝大多数来自自动拖动；"manual" 专属 CDP 人工等待期真人拖过的分支）；telemetry `manual_voucher_harvested` → `voucher_harvested`。
+
+### Notes
+- 测试：455 绿（+3：provider 失败有票据跳过 legacy / 无票据保持原语义 / generated 轮中票据短路收割）。
+
 ## [0.6.22] - 2026-09-25
 
 容器浏览器指纹加固：CDP 真机模式已 2/2 实战过滑，本版针对"VPS 容器浏览器"这一兜底环节——真人拖也 code=300 的环境指纹问题。
