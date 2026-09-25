@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.19] - 2026-09-25
+
+生产实测：用户 Chrome 开着省内存模式时，`connect_over_cdp` 默认 180s 超时会在"附加冻结标签"阶段挂满（裸 CDP 与逐 target 探针均正常，仅附加挂起），白白损失一个周期。用户决定保留省内存模式，故在代码侧收敛损失。
+
+### Changed
+- `_connect_existing_browser` 的 `connect_over_cdp` 超时收敛为 45s（env `SLIDEX_CDP_CONNECT_TIMEOUT` 秒可调）：慢隧道/大目标数仍够用，冻结标签挂起时快速失败把周期还给 fallback 链路。
+
 ## [0.6.18] - 2026-09-25
 
 用户在真实浏览器里手动通过滑块后总结出判定要领：**拖到终点、滑块变绿后不能立刻松开鼠标**——验证请求在松键时刻评估，"到位即松"会被拒。此前所有自动轨迹（provider + generated + recorded，全部 code=300）都在终点后 30-110ms 内立即释放，与此要领相悖。

@@ -1326,7 +1326,10 @@ class SliderSolver(ProviderSolverMixin):
         pw = await async_playwright().start()
         self._playwright = pw
 
-        browser = await pw.chromium.connect_over_cdp(cdp_endpoint)
+        # connect_over_cdp 默认 180s：外部 Chrome 存在冻结标签（省内存模式）时
+        # 附加阶段会挂满整个超时。收敛为可配置的短超时，快速失败交还周期。
+        connect_timeout_s = float(os.environ.get("SLIDEX_CDP_CONNECT_TIMEOUT", "45"))
+        browser = await pw.chromium.connect_over_cdp(cdp_endpoint, timeout=connect_timeout_s * 1000)
         if not browser.contexts:
             raise RuntimeError(f"No contexts found on CDP endpoint: {cdp_endpoint}")
         self.context = browser.contexts[0]
