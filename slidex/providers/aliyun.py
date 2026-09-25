@@ -10,6 +10,7 @@ from slidex.providers import CaptchaProvider, ProviderElements, SolveResult
 from slidex.vision.models import ChallengeType, ProviderManifest, VisionContext
 from slidex._frames import iter_search_targets, wait_in_targets, query_in_targets
 from slidex._slide_result import interpret_slide_json
+from slidex._trajectory import slide_end_hold_range
 
 
 _SLIDER_BTN = "#nc_1_n1z, .nc_iconfont, [id*=nc_][id*=n1z]"
@@ -237,7 +238,9 @@ class AliyunNoCaptchaProvider(CaptchaProvider):
         await page.mouse.move(end_x + overshoot - back, end_y + random.uniform(-1.0, 1.0))
         await page.wait_for_timeout(random.randint(50, 90))
         await page.mouse.move(end_x + random.uniform(-1.0, 1.0), end_y)
-        await page.wait_for_timeout(random.randint(40, 80))
+        # 0.6.18 真人要领：终点变绿后握住停顿再松键（验证在松键时刻评估）
+        end_hold_lo, end_hold_hi = slide_end_hold_range()
+        await page.wait_for_timeout(int(random.uniform(end_hold_lo, end_hold_hi) * 1000))
         await page.mouse.up()
 
     async def validate_response(self, response: Response) -> Optional[bool]:

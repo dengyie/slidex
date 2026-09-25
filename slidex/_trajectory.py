@@ -107,3 +107,18 @@ def trajectory_to_points(
 
 
 __all__ = ['generate_trajectory', 'trajectory_to_points']
+
+
+def slide_end_hold_range() -> Tuple[float, float]:
+    """0.6.18 真人要领（用户 2026-09-25 实测）：拖到终点滑块变绿后不能立刻
+    松开鼠标——验证在松键时刻评估，到达即松会被拒（code=300 世界）。
+    自动轨迹必须在终点握住随机时长再 mouseup。env 可调（秒）。"""
+    import os
+
+    lo = float(os.environ.get("SLIDEX_SLIDE_END_HOLD_MIN", "0.45"))
+    hi = float(os.environ.get("SLIDEX_SLIDE_END_HOLD_MAX", "1.10"))
+    lo = max(0.0, lo)
+    return (lo, max(lo, hi))
+
+
+__all__ = ['generate_trajectory', 'trajectory_to_points', 'slide_end_hold_range']

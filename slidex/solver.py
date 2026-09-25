@@ -18,7 +18,7 @@ def _resolve_automation_backend() -> str:
     return "playwright"
 
 from slidex._stealth_patch import STEALTH_LAUNCH_ARGS, STEALTH_INIT_SCRIPT
-from slidex._trajectory import generate_trajectory, trajectory_to_points
+from slidex._trajectory import generate_trajectory, slide_end_hold_range, trajectory_to_points
 from slidex._image_match import SliderImageMatcher
 from slidex._trajectory_pool import SliderTrajectoryPool
 from slidex._sanitize import sanitize_pure_user_id
@@ -1180,6 +1180,12 @@ class SliderSolver(ProviderSolverMixin):
                 })
                 px, py = tx, ty
 
+            # 0.6.18 真人要领：终点变绿后握住停顿再松键（验证在松键时刻评估）
+            end_hold_lo, end_hold_hi = slide_end_hold_range()
+            end_hold = random.uniform(end_hold_lo, end_hold_hi)
+            await asyncio.sleep(end_hold)
+            total_ms += int(end_hold * 1000)
+
             await cdp.send("Input.dispatchMouseEvent", {
                 "type": "mouseReleased", "x": sx + points[-1][0], "y": sy + points[-1][1],
                 "button": "left", "clickCount": 1,
@@ -1211,7 +1217,9 @@ class SliderSolver(ProviderSolverMixin):
             await asyncio.sleep(random.uniform(0.02, 0.05))
             await self.page.mouse.move(end_x + random.uniform(1.0, 2.0), sy + points[-1][1])
             await asyncio.sleep(random.uniform(0.02, 0.05))
-            await asyncio.sleep(random.uniform(0.03, 0.08))
+            # 0.6.18 真人要领：终点变绿后握住停顿再松键（验证在松键时刻评估）
+            end_hold_lo, end_hold_hi = slide_end_hold_range()
+            await asyncio.sleep(random.uniform(end_hold_lo, end_hold_hi))
             await self.page.mouse.up()
             return True
         except Exception as e:
@@ -1561,6 +1569,12 @@ class SliderSolver(ProviderSolverMixin):
             await asyncio.sleep(release_wait)
             total_ms += traj[-1][2]
 
+            # 0.6.18 真人要领：终点变绿后握住停顿再松键（验证在松键时刻评估）
+            end_hold_lo, end_hold_hi = slide_end_hold_range()
+            end_hold = random.uniform(end_hold_lo, end_hold_hi)
+            await asyncio.sleep(end_hold)
+            total_ms += int(end_hold * 1000)
+
             await cdp.send("Input.dispatchMouseEvent", {
                 "type": "mouseReleased", "x": px, "y": py,
                 "button": "left", "clickCount": 1,
@@ -1595,7 +1609,9 @@ class SliderSolver(ProviderSolverMixin):
             for x, y, d in pts[1:]:
                 await self.page.mouse.move(x, y)
                 await asyncio.sleep(d / 1000.0)
-            await asyncio.sleep(random.uniform(0.03, 0.08))
+            # 0.6.18 真人要领：终点变绿后握住停顿再松键（验证在松键时刻评估）
+            end_hold_lo, end_hold_hi = slide_end_hold_range()
+            await asyncio.sleep(random.uniform(end_hold_lo, end_hold_hi))
             await self.page.mouse.up()
         except Exception as e:
             logger.warning(f"[{self.pure_user_id}] Playwright slide error: {e}")

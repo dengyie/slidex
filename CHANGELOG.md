@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.18] - 2026-09-25
+
+用户在真实浏览器里手动通过滑块后总结出判定要领：**拖到终点、滑块变绿后不能立刻松开鼠标**——验证请求在松键时刻评估，"到位即松"会被拒。此前所有自动轨迹（provider + generated + recorded，全部 code=300）都在终点后 30-110ms 内立即释放，与此要领相悖。
+
+### Changed
+- **末端握持**：全部 5 处拖动路径（generated/recorded × CDP/Playwright + `aliyun` provider）在 mouseup 前增加 `slide_end_hold_range()` 随机握持（默认 0.45-1.10s，env `SLIDEX_SLIDE_END_HOLD_MIN/MAX` 秒可调，min>max 钳制）。CDP 路径同步校正事件时间戳。
+
+### Notes
+- 测试 436 绿（新增 `tests/test_slide_end_hold.py` 3 例：默认值/env 覆盖与钳制/Playwright 路径实测 move→up 间隔 ≥ 握持下限）。
+
 ## [0.6.17] - 2026-09-25
 
 0.6.16 生产验证：CDP 连接被 Chrome **省内存模式冻结的后台标签**卡死（`connect_over_cdp: Timeout 180s`——`<ws connected>` 后附加冻结 target 挂起；裸 CDP `Browser.getVersion` 与逐 target 探针确认隧道/协议层完好，仅 3 个冻结页挂）。经 `/json/new` + `/json/close` 重建标签后连接秒过。另一时序问题：自动拖动窗口仅 ~60s，用户拖过时监听已关闭（第二次票据流失）。
