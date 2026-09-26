@@ -57,22 +57,19 @@ class TestCdpReplayOrder:
 
         assert ok is True
         types = [p["type"] for p in s._cdp.sent]
-        assert types == [
-            "mouseMoved",   # hover 到起点
-            "mousePressed",
-            "mouseMoved",
-            "mouseMoved",
-            "mouseReleased",
-        ]
-        # 拖拽 move 的 movement 基于按下位置
-        first_drag_move = s._cdp.sent[2]
-        assert first_drag_move["movementX"] == pytest.approx(10)
+        pressed = types.index("mousePressed")
+        released = len(types) - 1
+        # 唯一一次按下，且先于全部拖拽 move；最后一个事件是松键（0.6.25 流水线
+        # 语义：事件面含接近移动与末端握持 gap，不再断言精确序列）
+        assert types.count("mousePressed") == 1
+        assert types[released] == "mouseReleased"
+        for p in s._cdp.sent[pressed + 1:released]:
+            assert p["type"] == "mouseMoved"
+            assert p["buttons"] == 1
         # 释放位置 = 起点 + 末点位移（录制的 up 位置）
         release = s._cdp.sent[-1]
         assert release["x"] == pytest.approx(620.0)
         assert release["y"] == pytest.approx(300.0)
-        # released 晚于 pressed
-        assert release["timestamp"] > s._cdp.sent[1]["timestamp"]
 
     def test_empty_points_returns_false_without_dispatch(self, tmp_path):
         s = _make_solver(tmp_path)

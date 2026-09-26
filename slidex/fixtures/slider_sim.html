@@ -1,0 +1,62 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>slidex slider sim</title>
+<style>
+  #track{position:relative;width:300px;height:40px;background:#e8e8e8;border-radius:20px;margin:80px auto;}
+  #btn{position:absolute;left:0;top:0;width:42px;height:40px;background:#4caf50;border-radius:20px;cursor:pointer;}
+  #txt{text-align:center;font-family:sans-serif;color:#555;}
+</style>
+</head>
+<body>
+<div id="track"><div id="btn"></div></div>
+<div id="txt">slide to the end</div>
+<script>
+/* 本地滑块仿真（离线测试专用，绝不连真实风控）。
+   模拟 AWSC 缩条滑块对输入的关键判定面：
+   - 只接受 isTrusted 输入（合成事件直接忽略）
+   - 拖动期 mousemove 必须 buttons===1（真实按住态）
+   - 事件数过少 / 未到终点 → 判败
+   - 判过/判败均向 /_____tmd_____/slide 发起一次回执（测试路由拦截），
+     结果写入 window.__sim 供断言 */
+(function () {
+  var track = document.getElementById('track');
+  var btn = document.getElementById('btn');
+  var max_x = 300 - 42;
+  var pressed = false, start_x = 0, moves = 0, press_t = 0;
+  window.__sim = { pass: false, reason: 'not_run', moves: 0, pressedMs: 0 };
+
+  function report(pass, reason) {
+    window.__sim = {
+      pass: pass, reason: reason, moves: moves,
+      pressedMs: press_t ? (Date.now() - press_t) : 0,
+    };
+    try { fetch('/_____tmd_____/slide?sim=1&code=' + (pass ? 0 : 300)).catch(function () {}); } catch (e) {}
+    document.getElementById('txt').textContent = pass ? 'SIM_PASS' : 'SIM_FAIL:' + reason;
+  }
+
+  btn.addEventListener('mousedown', function (e) {
+    if (!e.isTrusted) return;
+    pressed = true; start_x = e.clientX; press_t = Date.now(); moves = 0;
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', function (e) {
+    if (!pressed) return;
+    if (e.buttons !== 1) { pressed = false; report(false, 'buttons_lost'); return; }
+    moves++;
+    var dx = Math.min(Math.max(e.clientX - start_x, -2), max_x);
+    btn.style.left = dx + 'px';
+  });
+  document.addEventListener('mouseup', function (e) {
+    if (!pressed) return;
+    pressed = false;
+    var left = parseFloat(btn.style.left || '0');
+    if (moves < 8) { report(false, 'too_few_moves'); return; }
+    if (left < max_x - 2) { report(false, 'not_reached_end'); return; }
+    report(true, 'ok');
+  });
+})();
+</script>
+</body>
+</html>

@@ -72,9 +72,11 @@ async def test_dispatch_pipeline_keeps_designed_rhythm_under_latency():
 
 
 @pytest.mark.asyncio
-async def test_slide_playwright_uses_pipeline_when_cdp_available():
-    """legacy 路径：CDP 会话在 → 走流水线且不触碰 page.mouse（容器 patchright
-    无会话时才走顺序路径）。"""
+async def test_do_slide_generated_pipelines_when_cdp_available():
+    """CDP 会话在 → _do_slide 生成轨迹走流水线且不触碰 page.mouse。
+    （0.6.25：旧版在此处保留逐事件 await 的内联 CDP 派发，节奏仍被 RTT 撕碎）"""
+    import asyncio as _aio
+
     from slidex.solver import SliderSolver
 
     calls = []
@@ -83,17 +85,60 @@ async def test_slide_playwright_uses_pipeline_when_cdp_available():
         async def send(self, method, params=None):
             calls.append(params["type"])
 
+    class _Btn:
+        async def bounding_box(self):
+            return {"x": 0.0, "y": 0.0, "width": 40.0, "height": 40.0}
+
     class _NoMouse:
         def __getattr__(self, name):
-            raise AssertionError(f"page.mouse.{name} touched under pipeline mode")
+            raise AssertionError(f"page.{name} touched under pipeline mode")
+
+    async def _find(_selector):
+        return _Btn()
+
+    s = SliderSolver.__new__(SliderSolver)
+    s.pure_user_id = "t"
+    s._cdp = _Session()
+    s.page = _NoMouse()
+    s.selectors = {"slider_btn": "#btn"}
+    s._query_in_challenge_scope = _find
+    s._result_event = _aio.Event()
+    s._slide_code = None
+    s._slide_ok = None
+
+    await s._do_slide(258.0, 1)
+
+    assert calls, "pipeline dispatched nothing"
+    assert "mousePressed" in calls
+    assert calls[-1] == "mouseReleased"
+
+
+@pytest.mark.asyncio
+async def test_replay_recorded_cdp_pipelines_and_releases_at_last_point():
+    """录制回放 CDP 路径同样走流水线；释放位 = 末点（录制自 up 事件）。"""
+    from slidex.solver import SliderSolver
+
+    events = []
+
+    class _Session:
+        async def send(self, method, params=None):
+            events.append(dict(params))
+
+    class _NoMouse:
+        def __getattr__(self, name):
+            raise AssertionError(f"page.{name} touched under pipeline mode")
 
     s = SliderSolver.__new__(SliderSolver)
     s.pure_user_id = "t"
     s._cdp = _Session()
     s.page = _NoMouse()
 
-    await s._slide_playwright(258.0, 1, None, 100.0, 50.0)
+    points = [(30.0, 1.0, 600.0), (120.0, 2.0, 40.0), (258.0, 0.0, 60.0)]
+    ok = await s._replay_recorded_cdp(points, 100.0, 50.0)
 
-    assert calls, "pipeline dispatched nothing"
-    assert calls[-1] == "mouseReleased"
-    assert "mousePressed" in calls
+    assert ok is True
+    types = [e["type"] for e in events]
+    assert types[0] == "mouseMoved" and "mousePressed" in types
+    assert types[-1] == "mouseReleased"
+    assert events[-1]["x"] == pytest.approx(100.0 + 258.0)
+    assert events[-1]["y"] == pytest.approx(50.0 + 0.0)

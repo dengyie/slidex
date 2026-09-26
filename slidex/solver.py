@@ -1203,65 +1203,16 @@ class SliderSolver(ProviderSolverMixin):
         cdp = getattr(self, "_cdp", None)
         if not cdp:
             return False
-        try:
-            ts_info = await self.page.evaluate("""() => ({
-                timeOrigin: performance.timeOrigin,
-                now: performance.now(),
-            })""")
-            base_ts = int(ts_info["timeOrigin"] + ts_info["now"])
-        except Exception:
-            base_ts = int(time.time() * 1000)
-
         if not points:
             return False
-
         try:
-            # 事件顺序必须与真实拖拽一致：hover → pressed → moved×N → released；
-            # 末点录制自 up 事件，是释放位，不当 move 派发。
-            await cdp.send("Input.dispatchMouseEvent", {
-                "type": "mouseMoved", "x": sx, "y": sy,
-                "movementX": 0, "movementY": 0,
-                "pointerType": "mouse",
-                "timestamp": base_ts,
-            })
-            await cdp.send("Input.dispatchMouseEvent", {
-                "type": "mousePressed", "x": sx, "y": sy,
-                "button": "left", "clickCount": 1,
-                "pointerType": "mouse",
-                "timestamp": base_ts,
-            })
-
-            total_ms = 0
-            px, py = sx, sy
-            for i, (dx, dy, delay_ms) in enumerate(points):
-                if delay_ms > 0:
-                    await asyncio.sleep(delay_ms / 1000.0)
-                total_ms += delay_ms
-                if i == len(points) - 1:
-                    break
-                tx, ty = sx + dx, sy + dy
-                if abs(tx - px) < 0.5 and abs(ty - py) < 0.5:
-                    continue
-                await cdp.send("Input.dispatchMouseEvent", {
-                    "type": "mouseMoved", "x": tx, "y": ty,
-                    "movementX": tx - px, "movementY": ty - py,
-                    "pointerType": "mouse",
-                    "timestamp": base_ts + int(total_ms),
-                })
-                px, py = tx, ty
-
-            # 0.6.18 真人要领：终点变绿后握住停顿再松键（验证在松键时刻评估）
-            end_hold_lo, end_hold_hi = slide_end_hold_range()
-            end_hold = random.uniform(end_hold_lo, end_hold_hi)
-            await asyncio.sleep(end_hold)
-            total_ms += int(end_hold * 1000)
-
-            await cdp.send("Input.dispatchMouseEvent", {
-                "type": "mouseReleased", "x": sx + points[-1][0], "y": sy + points[-1][1],
-                "button": "left", "clickCount": 1,
-                "pointerType": "mouse",
-                "timestamp": base_ts + int(total_ms),
-            })
+            # 0.6.25: 统一走流水线派发（_drag）——旧内联实现逐事件 await cdp.send，
+            # CDP 模式下节奏被隧道 RTT 撕碎（用户实测卡顿）。录制点序的语义保持：
+            # hover → pressed → moved×N → 末端握持 → released（末点即释放位）。
+            from slidex._drag import build_drag_events, dispatch_drag_timeline
+            pts_abs = [(sx + float(dx), sy + float(dy), float(delay or 0.0)) for (dx, dy, delay) in points]
+            timeline = build_drag_events(sx, sy, pts_abs, extra_overshoot=False)
+            await dispatch_drag_timeline(cdp, timeline)
             return True
         except Exception as e:
             logger.warning(f"[{self.pure_user_id}] CDP replay error: {e}")
@@ -1702,69 +1653,12 @@ class SliderSolver(ProviderSolverMixin):
         logger.info(f"[{self.pure_user_id}] sliding (generated): dist={distance:.0f}px steps={len(traj)} from=({sx:.0f},{sy:.0f})")
 
         try:
-            ts_info = await self.page.evaluate("""() => ({
-                timeOrigin: performance.timeOrigin,
-                now: performance.now(),
-            })""")
-            base_ts = int(ts_info["timeOrigin"] + ts_info["now"])
-        except Exception:
-            base_ts = int(time.time() * 1000)
-
-        try:
-            await cdp.send("Input.dispatchMouseEvent", {
-                "type": "mouseMoved", "x": sx, "y": sy,
-                "movementX": 0, "movementY": 0,
-                "pointerType": "mouse", "timestamp": base_ts,
-            })
-            px, py = sx, sy
-
-            pct_traj = [t for t in traj if t[2] > 0]
-            init_wait = pct_traj[0][2] / 1000.0 if pct_traj else 0.1
-            await asyncio.sleep(init_wait)
-
-            await cdp.send("Input.dispatchMouseEvent", {
-                "type": "mousePressed", "x": sx, "y": sy,
-                "button": "left", "clickCount": 1,
-                "pointerType": "mouse",
-                "timestamp": base_ts + int(init_wait * 1000),
-            })
-
-            total_ms = 0
-            for i, (dx, dy, delay_ms) in enumerate(traj):
-                if i == 0 and abs(dx) < 0.1 and abs(dy) < 0.1:
-                    total_ms += delay_ms
-                    continue
-                tx = sx + dx
-                ty = sy + dy
-                mx = tx - px
-                my = ty - py
-                total_ms += delay_ms
-                await cdp.send("Input.dispatchMouseEvent", {
-                    "type": "mouseMoved", "x": tx, "y": ty,
-                    "movementX": mx, "movementY": my,
-                    "pointerType": "mouse",
-                    "timestamp": base_ts + total_ms,
-                })
-                px, py = tx, ty
-                if delay_ms > 0:
-                    await asyncio.sleep(delay_ms / 1000.0)
-
-            release_wait = traj[-1][2] / 1000.0 if traj[-1][2] > 0 else 0.05
-            await asyncio.sleep(release_wait)
-            total_ms += traj[-1][2]
-
-            # 0.6.18 真人要领：终点变绿后握住停顿再松键（验证在松键时刻评估）
-            end_hold_lo, end_hold_hi = slide_end_hold_range()
-            end_hold = random.uniform(end_hold_lo, end_hold_hi)
-            await asyncio.sleep(end_hold)
-            total_ms += int(end_hold * 1000)
-
-            await cdp.send("Input.dispatchMouseEvent", {
-                "type": "mouseReleased", "x": px, "y": py,
-                "button": "left", "clickCount": 1,
-                "pointerType": "mouse",
-                "timestamp": base_ts + int(total_ms),
-            })
+            # 0.6.25: 统一走流水线派发（_drag）——旧内联实现逐事件 await cdp.send，
+            # CDP 模式下每个点一次隧道往返，节奏被 RTT 撕碎（用户实测卡顿）
+            from slidex._drag import build_drag_events, dispatch_drag_timeline
+            pts_abs = [(sx + float(dx), sy + float(dy), float(delay or 0.0)) for (dx, dy, delay) in traj]
+            timeline = build_drag_events(sx, sy, pts_abs, extra_overshoot=True)
+            await dispatch_drag_timeline(cdp, timeline)
         except Exception as e:
             logger.warning(f"[{self.pure_user_id}] CDP failed: {e}, falling back")
             self._cdp = None
@@ -1782,14 +1676,8 @@ class SliderSolver(ProviderSolverMixin):
                 overshoot_back=True,
             )
             pts = trajectory_to_points(traj, sx2, sy2)
-            # CDP 会话可用（真机模式）→ 流水线派发：事件节奏与隧道 RTT 解耦，
-            # 设计时间线原样到达浏览器（0.6.24）；容器模式无 CDP 会话走顺序路径
-            cdp = getattr(self, "_cdp", None)
-            if cdp is not None:
-                from slidex._drag import build_drag_events, dispatch_drag_timeline
-                timeline = build_drag_events(sx2, sy2, pts, extra_overshoot=False)
-                await dispatch_drag_timeline(cdp, timeline)
-                return
+            # 本方法仅在无 CDP 会话时被调用（CDP 模式的生成/回放路径在 _do_slide
+            # 内直接走 _drag 流水线），保持顺序 mouse 路径（容器本地 RTT ~1ms）
             await self.page.mouse.move(sx2 + random.uniform(-8, -3), sy2 + random.uniform(2, 6))
             await asyncio.sleep(random.uniform(0.03, 0.08))
             await self.page.mouse.move(sx2, sy2)

@@ -92,7 +92,7 @@ async def dispatch_drag_timeline(session: Any, timeline: List[Tuple[float, Dict[
     驱动层对 CDP 的 send 支持多飞行（pipelining）→ 浏览器按序、按
     设计间隔收到事件。
     """
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     tasks = []
     for gap_ms, params in timeline:
         if gap_ms > 0:
