@@ -1782,6 +1782,14 @@ class SliderSolver(ProviderSolverMixin):
                 overshoot_back=True,
             )
             pts = trajectory_to_points(traj, sx2, sy2)
+            # CDP 会话可用（真机模式）→ 流水线派发：事件节奏与隧道 RTT 解耦，
+            # 设计时间线原样到达浏览器（0.6.24）；容器模式无 CDP 会话走顺序路径
+            cdp = getattr(self, "_cdp", None)
+            if cdp is not None:
+                from slidex._drag import build_drag_events, dispatch_drag_timeline
+                timeline = build_drag_events(sx2, sy2, pts, extra_overshoot=False)
+                await dispatch_drag_timeline(cdp, timeline)
+                return
             await self.page.mouse.move(sx2 + random.uniform(-8, -3), sy2 + random.uniform(2, 6))
             await asyncio.sleep(random.uniform(0.03, 0.08))
             await self.page.mouse.move(sx2, sy2)

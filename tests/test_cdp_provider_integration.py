@@ -47,7 +47,7 @@ class MockCDPProvider(CaptchaProvider):
     async def find_gap(self, bg_bytes, piece_bytes):
         return 100, 0.9
 
-    async def perform_slide(self, page, elements, gap_x, trajectory):
+    async def perform_slide(self, page, elements, gap_x, trajectory, cdp_session=None):
         # 验证 CDP 模式下的元素操作
         assert elements.metadata["cdp_mode"] is True
         # Mock 模式下直接设置结果
@@ -179,7 +179,7 @@ async def test_cdp_with_multiple_providers():
         async def detect(self, page): return True
         async def locate_elements(self, page): pass
         async def extract_images(self, page, elements): pass
-        async def perform_slide(self, page, elements, gap_x, trajectory): pass
+        async def perform_slide(self, page, elements, gap_x, trajectory, cdp_session=None): pass
         def validate_response(self, response): return None
 
     class LowPriorityProvider(CaptchaProvider):
@@ -187,7 +187,7 @@ async def test_cdp_with_multiple_providers():
         async def detect(self, page): return True
         async def locate_elements(self, page): pass
         async def extract_images(self, page, elements): pass
-        async def perform_slide(self, page, elements, gap_x, trajectory): pass
+        async def perform_slide(self, page, elements, gap_x, trajectory, cdp_session=None): pass
         def validate_response(self, response): return None
 
     SliderSolver.register_provider("high-priority", HighPriorityProvider, detection_priority=5)

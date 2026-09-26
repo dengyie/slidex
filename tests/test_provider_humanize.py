@@ -349,7 +349,7 @@ async def test_scale_slider_skips_image_match_and_uses_full_travel():
     async def _locate(page):
         return _El()
 
-    async def _perform(page, elements, travel, points):
+    async def _perform(page, elements, travel, points, cdp_session=None):
         performed.append((travel, points))
         raise RuntimeError("stop-before-slide")
 

@@ -143,8 +143,13 @@ class ProviderSolverMixin:
 
                 try:
                     # 5. 执行滑动（滑动前装页面内网络打点，滑动后读回）
+                    # CDP 会话可用（真机模式）→ perform_slide 走流水线派发，
+                    # 事件节奏与隧道 RTT 解耦（0.6.24）
                     await self._install_net_tap(page)
-                    await self._provider.perform_slide(page, elements, travel, points)
+                    await self._provider.perform_slide(
+                        page, elements, travel, points,
+                        cdp_session=getattr(self, "_cdp", None),
+                    )
                     logger.debug(f"[{self.pure_user_id}] slide performed")
 
                     # 6. 等待结果

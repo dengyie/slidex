@@ -1,6 +1,17 @@
 # Changelog
 
-## [0.6.23] - 2026-09-25
+## [0.6.24] - 2026-09-26
+
+拖动平滑度修复：CDP 真机模式下轨迹卡顿、不连贯（用户肉眼实测）。
+
+### Fixed
+- **拖动节奏与隧道 RTT 解耦（流水线派发）**：顺序执行路径每个事件都是 `await mouse.move()`/`wait_for_timeout` 的完整往返（VPS→反向隧道→用户 Chrome，30-150ms/次），设计 600ms 的人形时间线（~15 点、25-75ms 间隔）被撕成 2-6 秒台阶，阿里前端看到的是低频大间隔 mousemove 串。新 `slidex/_drag.py`：把拖动 choreography（接近→按下→press-hold→位移点→过冲/回拖→末端握持→松键）编译为 `Input.dispatchMouseEvent` 事件时间线，CDP 会话可用时按设计间隔 fire-and-forget 派发（不等每个 ack）——浏览器收到的事件间隔 = 设计间隔 ± 毫秒级调度抖动。provider 与 legacy 两路接入；容器 patchright 模式（禁 CDP 会话、本地 RTT ~1ms）保持原顺序路径。
+
+### Notes
+- isTrusted 保证：Input domain 派发与 playwright mouse 同源可信；按下期间 mousemove 携带 buttons=1。
+- 测试：`tests/test_drag_pipeline.py` ×4（事件序/按钮态/无双重过冲/**60ms 模拟 RTT 下节奏还原**——顺序实现在该用例必炸/legacy 分支不触碰 page.mouse）。
+
+## [0.6.23] - 2026-09-26
 
 性能优化批：自愈链耗时与 1GB VPS 内存突发双管齐下。
 

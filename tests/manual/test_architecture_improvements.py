@@ -93,7 +93,7 @@ class TestProvider(CaptchaProvider):
         print(f"✓ {self.name}.find_gap() called (custom implementation)")
         return 100, 0.95  # Mock gap position
 
-    async def perform_slide(self, page: Page, elements: ProviderElements, gap_x: int, trajectory: list) -> None:
+    async def perform_slide(self, page: Page, elements: ProviderElements, gap_x: int, trajectory: list, cdp_session=None) -> None:
         """Mock 滑动"""
         print(f"✓ {self.name}.perform_slide(gap_x={gap_x}, trajectory_len={len(trajectory)})")
         # 模拟滑动完成

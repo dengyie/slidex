@@ -50,7 +50,7 @@ class FailingInitProvider(CaptchaProvider):
     async def extract_images(self, page, elements):
         return b"fake", b"fake"
 
-    async def perform_slide(self, page, elements, gap_x, trajectory):
+    async def perform_slide(self, page, elements, gap_x, trajectory, cdp_session=None):
         pass
 
     def validate_response(self, response):
@@ -80,7 +80,7 @@ class FailingGapProvider(CaptchaProvider):
     async def find_gap(self, bg_bytes: bytes, piece_bytes: bytes) -> Tuple[Optional[int], float]:
         raise ValueError("Simulated image decode failure")
 
-    async def perform_slide(self, page, elements, gap_x, trajectory):
+    async def perform_slide(self, page, elements, gap_x, trajectory, cdp_session=None):
         pass
 
     def validate_response(self, response):
@@ -146,7 +146,7 @@ class TestProviderErrorHandling:
             async def extract_images(self, page, elements):
                 pass
 
-            async def perform_slide(self, page, elements, gap_x, trajectory):
+            async def perform_slide(self, page, elements, gap_x, trajectory, cdp_session=None):
                 pass
 
             def validate_response(self, response):
@@ -187,7 +187,7 @@ class TestProviderErrorHandling:
             async def extract_images(self, page, elements):
                 pass
 
-            async def perform_slide(self, page, elements, gap_x, trajectory):
+            async def perform_slide(self, page, elements, gap_x, trajectory, cdp_session=None):
                 pass
 
             def validate_response(self, response):
@@ -232,7 +232,7 @@ class TestProviderErrorHandling:
             async def find_gap(self, bg_bytes: bytes, piece_bytes: bytes) -> Tuple[Optional[int], float]:
                 return 120, 0.95
 
-            async def perform_slide(self, page, elements, gap_x, trajectory):
+            async def perform_slide(self, page, elements, gap_x, trajectory, cdp_session=None):
                 raise RuntimeError("Simulated slide failure")
 
             async def cleanup_after_result(self, page):

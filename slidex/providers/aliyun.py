@@ -2,7 +2,7 @@
 
 import base64
 import json
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 from playwright.async_api import Page, Response
 from loguru import logger
 
@@ -183,12 +183,17 @@ class AliyunNoCaptchaProvider(CaptchaProvider):
         elements: ProviderElements,
         gap_x: int,
         trajectory: List[Tuple[int, int, int]],
+        cdp_session: Optional[Any] = None,
     ) -> None:
         """执行滑动。trajectory 为相对位移 (dx, dy, delay_ms)。
 
         人形化收尾：press-hold（down 后按住再拖）、终点过冲回拖、
         释放前手抖——与 legacy _slide_playwright 对齐。录制轨迹若首点
         是 (0,0,delay) 按住停顿则透传为 hold，不再被统一截到 50ms。
+
+        cdp_session 可用（CDP 真机模式）时走流水线派发（slidex._drag）：
+        事件按设计间隔直达浏览器，节奏不再被隧道 RTT 撕碎；否则保持
+        顺序 mouse.move 路径（容器本地 RTT ~1ms，无此问题）。
         """
         import asyncio
         import random
@@ -201,6 +206,16 @@ class AliyunNoCaptchaProvider(CaptchaProvider):
 
         start_x = btn_box["x"] + btn_box["width"] / 2
         start_y = btn_box["y"] + btn_box["height"] / 2
+
+        if cdp_session is not None:
+            from slidex._drag import build_drag_events, dispatch_drag_timeline
+            pts_abs = [
+                (start_x + float(x), start_y + float(y), float(delay or 0.0))
+                for (x, y, delay) in trajectory
+            ]
+            timeline = build_drag_events(start_x, start_y, pts_abs, extra_overshoot=True)
+            await dispatch_drag_timeline(cdp_session, timeline)
+            return
 
         await page.mouse.move(
             start_x + random.uniform(-8, -3),

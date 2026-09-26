@@ -89,7 +89,7 @@ class TestBoundaryConditions:
             async def extract_images(self, page, elements):
                 return b"fake", b"fake"
 
-            async def perform_slide(self, page, elements, gap_x, trajectory):
+            async def perform_slide(self, page, elements, gap_x, trajectory, cdp_session=None):
                 pass
 
             def validate_response(self, response):
@@ -133,7 +133,7 @@ class TestBoundaryConditions:
                 # 返回负数位置
                 return -10, 0.9
 
-            async def perform_slide(self, page, elements, gap_x, trajectory):
+            async def perform_slide(self, page, elements, gap_x, trajectory, cdp_session=None):
                 # 验证是否会收到负数 gap_x
                 assert gap_x == -10
 
@@ -182,7 +182,7 @@ class TestBoundaryConditions:
                 # 返回超大值
                 return 999999, 0.9
 
-            async def perform_slide(self, page, elements, gap_x, trajectory):
+            async def perform_slide(self, page, elements, gap_x, trajectory, cdp_session=None):
                 pass
 
             def validate_response(self, response):
@@ -212,7 +212,7 @@ class TestBoundaryConditions:
             async def detect(self, page): return False
             async def locate_elements(self, page): pass
             async def extract_images(self, page, elements): pass
-            async def perform_slide(self, page, elements, gap_x, trajectory): pass
+            async def perform_slide(self, page, elements, gap_x, trajectory, cdp_session=None): pass
             def validate_response(self, response): return None
 
         class TestProvider2(CaptchaProvider):
@@ -220,7 +220,7 @@ class TestBoundaryConditions:
             async def detect(self, page): return True  # 不同实现
             async def locate_elements(self, page): pass
             async def extract_images(self, page, elements): pass
-            async def perform_slide(self, page, elements, gap_x, trajectory): pass
+            async def perform_slide(self, page, elements, gap_x, trajectory, cdp_session=None): pass
             def validate_response(self, response): return None
 
         # 第一次注册

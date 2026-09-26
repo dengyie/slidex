@@ -158,7 +158,7 @@ class TestProviderClassMethods:
             async def extract_images(self, page, elements):
                 pass
 
-            async def perform_slide(self, page, elements, gap_x, trajectory):
+            async def perform_slide(self, page, elements, gap_x, trajectory, cdp_session=None):
                 pass
 
             def validate_response(self, response):

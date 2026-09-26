@@ -37,7 +37,7 @@ class TestProviderRegistry:
                 pass
             async def extract_images(self, page, elements):
                 pass
-            async def perform_slide(self, page, elements, gap_x, trajectory):
+            async def perform_slide(self, page, elements, gap_x, trajectory, cdp_session=None):
                 pass
             def validate_response(self, response):
                 return None
@@ -73,7 +73,7 @@ class TestProviderIntegration:
                 pass
             async def extract_images(self, page, elements):
                 pass
-            async def perform_slide(self, page, elements, gap_x, trajectory):
+            async def perform_slide(self, page, elements, gap_x, trajectory, cdp_session=None):
                 pass
             def validate_response(self, response):
                 return None
@@ -133,7 +133,7 @@ class TestProviderClasses:
             async def extract_images(self, page, elements):
                 pass
 
-            async def perform_slide(self, page, elements, gap_x, trajectory):
+            async def perform_slide(self, page, elements, gap_x, trajectory, cdp_session=None):
                 pass
 
             def validate_response(self, response):
