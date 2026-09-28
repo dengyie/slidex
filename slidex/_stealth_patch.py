@@ -45,12 +45,12 @@ STEALTH_LAUNCH_ARGS = [
     '--disable-notifications',
 ]
 
-# 环境一致性旗标（两个后端都补，含 patchright）：容器无 GPU 时 Chromium 默认落
-# SwiftShader，"Google SwiftShader" 渲染串基本只在自动化环境出现；--use-angle=gl
-# 让 ANGLE 走桌面 GL（容器装 libgl1-mesa-dri 后即 Mesa llvmpipe）——真实 Linux
-# 无加速机器的合法特征。语言对齐账号真实客户端（中文平台的会话里 en-US 是矛盾信号）。
+# 环境一致性旗标（两个后端都补，含 patchright）：语言对齐账号真实客户端。
+# WebGL 后端教训（0.6.26）：--use-angle=gl 在容器里因 Mesa GL 栈不完整导致
+# WebGL 完全不可用（glRenderer=(no webgl)）——无 WebGL 比 SwiftShader 更可疑；
+# 显式 swiftshader 保证 WebGL 可用（渲染串审计可见，后续再攻 llvmpipe）。
 ENV_CONSISTENCY_LAUNCH_ARGS = [
-    '--use-angle=gl',
+    '--use-angle=swiftshader',
     '--lang=zh-CN',
     '--accept-lang=zh-CN,zh;q=0.9',
 ]
