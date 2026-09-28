@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from slidex._drag import build_drag_events, dispatch_drag_timeline
+from slidex._drag import build_drag_events, dispatch_drag_timeline, human_events_to_points
 
 
 def _make_timeline_points():
@@ -142,3 +142,27 @@ async def test_replay_recorded_cdp_pipelines_and_releases_at_last_point():
     assert types[-1] == "mouseReleased"
     assert events[-1]["x"] == pytest.approx(100.0 + 258.0)
     assert events[-1]["y"] == pytest.approx(50.0 + 0.0)
+
+
+def test_human_events_to_points_conversion():
+    events = [
+        {"dt": 0, "x": 100.0, "y": 50.0, "buttons": 1},
+        {"dt": 800, "x": 100.0, "y": 50.0, "buttons": 1},   # press-hold 800ms
+        {"dt": 830, "x": 130.0, "y": 51.0, "buttons": 1},
+        {"dt": 860, "x": 258.0, "y": 50.0, "buttons": 1},
+        {"dt": 1500, "x": 258.0, "y": 50.0, "buttons": 0},  # 松键
+    ]
+    pts, distance, duration = human_events_to_points(events)
+    assert len(pts) == 4
+    assert pts[0] == [0.0, 0.0, 800.0]                  # press-hold 原生保留
+    assert pts[1][0] == 30.0 and pts[1][2] == 30.0
+    assert pts[-1] == [0.0, 0.0, 640.0]                # 末点=释放位
+    assert distance == 158.0 and duration == 1500.0
+
+
+def test_human_events_to_points_rejects_non_drags():
+    tiny = [{"dt": i * 10, "x": 100.0 + i, "y": 50.0, "buttons": 1} for i in range(6)]
+    assert human_events_to_points(tiny) == ([], 0.0, 0.0)      # 位移 5px < 50
+    assert human_events_to_points([]) == ([], 0.0, 0.0)
+    short = [{"dt": 0, "x": 100.0, "y": 50.0, "buttons": 1}, {"dt": 100, "x": 200.0, "y": 50.0, "buttons": 0}]
+    assert human_events_to_points(short) == ([], 0.0, 0.0)     # 事件不足

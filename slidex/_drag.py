@@ -103,3 +103,63 @@ async def dispatch_drag_timeline(session: Any, timeline: List[Tuple[float, Dict[
     if failed:
         # 页面中途关闭等场景：让 solve 流程按既有失败路径收尾，不在拖动层炸出
         logger.warning(f"drag timeline: {len(failed)}/{len(tasks)} dispatches failed: {failed[0]}")
+
+
+# ═══ 人类拖动轨迹学习 ═══
+# 用户在 CDP 标签页里手动拖动时录制其真实动作（press-hold 时序、速度曲线、
+# 过冲回拖全是原生的），成功后入轨迹池；此后自动拖动优先回放人类轨迹
+# （load_best_trajectory 优先 success 记录 + 按距离缩放 + 0.6.25 流水线平滑回放）。
+
+DRAG_RECORDER_JS = r"""
+(() => {
+  if (window.__slidexDragRecorder) return;
+  const rec = {active: false, t0: 0, events: []};
+  window.__slidexDragRecorder = rec;
+  document.addEventListener('mousedown', (e) => {
+    if (!e.isTrusted || rec.active) return;
+    rec.active = true;
+    rec.t0 = performance.now();
+    rec.events = [{dt: 0, x: e.clientX, y: e.clientY, buttons: e.buttons}];
+  }, true);
+  document.addEventListener('mousemove', (e) => {
+    if (!rec.active || !e.isTrusted) return;
+    rec.events.push({dt: performance.now() - rec.t0, x: e.clientX, y: e.clientY, buttons: e.buttons});
+  }, true);
+  document.addEventListener('mouseup', (e) => {
+    if (!rec.active || !e.isTrusted) return;
+    rec.active = false;
+    rec.events.push({dt: performance.now() - rec.t0, x: e.clientX, y: e.clientY, buttons: 0});
+    try {
+      sessionStorage.setItem('__slidexLastDrag', JSON.stringify({
+        done: true, events: rec.events, t_end: performance.now(),
+      }));
+    } catch (err) {}
+  }, true);
+})();
+"""
+
+
+def human_events_to_points(events: List[Dict[str, Any]]) -> Tuple[List[List[float]], float, float]:
+    """把录制的人类拖动事件序列转为轨迹池格式。
+
+    events: [{dt, x, y, buttons}]（首事件=按下位置，末事件=松键位置）。
+    返回 (points, distance, duration_ms)：points = [[dx, dy, delay_ms]]，
+    末点即释放位（与轨迹池"末点录制自 up 事件"的语义一致）。
+    非真实拖动（位移 < 50px 或事件 < 5 个）返回 ([], 0, 0)。
+    """
+    if not events or len(events) < 5:
+        return [], 0.0, 0.0
+    pts = []
+    prev = events[0]
+    for ev in events[1:]:
+        pts.append([
+            float(ev["x"]) - float(prev["x"]),
+            float(ev["y"]) - float(prev["y"]),
+            max(0.0, float(ev["dt"]) - float(prev["dt"])),
+        ])
+        prev = ev
+    distance = float(events[-1]["x"]) - float(events[0]["x"])
+    duration = float(events[-1]["dt"])
+    if abs(distance) < 50:
+        return [], 0.0, 0.0
+    return pts, distance, duration

@@ -637,6 +637,8 @@ class SliderSolver(ProviderSolverMixin):
         try:
             await self._connect_existing_browser(cdp_endpoint, page_url)
             success, cookies = await self._run_solve_loop(page_url)
+            if success:
+                await self._export_human_drag_recording(page_url)
             self._finalize_telemetry(
                 success=success,
                 status="success" if success else "failed",
@@ -835,6 +837,36 @@ class SliderSolver(ProviderSolverMixin):
         logger.warning(f"[{self.pure_user_id}] all auto retries exhausted")
         return await self._fallback_or_fail(verify_url)
 
+    async def _export_human_drag_recording(self, verify_url: str = ""):
+        """把用户在本标签页里手动拖过的真实动作录进轨迹池（0.6.27 学习闭环）。
+
+        录制器（DRAG_RECORDER_JS）记录可信鼠标事件；读取最近一次完成的拖动，
+        转换入池（success=True，source=human_cdp）。非真实拖动自动跳过。
+        """
+        if not (getattr(self, "page", None) and getattr(self, "_trajectory_pool", None)):
+            return
+        try:
+            from slidex._drag import human_events_to_points
+            raw = await self.page.evaluate(
+                "() => { try { return JSON.parse(sessionStorage.getItem('__slidexLastDrag') || 'null'); } catch (e) { return null; } }"
+            )
+            if not raw or not raw.get("done"):
+                return
+            pts, distance, duration = human_events_to_points(raw.get("events") or [])
+            if not pts:
+                logger.debug(f"[{self.pure_user_id}] human drag recording skipped (not a real drag)")
+                return
+            self._trajectory_pool.save_trajectory(
+                pts, self.pure_user_id, distance, True, verify_url, duration, source="human_cdp"
+            )
+            logger.info(
+                f"[{self.pure_user_id}] human drag trajectory saved to pool "
+                f"(dist={distance:.0f}px, {len(pts)} pts, {duration:.0f}ms) — 自动拖动将优先回放真人轨迹"
+            )
+        except Exception as e:
+            logger.debug(f"[{self.pure_user_id}] human drag export failed: {e}")
+
+
     async def _fallback_or_fail(self, verify_url):
         # 手动通过收割：checkCookie 链已在页面层走通并发出 bx-x5sec 票据
         # （典型场景：CDP 模式下真人在外部浏览器拖过了滑块），但 provider 的
@@ -857,6 +889,7 @@ class SliderSolver(ProviderSolverMixin):
                 # 均全自动），"manual" 旧标签曾误导排查——"manual pass" 专属
                 # CDP 人工等待期真人拖过的分支
                 logger.success(f"[{self.pure_user_id}] pass! (auto voucher harvest)")
+                await self._export_human_drag_recording(verify_url)
                 self._emit_step("solve", "voucher_harvest", "ok")
                 return True, cookies
             logger.warning(f"[{self.pure_user_id}] voucher present but x5sec did not settle")
@@ -897,6 +930,7 @@ class SliderSolver(ProviderSolverMixin):
                         cookies = None
                     if self._has_validation_cookie(cookies):
                         logger.success(f"[{self.pure_user_id}] pass! (manual pass during wait)")
+                        await self._export_human_drag_recording(verify_url)
                         self._emit_step("solve", "manual_wait", "ok")
                         return True, cookies
                 try:
@@ -905,6 +939,7 @@ class SliderSolver(ProviderSolverMixin):
                     jar = {}
                 if jar.get("x5sec"):
                     logger.success(f"[{self.pure_user_id}] pass! (x5sec landed in jar during manual wait)")
+                    await self._export_human_drag_recording(verify_url)
                     self._emit_step("solve", "manual_wait", "ok")
                     return True, jar
                 await asyncio.sleep(1.5)
@@ -1490,6 +1525,13 @@ class SliderSolver(ProviderSolverMixin):
                 await self._inject_cookies()
             except Exception as e:
                 logger.warning(f"[{self.pure_user_id}] CDP cookie inject failed: {e}")
+            # 人类拖动轨迹录制器（0.6.27）：页面级 init script，只作用于本专用
+            # 标签页；记录可信拖动事件，成功后入轨迹池供自动拖动回放学习
+            try:
+                from slidex._drag import DRAG_RECORDER_JS
+                await self.page.add_init_script(DRAG_RECORDER_JS)
+            except Exception as e:
+                logger.debug(f"[{self.pure_user_id}] drag recorder inject failed: {e}")
             await self._goto_page(self.page, page_url)
             await asyncio.sleep(3)
 

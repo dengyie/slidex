@@ -52,7 +52,7 @@ class SliderTrajectoryPool:
     # ── 保存 ──────────────────────────────────────────────────
     def save_trajectory(self, points: List[List[float]], cookie_id: str,
                         distance: float, success: bool, verify_url: str = "",
-                        duration_ms: float = 0) -> Optional[str]:
+                        duration_ms: float = 0, source: str = "auto") -> Optional[str]:
         """持久化一条轨迹，返回文件名，超出上限时淘汰最旧的"""
         cookie_id = self._sanitize_cookie_id(cookie_id)
         cdir = self._cookie_dir(cookie_id)
@@ -79,6 +79,7 @@ class SliderTrajectoryPool:
             "verify_url_hash": hashlib.md5(str(verify_url or "").encode()).hexdigest()[:8],
             "distance": round(float(distance), 1),
             "success": bool(success),
+            "source": str(source or "auto"),
             "duration_ms": round(float(duration_ms), 1),
             "points": [[round(float(p[0]), 2), round(float(p[1]), 2), round(float(p[2]), 1)]
                        for p in points],
