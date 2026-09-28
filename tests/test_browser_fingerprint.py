@@ -120,7 +120,7 @@ async def test_init_browser_uses_chrome_channel_and_consistency_args(monkeypatch
     await s._init_browser()
 
     assert captured.get("channel") == "chrome"
-    assert "--use-angle=gl" in captured["args"]
+    assert "--use-angle=swiftshader" in captured["args"]
     assert "--accept-lang=zh-CN,zh;q=0.9" in captured["args"]
     assert s.browser_channel == "chrome"
     # 审计默认开启：evaluate 被调用且落了一行指纹日志
