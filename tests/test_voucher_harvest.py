@@ -338,7 +338,7 @@ async def test_generated_loop_harvests_voucher_mid_retries():
     async def _distance():
         return 258
 
-    async def _noop_slide(distance, attempt, recorded_trajectory=None):
+    async def _noop_slide(distance, attempt, plan=None):
         return None
 
     attempts = {"n": 0}

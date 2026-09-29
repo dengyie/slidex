@@ -34,7 +34,9 @@ def _resolve_browser_channel() -> Optional[str]:
     return None
 
 from slidex._stealth_patch import STEALTH_LAUNCH_ARGS, STEALTH_INIT_SCRIPT, ENV_CONSISTENCY_LAUNCH_ARGS, MEMORY_GUARD_LAUNCH_ARGS
-from slidex._trajectory import generate_trajectory, slide_end_hold_range, trajectory_to_points
+from slidex._drag import DragDispatchError
+from slidex._gestures import GestureSession, generate_archetype
+from slidex._trajectory import slide_end_hold_range
 from slidex._image_match import SliderImageMatcher
 from slidex._trajectory_pool import SliderTrajectoryPool
 from slidex._sanitize import sanitize_pure_user_id
@@ -131,7 +133,6 @@ class SliderSolver(ProviderSolverMixin):
         self.proxy = dict(proxy or {})
         self.trajectory_mode = trajectory_mode
         self.last_fallback_used = None
-        self._current_recorded_trajectory = None
         self._config = config or SlidexConfig()
         self._notification_callback = notification_callback
         self._is_cdp_mode = False
@@ -767,66 +768,56 @@ class SliderSolver(ProviderSolverMixin):
 
         success_code = self.selectors["success_code"]
 
-        # ── Phase A: 录制轨迹模式 ──
-        if self.trajectory_mode in ("auto", "recorded"):
-            recorded = self._trajectory_pool.load_best_trajectory(
-                self.pure_user_id, distance)
-            if recorded and recorded.get("points"):
-                logger.info(f"[{self.pure_user_id}] using recorded trajectory "
-                            f"(dist={recorded['distance']:.0f}px, {len(recorded['points'])} points)")
-                for attempt in range(1, self.MAX_RETRIES + 1):
-                    self._emit_step("legacy", "slide_attempt", "started", mode="recorded", attempt=attempt, distance=distance)
-                    await self._do_slide(distance, attempt, recorded_trajectory=recorded)
-                    ok, code = await self._wait_slide_outcome(6.0, success_code)
-                    logger.info(f"[{self.pure_user_id}] recorded replay attempt {attempt}: ok={ok} code={code}")
-                    self._emit_step(
-                        "legacy",
-                        "slide_attempt",
-                        "ok" if ok else "failed",
-                        mode="recorded",
-                        attempt=attempt,
-                        slide_code=code,
-                    )
-                    if ok:
-                        cookies = await self._get_cookies()
-                        logger.success(f"[{self.pure_user_id}] pass! (recorded, attempt={attempt})")
-                        cookies = await self._settle_x5sec(self.page, cookies)
-                        return True, cookies
-                    if self._bx_voucher:
-                        # 本轮拖动实际已过（checkCookie 链发出票据），outcome 等待器
-                        # 没看到而已——立即收割，不再空耗剩余重试
-                        return await self._fallback_or_fail(verify_url)
-                    if attempt < self.MAX_RETRIES:
-                        await asyncio.sleep(2 + random.uniform(1, 2))
-                        if not await self._wait_slider(10.0):
-                            break
-                        distance = await self._calc_distance_multi_source() or distance
-                logger.warning(f"[{self.pure_user_id}] recorded replays exhausted")
-                if self.trajectory_mode == "recorded":
-                    return await self._fallback_or_fail(verify_url)
-
-        # ── Phase B: 数学模型生成的轨迹 ──
-        logger.info(f"[{self.pure_user_id}] trying generated trajectories...")
+        # 一次 solve 只建一个 GestureSession；环内每次 attempt 先 next 再只播 plan。
+        session = GestureSession(
+            getattr(self, "_trajectory_pool", None),
+            getattr(self, "pure_user_id", "default"),
+            getattr(self, "trajectory_mode", "auto"),
+        )
+        last_code = None
+        logger.info(f"[{self.pure_user_id}] trying orthogonal gesture session...")
         for attempt in range(1, self.MAX_RETRIES + 1):
-            self._emit_step("legacy", "slide_attempt", "started", mode="generated", attempt=attempt, distance=distance)
-            await self._do_slide(distance, attempt)
+            plan = session.next(float(distance or 0.0), last_code)
+            if plan is None:
+                logger.warning(f"[{self.pure_user_id}] gesture session exhausted (mode={self.trajectory_mode})")
+                return await self._fallback_or_fail(verify_url)
+            self._active_plan = plan
+            self._emit_step(
+                "legacy",
+                "slide_attempt",
+                "started",
+                mode=plan.archetype,
+                attempt=attempt,
+                distance=distance,
+            )
+            try:
+                await self._do_slide(distance, attempt)
+            except DragDispatchError as e:
+                logger.warning(
+                    f"[{self.pure_user_id}] CDP drag dispatch failed: {e}; "
+                    "aborting rather than locking the same gesture family"
+                )
+                return await self._fallback_or_fail(verify_url)
             ok, code = await self._wait_slide_outcome(6.0, success_code)
-            logger.info(f"[{self.pure_user_id}] generated attempt {attempt}: ok={ok} code={code}")
+            last_code = code if code is not None else -1
+            logger.info(
+                f"[{self.pure_user_id}] gesture {plan.archetype} attempt {attempt}: "
+                f"ok={ok} code={code}"
+            )
             self._emit_step(
                 "legacy",
                 "slide_attempt",
                 "ok" if ok else "failed",
-                mode="generated",
+                mode=plan.archetype,
                 attempt=attempt,
                 slide_code=code,
             )
             if ok:
                 cookies = await self._get_cookies()
-                logger.success(f"[{self.pure_user_id}] pass! (generated, attempt={attempt})")
+                logger.success(f"[{self.pure_user_id}] pass! ({plan.archetype}, attempt={attempt})")
                 cookies = await self._settle_x5sec(self.page, cookies)
                 return True, cookies
             if self._bx_voucher:
-                # 同 recorded 路径：票据已出现即收割，不空耗剩余重试
                 return await self._fallback_or_fail(verify_url)
             if attempt < self.MAX_RETRIES:
                 await asyncio.sleep(2 + random.uniform(1, 2))
@@ -1253,35 +1244,6 @@ class SliderSolver(ProviderSolverMixin):
             logger.warning(f"[{self.pure_user_id}] CDP replay error: {e}")
             return False
 
-    async def _replay_recorded_playwright(self, points, sx, sy):
-        try:
-            await self.page.mouse.move(sx + random.uniform(-5, -1), sy + random.uniform(1, 4))
-            await asyncio.sleep(random.uniform(0.05, 0.12))
-            await self.page.mouse.move(sx, sy)
-            await asyncio.sleep(random.uniform(0.02, 0.06))
-            await self.page.mouse.down()
-            # 录制回放同样需要"按下按住再拖"的真人停顿（看雪 284633 量级 1200ms）
-            await asyncio.sleep(random.uniform(600, 1200) / 1000.0)
-
-            for dx, dy, delay_ms in points:
-                await self.page.mouse.move(sx + dx, sy + dy)
-                await asyncio.sleep(delay_ms / 1000.0)
-
-            # 释放前人手抖动：左右 ±2px 再回到释放位（对齐真人收尾）
-            end_x = sx + points[-1][0]
-            await self.page.mouse.move(end_x - random.uniform(1.5, 2.5), sy + points[-1][1])
-            await asyncio.sleep(random.uniform(0.02, 0.05))
-            await self.page.mouse.move(end_x + random.uniform(1.0, 2.0), sy + points[-1][1])
-            await asyncio.sleep(random.uniform(0.02, 0.05))
-            # 0.6.18 真人要领：终点变绿后握住停顿再松键（验证在松键时刻评估）
-            end_hold_lo, end_hold_hi = slide_end_hold_range()
-            await asyncio.sleep(random.uniform(end_hold_lo, end_hold_hi))
-            await self.page.mouse.up()
-            return True
-        except Exception as e:
-            logger.warning(f"[{self.pure_user_id}] Playwright replay error: {e}")
-            return False
-
     # ════════════════════════════════════════════════════════════
     #  浏览器初始化与页面加载
     # ════════════════════════════════════════════════════════════
@@ -1644,7 +1606,7 @@ class SliderSolver(ProviderSolverMixin):
     # ════════════════════════════════════════════════════════════
     #  滑动执行（统一入口）
     # ════════════════════════════════════════════════════════════
-    async def _do_slide(self, distance, attempt, recorded_trajectory=None):
+    async def _do_slide(self, distance, attempt, plan=None):
         btn = None
         try:
             btn = await self._query_in_challenge_scope(self.selectors["slider_btn"])
@@ -1665,59 +1627,49 @@ class SliderSolver(ProviderSolverMixin):
         self._slide_code = None
         self._slide_ok = None
 
-        # ── 录制轨迹回放 ──
-        if recorded_trajectory and recorded_trajectory.get("points"):
-            points = recorded_trajectory["points"]
-            logger.info(f"[{self.pure_user_id}] replaying recorded trajectory: "
-                        f"dist={distance:.0f}px, {len(points)} points")
+        if plan is None:
+            plan = getattr(self, "_active_plan", None)
+        if plan is None:
+            # 兼容无 plan 的旧调用（test_do_slide_generated_pipelines）：一次性 minimum_jerk
+            plan = generate_archetype("minimum_jerk", float(distance or 0.0))
+        self._active_plan = plan
 
-            scaled = points_from_recorded(recorded_trajectory, distance)
-            if scaled:
-                if scaled != points:
-                    logger.info(f"[{self.pure_user_id}] scaled recorded trajectory to {distance:.0f}px")
-                points = scaled
+        points = list(plan.points)
+        extra = bool(plan.extra_overshoot)
+        logger.info(
+            f"[{self.pure_user_id}] sliding ({plan.archetype}): dist={distance:.0f}px "
+            f"steps={len(points)} extra_overshoot={extra} from=({sx:.0f},{sy:.0f})"
+        )
 
-            cdp = getattr(self, "_cdp", None)
-            if cdp:
-                ok = await self._replay_recorded_cdp(points, sx, sy)
-                if ok:
-                    return
-            await self._replay_recorded_playwright(points, sx, sy)
-            return
-
-        # ── 数学模型生成轨迹 ──
         cdp = getattr(self, "_cdp", None)
-        if cdp is None:
-            await self._slide_playwright(distance, attempt, btn, sx, sy)
-            return
+        if cdp is not None:
+            try:
+                from slidex._drag import apply_end_hold_scale, build_drag_events, dispatch_drag_timeline
+                pts_abs = [
+                    (sx + float(dx), sy + float(dy), float(delay or 0.0))
+                    for (dx, dy, delay) in points
+                ]
+                timeline = build_drag_events(sx, sy, pts_abs, extra_overshoot=extra)
+                apply_end_hold_scale(timeline, getattr(plan, "end_hold_scale", 1.0))
+                await dispatch_drag_timeline(cdp, timeline)
+                return
+            except DragDispatchError:
+                raise
+            except Exception as e:
+                logger.warning(f"[{self.pure_user_id}] CDP failed: {e}, falling back")
+                self._cdp = None
+        await self._slide_playwright(distance, attempt, btn, sx, sy, plan=plan)
 
-        traj = generate_trajectory(distance, attempt)
-        logger.info(f"[{self.pure_user_id}] sliding (generated): dist={distance:.0f}px steps={len(traj)} from=({sx:.0f},{sy:.0f})")
-
+    async def _slide_playwright(self, distance, attempt, btn, sx, sy, plan=None):
         try:
-            # 0.6.25: 统一走流水线派发（_drag）——旧内联实现逐事件 await cdp.send，
-            # CDP 模式下每个点一次隧道往返，节奏被 RTT 撕碎（用户实测卡顿）
-            from slidex._drag import build_drag_events, dispatch_drag_timeline
-            pts_abs = [(sx + float(dx), sy + float(dy), float(delay or 0.0)) for (dx, dy, delay) in traj]
-            timeline = build_drag_events(sx, sy, pts_abs, extra_overshoot=True)
-            await dispatch_drag_timeline(cdp, timeline)
-        except Exception as e:
-            logger.warning(f"[{self.pure_user_id}] CDP failed: {e}, falling back")
-            self._cdp = None
-            await self._slide_playwright(distance, attempt, btn, sx, sy)
-
-    async def _slide_playwright(self, distance, attempt, btn, sx, sy):
-        try:
+            if plan is None:
+                plan = getattr(self, "_active_plan", None)
+            if plan is None:
+                plan = generate_archetype("minimum_jerk", float(distance or 0.0))
             sx2 = sx + random.uniform(-2, 2)
             sy2 = sy + random.uniform(-2, 2)
-            # 按下后按住一段再拖 + 终点过冲回拖/释放抖动：对齐真人行为特征
-            # （看雪 284633 成功案例：down 后 1200ms 才动 + 收尾回拖 ±2px）
-            traj = generate_trajectory(
-                distance, attempt,
-                press_hold_ms=random.uniform(600, 1200),
-                overshoot_back=True,
-            )
-            pts = trajectory_to_points(traj, sx2, sy2)
+            pts = [(sx2 + float(x), sy2 + float(y), float(d)) for (x, y, d) in plan.points]
+            extra = bool(plan.extra_overshoot)
             # 本方法仅在无 CDP 会话时被调用（CDP 模式的生成/回放路径在 _do_slide
             # 内直接走 _drag 流水线），保持顺序 mouse 路径（容器本地 RTT ~1ms）
             await self.page.mouse.move(sx2 + random.uniform(-8, -3), sy2 + random.uniform(2, 6))
@@ -1725,15 +1677,22 @@ class SliderSolver(ProviderSolverMixin):
             await self.page.mouse.move(sx2, sy2)
             await asyncio.sleep(random.uniform(0.02, 0.06))
             await self.page.mouse.down()
-            # pts[0] 是按下后按住不动的停顿（press_hold），从第 1 个位移点开始拖
             hold = pts[0][2] / 1000.0 if pts else 0.8
             await asyncio.sleep(hold)
-            for x, y, d in pts[1:]:
+            slide_pts = pts[1:] if pts else []
+            for x, y, d in slide_pts:
                 await self.page.mouse.move(x, y)
                 await asyncio.sleep(d / 1000.0)
-            # 0.6.18 真人要领：终点变绿后握住停顿再松键（验证在松键时刻评估）
+            if extra and slide_pts:
+                end_x = slide_pts[-1][0]
+                end_y = slide_pts[-1][1]
+                await self.page.mouse.move(end_x - random.uniform(1.5, 2.5), end_y)
+                await asyncio.sleep(random.uniform(0.02, 0.05))
+                await self.page.mouse.move(end_x + random.uniform(1.0, 2.0), end_y)
+                await asyncio.sleep(random.uniform(0.02, 0.05))
             end_hold_lo, end_hold_hi = slide_end_hold_range()
-            await asyncio.sleep(random.uniform(end_hold_lo, end_hold_hi))
+            scale = float(getattr(plan, "end_hold_scale", 1.0) or 1.0)
+            await asyncio.sleep(random.uniform(end_hold_lo, end_hold_hi) * scale)
             await self.page.mouse.up()
         except Exception as e:
             logger.warning(f"[{self.pure_user_id}] Playwright slide error: {e}")

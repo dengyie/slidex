@@ -1,10 +1,13 @@
 """GeeTest (极验) Provider"""
 
 import json
+import random
 from typing import Iterable, List, Optional, Tuple
 from urllib.parse import urlparse
 from playwright.async_api import Page, Response
 from loguru import logger
+
+from slidex._trajectory import slide_end_hold_range
 
 from slidex.providers import CaptchaProvider, ProviderElements, SolveResult
 from slidex.vision.models import ChallengeType, ProviderManifest, VisionContext
@@ -136,6 +139,8 @@ class GeeTestProvider(CaptchaProvider):
         elements: ProviderElements,
         gap_x: int,
         trajectory: List[Tuple[int, int, int]],
+        extra_overshoot: bool = True,
+        end_hold_scale: float = 1.0,
     ) -> None:
         """执行滑动。trajectory 为相对位移 (dx, dy, delay_ms)。"""
         self.bind_response_listener(page)
@@ -149,13 +154,34 @@ class GeeTestProvider(CaptchaProvider):
 
         await page.mouse.move(start_x, start_y)
         await page.mouse.down()
-        await page.wait_for_timeout(100)
 
-        for x, y, ts_ms in trajectory:
+        hold_ms = 100.0
+        slide_points = trajectory
+        if trajectory and trajectory[0][0] == 0 and trajectory[0][1] == 0 and trajectory[0][2] > 0:
+            hold_ms = float(trajectory[0][2])
+            slide_points = trajectory[1:]
+        await page.wait_for_timeout(int(hold_ms))
+
+        for x, y, ts_ms in slide_points:
             await page.mouse.move(start_x + x, start_y + y)
-            await page.wait_for_timeout(15)
+            delay = 15 if ts_ms is None else max(0, int(float(ts_ms)))
+            if delay:
+                await page.wait_for_timeout(delay)
 
-        await page.wait_for_timeout(100)
+        end_x = start_x + slide_points[-1][0] if slide_points else start_x
+        end_y = start_y + slide_points[-1][1] if slide_points else start_y
+        if extra_overshoot and slide_points:
+            overshoot = random.uniform(3.0, 6.0)
+            back = random.uniform(2.0, 3.5)
+            await page.mouse.move(end_x + overshoot, end_y + random.uniform(-1.5, 1.5))
+            await page.wait_for_timeout(random.randint(60, 110))
+            await page.mouse.move(end_x + overshoot - back, end_y + random.uniform(-1.0, 1.0))
+            await page.wait_for_timeout(random.randint(50, 90))
+            await page.mouse.move(end_x + random.uniform(-1.0, 1.0), end_y)
+
+        end_hold_lo, end_hold_hi = slide_end_hold_range()
+        scale = max(0.0, float(end_hold_scale or 1.0))
+        await page.wait_for_timeout(int(random.uniform(end_hold_lo, end_hold_hi) * 1000 * scale))
         await page.mouse.up()
 
     # GeeTest 验证响应的 URL 特征：host 属于 geetest 域（含私有化部署的自定义域），
@@ -205,9 +231,19 @@ class GeeTestProvider(CaptchaProvider):
             # v3: {"success": 1, "message": "success"}
             # v4: {"code": 0, "status": "success"}
             if isinstance(data, dict):
+                raw_code = data.get("code")
+                if raw_code is not None:
+                    try:
+                        self._result_code = int(raw_code)
+                    except (TypeError, ValueError):
+                        pass
                 if data.get("success") == 1 or data.get("status") == "success":
+                    if self._result_code is None:
+                        self._result_code = 0
                     return True
                 if data.get("success") == 0 or data.get("status") == "fail":
+                    if self._result_code is None:
+                        self._result_code = 1
                     return False
 
         except Exception as e:

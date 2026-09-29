@@ -184,6 +184,8 @@ class AliyunNoCaptchaProvider(CaptchaProvider):
         gap_x: int,
         trajectory: List[Tuple[int, int, int]],
         cdp_session: Optional[Any] = None,
+        extra_overshoot: bool = True,
+        end_hold_scale: float = 1.0,
     ) -> None:
         """执行滑动。trajectory 为相对位移 (dx, dy, delay_ms)。
 
@@ -208,12 +210,15 @@ class AliyunNoCaptchaProvider(CaptchaProvider):
         start_y = btn_box["y"] + btn_box["height"] / 2
 
         if cdp_session is not None:
-            from slidex._drag import build_drag_events, dispatch_drag_timeline
+            from slidex._drag import apply_end_hold_scale, build_drag_events, dispatch_drag_timeline
             pts_abs = [
                 (start_x + float(x), start_y + float(y), float(delay or 0.0))
                 for (x, y, delay) in trajectory
             ]
-            timeline = build_drag_events(start_x, start_y, pts_abs, extra_overshoot=True)
+            timeline = build_drag_events(
+                start_x, start_y, pts_abs, extra_overshoot=bool(extra_overshoot),
+            )
+            apply_end_hold_scale(timeline, end_hold_scale)
             await dispatch_drag_timeline(cdp_session, timeline)
             return
 
@@ -243,19 +248,21 @@ class AliyunNoCaptchaProvider(CaptchaProvider):
             if delay:
                 await page.wait_for_timeout(int(delay))
 
-        # 终点过冲 3-6px → 回拖 2-3.5px → 释放位 ±1px 手抖
         end_x = start_x + slide_points[-1][0] if slide_points else start_x
         end_y = start_y + slide_points[-1][1] if slide_points else start_y
-        overshoot = random.uniform(3.0, 6.0)
-        back = random.uniform(2.0, 3.5)
-        await page.mouse.move(end_x + overshoot, end_y + random.uniform(-1.5, 1.5))
-        await page.wait_for_timeout(random.randint(60, 110))
-        await page.mouse.move(end_x + overshoot - back, end_y + random.uniform(-1.0, 1.0))
-        await page.wait_for_timeout(random.randint(50, 90))
-        await page.mouse.move(end_x + random.uniform(-1.0, 1.0), end_y)
+        if extra_overshoot:
+            # 终点过冲 3-6px → 回拖 2-3.5px → 释放位 ±1px 手抖
+            overshoot = random.uniform(3.0, 6.0)
+            back = random.uniform(2.0, 3.5)
+            await page.mouse.move(end_x + overshoot, end_y + random.uniform(-1.5, 1.5))
+            await page.wait_for_timeout(random.randint(60, 110))
+            await page.mouse.move(end_x + overshoot - back, end_y + random.uniform(-1.0, 1.0))
+            await page.wait_for_timeout(random.randint(50, 90))
+            await page.mouse.move(end_x + random.uniform(-1.0, 1.0), end_y)
         # 0.6.18 真人要领：终点变绿后握住停顿再松键（验证在松键时刻评估）
         end_hold_lo, end_hold_hi = slide_end_hold_range()
-        await page.wait_for_timeout(int(random.uniform(end_hold_lo, end_hold_hi) * 1000))
+        scale = max(0.0, float(end_hold_scale or 1.0))
+        await page.wait_for_timeout(int(random.uniform(end_hold_lo, end_hold_hi) * 1000 * scale))
         await page.mouse.up()
 
     async def validate_response(self, response: Response) -> Optional[bool]:
@@ -267,6 +274,11 @@ class AliyunNoCaptchaProvider(CaptchaProvider):
             body = await response.body()
             text = body.decode("utf-8", errors="ignore")
             data = json.loads(text)
+            if isinstance(data, dict) and "code" in data:
+                try:
+                    self._result_code = int(data["code"])
+                except (TypeError, ValueError):
+                    pass
             return interpret_slide_json(data, success_code=0)
         except Exception as e:
             logger.debug(f"validate_response error: {e}")

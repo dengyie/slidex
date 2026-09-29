@@ -107,6 +107,49 @@ class SliderTrajectoryPool:
                 logger.debug(f"[TrajectoryPool] skip corrupt {fp}: {e}")
         return records
 
+    def load_unused_human(
+        self,
+        cookie_id: str,
+        target_distance: float,
+        exclude_files: Optional[set] = None,
+        tolerance: float = 0.10,
+    ) -> Optional[dict]:
+        """Next unused human recording within ``tolerance`` of ``target_distance``.
+
+        Unlike ``load_best_trajectory`` this never widens past the given
+        tolerance, never falls back to failed/auto traces, and skips files
+        already consumed by the current ``GestureSession``.
+        """
+        cookie_id = self._sanitize_cookie_id(cookie_id)
+        skip = set()
+        for p in (exclude_files or set()):
+            skip.add(str(p))
+            skip.add(os.path.basename(str(p)))
+        records = []
+        for r in self._load_all(cookie_id):
+            source = str(r.get("source") or "")
+            if not r.get("success"):
+                continue
+            if not source.startswith("human"):
+                continue
+            fname = os.path.basename(str(r.get("_file") or ""))
+            if fname in skip or str(r.get("_file") or "") in skip:
+                continue
+            d = abs(float(r.get("distance") or 0.0) - float(target_distance))
+            ratio = d / max(float(target_distance), 1.0)
+            if ratio <= float(tolerance):
+                records.append((d, r))
+        if not records:
+            return None
+        records.sort(key=lambda item: (item[0], item[1].get("_file") or ""))
+        best = records[0][1]
+        logger.info(
+            f"[TrajectoryPool] unused human for dist={target_distance:.0f}: "
+            f"loaded dist={best['distance']:.0f}px file={os.path.basename(best.get('_file', ''))}"
+        )
+        self._touch_last_used(cookie_id, best["_file"])
+        return best
+
     def load_best_trajectory(self, cookie_id: str, target_distance: float,
                              distance_tolerance: float = 0.10) -> Optional[dict]:
         """按距离匹配最佳轨迹（优先成功过的），支持回退放宽 tolerance"""

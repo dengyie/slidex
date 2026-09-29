@@ -18,6 +18,7 @@ def cleanup_test_providers():
         "crashing-detect",
         "cleanup-tracking",
         "slide-failure-cleanup",
+        "dispatch-fail",
     ]
     for name in test_providers:
         if name in ProviderRegistry._providers:
@@ -253,3 +254,48 @@ class TestProviderErrorHandling:
         assert success is False
         assert cookies is None
         assert cleanup_called is True
+
+    @pytest.mark.asyncio
+    async def test_drag_dispatch_error_aborts_without_family_lock(self):
+        from slidex._drag import DragDispatchError
+
+        class DispatchFailProvider(CaptchaProvider):
+            name = "dispatch-fail"
+
+            def __init__(self):
+                super().__init__()
+                self.slide_calls = 0
+
+            async def detect(self, page):
+                return True
+
+            async def locate_elements(self, page):
+                return ProviderElements(
+                    slider_btn=AsyncMock(),
+                    slider_track=AsyncMock(),
+                    bg_img=None,
+                    piece_img=None,
+                    track_width_px=300,
+                )
+
+            async def extract_images(self, page, elements):
+                return b"fake_bg", b"fake_piece"
+
+            async def find_gap(self, bg_bytes: bytes, piece_bytes: bytes) -> Tuple[Optional[int], float]:
+                return 120, 0.95
+
+            async def perform_slide(self, page, elements, gap_x, trajectory, cdp_session=None):
+                self.slide_calls += 1
+                raise DragDispatchError("cdp closed")
+
+            async def validate_response(self, response):
+                return None
+
+        SliderSolver.register_provider("dispatch-fail", DispatchFailProvider)
+        solver = SliderSolver(provider="dispatch-fail")
+        page = AsyncMock()
+        await solver._detect_and_init_provider(page)
+        success, cookies = await solver._solve_with_provider(page)
+        assert success is False
+        assert cookies is None
+        assert solver._provider.slide_calls == 1

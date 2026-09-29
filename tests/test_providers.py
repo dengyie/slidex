@@ -107,6 +107,72 @@ class TestProviderClasses:
         assert result is True
 
     @pytest.mark.asyncio
+    async def test_aliyun_cdp_applies_end_hold_scale(self, monkeypatch):
+        captured = {}
+
+        async def fake_dispatch(session, timeline):
+            captured["gap"] = timeline[-1][0]
+
+        monkeypatch.setattr("slidex._drag.dispatch_drag_timeline", fake_dispatch)
+        monkeypatch.setattr("slidex._drag.slide_end_hold_range", lambda: (0.50, 0.50))
+
+        provider = AliyunNoCaptchaProvider()
+        slider_btn = AsyncMock()
+        slider_btn.bounding_box = AsyncMock(
+            return_value={"x": 0.0, "y": 0.0, "width": 40.0, "height": 40.0}
+        )
+        elements = type("Elements", (), {"slider_btn": slider_btn})()
+        page = MagicMock()
+        page.on = MagicMock()
+
+        class _Sess:
+            async def send(self, method, params=None):
+                return None
+
+        await provider.perform_slide(
+            page,
+            elements,
+            100,
+            [(0, 0, 50), (100, 0, 30)],
+            cdp_session=_Sess(),
+            extra_overshoot=False,
+            end_hold_scale=1.6,
+        )
+        assert captured["gap"] == pytest.approx(500.0 * 1.6)
+
+    @pytest.mark.asyncio
+    async def test_mixin_forwards_end_hold_scale(self):
+        from slidex._gestures import GesturePlan
+
+        solver = SliderSolver(provider="aliyun-nocaptcha")
+        received = {}
+
+        async def fake_slide(
+            page,
+            elements,
+            gap_x,
+            trajectory,
+            extra_overshoot=True,
+            end_hold_scale=1.0,
+            cdp_session=None,
+        ):
+            received["extra_overshoot"] = extra_overshoot
+            received["end_hold_scale"] = end_hold_scale
+            received["cdp_session"] = cdp_session
+
+        solver._provider = MagicMock()
+        solver._provider.perform_slide = fake_slide
+        plan = GesturePlan(
+            archetype="overshoot_snapback",
+            points=[(0, 0, 50), (100, 0, 30)],
+            extra_overshoot=False,
+            end_hold_scale=1.6,
+        )
+        await solver._call_perform_slide(None, None, 100, list(plan.points), plan)
+        assert received.get("end_hold_scale") == pytest.approx(1.6)
+        assert received.get("extra_overshoot") is False
+
+    @pytest.mark.asyncio
     async def test_geetest_validate_response_awaits_body(self):
         response = type("Response", (), {})()
         response.url = "https://api.geetest.com/api/v4/slider"
@@ -116,8 +182,88 @@ class TestProviderClasses:
 
         response.body = body
 
-        result = await GeeTestProvider().validate_response(response)
+        provider = GeeTestProvider()
+        result = await provider.validate_response(response)
         assert result is True
+        assert provider._result_code == 0
+
+    @pytest.mark.asyncio
+    async def test_geetest_validate_response_fail_writes_code(self):
+        response = type("Response", (), {})()
+        response.url = "https://api.geetest.com/api/v4/slider"
+
+        async def body():
+            return b'{"status": "fail"}'
+
+        response.body = body
+        provider = GeeTestProvider()
+        result = await provider.validate_response(response)
+        assert result is False
+        assert provider._result_code == 1
+
+    @pytest.mark.asyncio
+    async def test_get_result_packet_fail_without_numeric_code_is_not_minus_one(self):
+        from slidex.providers import SolveResult
+
+        class PacketFailProvider(CaptchaProvider):
+            name = "packet-fail"
+
+            async def detect(self, page):
+                return False
+
+            async def locate_elements(self, page):
+                pass
+
+            async def extract_images(self, page, elements):
+                pass
+
+            async def perform_slide(self, page, elements, gap_x, trajectory):
+                pass
+
+            def validate_response(self, response):
+                return None
+
+        provider = PacketFailProvider()
+        provider._result = False
+        provider._result_code = None
+        provider._result_event = __import__("asyncio").Event()
+        provider._result_event.set()
+        page = MagicMock()
+        page.context.cookies = AsyncMock(return_value=[])
+        page.url = "https://example.com/"
+        result = await provider.get_result(page, timeout_ms=200)
+        assert isinstance(result, SolveResult)
+        assert result.success is False
+        assert result.code == 1
+
+    @pytest.mark.asyncio
+    async def test_get_result_timeout_still_minus_one(self):
+        class SilentProvider(CaptchaProvider):
+            name = "silent"
+
+            async def detect(self, page):
+                return False
+
+            async def locate_elements(self, page):
+                pass
+
+            async def extract_images(self, page, elements):
+                pass
+
+            async def perform_slide(self, page, elements, gap_x, trajectory):
+                pass
+
+            def validate_response(self, response):
+                return None
+
+        provider = SilentProvider()
+        provider._result = None
+        provider._result_code = None
+        provider._result_event = __import__("asyncio").Event()
+        page = MagicMock()
+        result = await provider.get_result(page, timeout_ms=50)
+        assert result.success is False
+        assert result.code == -1
 
     @pytest.mark.asyncio
     async def test_base_provider_find_gap_decodes_image_bytes(self):

@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.6.28] - 2026-09-29
+
+正交手势库：失败重试按校验码换家族，真人点序改为相对起点累计。生产审查追补：`end_hold_scale` 接到 Aliyun、human `-1` 按新 travel 重缩放、GeeTest 填 code、派发失败不再伪装成 `-1`。
+
+### Added
+- **`slidex/_gestures.py`**：一次 solve 只建一个 `GestureSession`。`next(distance, last_code)` 规约：`None` 取 `FIRST_TRY_ORDER` 第一个可用；`300` / 有包失败码 consume 当前家族换下一正交家族；`-1` 不换（human 保留同一录音但按本轮 distance 重缩放；合成同家族重采样）。合成五家族独立生成（minimum_jerk / ballistic_corrective / overshoot_snapback / pause_hold / tremor_dense），禁止调用 `generate_trajectory`，也禁止抄四段 eased。
+- **`SliderTrajectoryPool.load_unused_human`**：只取 success + `source` 以 `human` 开头、tolerance=0.10 的未用文件；`GestureSession` 禁止 `load_best`。
+- **`apply_end_hold_scale` / `DragDispatchError`**：末端握持缩放收进 `_drag`；CDP send 失败上抛，solve 环中止而不是按 `-1` 锁家族。
+
+### Changed
+- **legacy / provider 重试环合成一个环**：每次 attempt 必先 `plan=session.next(...)` 再只播 `plan.points`。`recorded` 耗尽 human 时 `next()` 返 `None` 即停，禁止回绕 `generate_trajectory`。CDP 编译失败回退 Playwright 带着同一 plan；`DragDispatchError` 直接 fallback。
+- **`extra_overshoot` / `end_hold_scale` 跟 plan**：human 与已烘焙过冲家族 extra_overshoot=False。Aliyun 与 GeeTest `perform_slide` 都接这两个参数；mixin 按签名转发 `extra_overshoot` / `end_hold_scale` / `cdp_session`。
+- **300 通路**：`Aliyun.validate_response` 在 `interpret_slide_json` 之前写 `_result_code`；GeeTest 成功写 0、失败写包内 code 或 1；`bind` 同时清 `_result` 与 `_result_code`；`SolveResult` 增 `code`；`get_result` 超时 `code=-1`，有包无数字码的失败为 `1`（不再塌成 `-1`）。
+- **`human_events_to_points`** 改为相对 `events[0]` 累计；旧差分条按 last/sum 对齐 distance 升级（不猜中段 `|x|`）。
+
+### Removed
+- 死代码 `_replay_recorded_playwright`、solver 未使用的 `generate_trajectory` 导入、`_current_recorded_trajectory`、`_do_slide` 的废弃 `recorded_trajectory` 参数。
+
+### Notes
+- `generate_trajectory` 默认行为保持不变，仅兼容旧测与直接调用。
+
 ## [0.6.25] - 2026-09-26
 
 review 追补 + 本地风控模拟器。**本版未部署生产**——按用户指令，容器 recreate/真实风控触发需用户批准窗口，拖动行为验证一律先过本地模拟器。

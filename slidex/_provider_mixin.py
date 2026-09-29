@@ -1,5 +1,6 @@
 """Provider-aware SliderSolver integration layer"""
 
+import inspect
 from typing import Optional, Tuple, Dict
 import random
 
@@ -8,9 +9,9 @@ from playwright.async_api import Page
 
 from slidex.providers import ProviderRegistry, CaptchaProvider
 from slidex.providers.builtin import *  # auto-register built-in providers
-from slidex._trajectory import generate_trajectory, trajectory_to_points
-from slidex._trajectory_pool import SliderTrajectoryPool
-from slidex._slide_geometry import clamp_travel, points_from_recorded
+from slidex._drag import DragDispatchError
+from slidex._gestures import GestureSession
+from slidex._slide_geometry import clamp_travel
 from slidex._cookies import select_cookies_for_url
 
 
@@ -75,8 +76,14 @@ class ProviderSolverMixin:
 
         audit = self._install_url_audit(page)
         try:
-            # 300（other-punish）时 scratch.js 前端 verifyRefresh 3s 后重试；
-            # 这里等价复刻：等 reset 完成、重定位、换轨迹重拖
+            session = GestureSession(
+                getattr(self, "_trajectory_pool", None),
+                getattr(self, "pure_user_id", "default"),
+                getattr(self, "trajectory_mode", "auto"),
+            )
+            last_code = None
+            result = None
+            # 一次 solve 只建一个 GestureSession；环内每次 attempt 先 next 再只播 plan。
             for attempt in range(1, self.PROVIDER_SLIDE_RETRIES + 1):
                 # 1. 定位元素
                 elements = await self._provider.locate_elements(page)
@@ -108,7 +115,7 @@ class ProviderSolverMixin:
                         provider_name=self._provider.name,
                         slider_type="scale",
                     )
-                    points = None  # 走合成轨迹
+                    points = None  # 走手势库
                 else:
                     travel, points = await self._jigsaw_travel_and_points(page, elements)
 
@@ -116,46 +123,33 @@ class ProviderSolverMixin:
                     logger.warning(f"[{self.pure_user_id}] cannot determine travel (travel={travel})")
                     return False, None
 
-                # 4. 生成轨迹（相对位移；按 cookie + 目标距离匹配并缩放；
-                # scale 型已在上一步跳过图像匹配，points=None 走合成轨迹）
-                if points is None:
-                    try:
-                        trajectory_dir = self._config.get_trajectory_dir()
-                        trajectory_pool = SliderTrajectoryPool(trajectory_dir)
-                        recorded_traj = trajectory_pool.load_best_trajectory(self.pure_user_id, travel)
-                        if recorded_traj is None:
-                            recorded_traj = trajectory_pool.load_best_trajectory("default", travel)
-                    except Exception as e:
-                        logger.warning(f"[{self.pure_user_id}] trajectory pool error: {e}, using synthetic")
-                        recorded_traj = None
-
-                    points = points_from_recorded(recorded_traj, travel)
-                    if points:
-                        logger.debug(f"[{self.pure_user_id}] using recorded relative trajectory ({len(points)} points)")
-                    else:
-                        logger.debug(f"[{self.pure_user_id}] generating synthetic trajectory")
-                        trajectory = generate_trajectory(
-                            distance=travel,
-                            attempt=attempt,
-                        )
-                        # 合成轨迹转成相对位移；provider.perform_slide 会再加按钮起点
-                        points = trajectory_to_points(trajectory, start_x=0, start_y=0)
+                plan = session.next(float(travel), last_code)
+                if plan is None:
+                    logger.warning(f"[{self.pure_user_id}] gesture session exhausted (attempt {attempt})")
+                    break
+                points = list(plan.points)
+                logger.debug(
+                    f"[{self.pure_user_id}] gesture {plan.archetype} "
+                    f"({len(points)} points, extra_overshoot={plan.extra_overshoot})"
+                )
 
                 try:
-                    # 5. 执行滑动（滑动前装页面内网络打点，滑动后读回）
-                    # CDP 会话可用（真机模式）→ perform_slide 走流水线派发，
-                    # 事件节奏与隧道 RTT 解耦（0.6.24）
                     await self._install_net_tap(page)
-                    await self._provider.perform_slide(
-                        page, elements, travel, points,
-                        cdp_session=getattr(self, "_cdp", None),
+                    await self._call_perform_slide(
+                        page, elements, travel, points, plan,
                     )
                     logger.debug(f"[{self.pure_user_id}] slide performed")
 
-                    # 6. 等待结果
                     result = await self._provider.get_result(page, timeout_ms=5000)
+                except DragDispatchError as e:
+                    logger.warning(
+                        f"[{self.pure_user_id}] CDP drag dispatch failed: {e}; "
+                        "aborting rather than locking the same gesture family"
+                    )
+                    break
                 finally:
                     await self._provider.cleanup_after_result(page)
+                last_code = result.code if getattr(result, "code", None) is not None else -1
                 if result.success:
                     logger.success(f"[{self.pure_user_id}] provider solve success! (attempt={attempt})")
                     break
@@ -179,6 +173,8 @@ class ProviderSolverMixin:
                         logger.debug(f"[{self.pure_user_id}] retry wait failed: {e}")
                         break
 
+            if result is None:
+                return False, None
             if result.success:
                 # 7. x5sec settle：票据旁路（bx-x5sec 头）优先，cookie jar 轮询兜底
                 result_cookies = await self._settle_x5sec(page, result.cookies)
@@ -192,6 +188,22 @@ class ProviderSolverMixin:
         finally:
             audit.uninstall()
             await self._dump_net_tap(page)
+
+    async def _call_perform_slide(self, page, elements, travel, points, plan) -> None:
+        """Forward extra_overshoot/end_hold_scale/cdp_session only when the provider accepts them."""
+        kwargs = {}
+        try:
+            sig = inspect.signature(self._provider.perform_slide)
+            params = sig.parameters
+        except (TypeError, ValueError):
+            params = {}
+        if "cdp_session" in params:
+            kwargs["cdp_session"] = getattr(self, "_cdp", None)
+        if "extra_overshoot" in params:
+            kwargs["extra_overshoot"] = bool(plan.extra_overshoot)
+        if "end_hold_scale" in params:
+            kwargs["end_hold_scale"] = float(getattr(plan, "end_hold_scale", 1.0) or 1.0)
+        await self._provider.perform_slide(page, elements, travel, points, **kwargs)
 
     async def _settle_x5sec(self, page: Page, cookies: Optional[Dict]) -> Optional[Dict]:
         """滑动通过后获取 x5sec（0.6.10 旁路优先）。

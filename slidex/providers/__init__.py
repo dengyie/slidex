@@ -39,6 +39,7 @@ class SolveResult:
     error: Optional[str] = None
     need_retry: bool = False
     confidence: float = 0.0  # 匹配置信度
+    code: Optional[int] = None  # 校验包 code；超时为 -1；有包无数字码的失败为 1
 
 
 class CaptchaProvider(ABC):
@@ -58,6 +59,7 @@ class CaptchaProvider(ABC):
     def __init__(self):
         self._last_response: Optional[Response] = None
         self._result: Optional[bool] = None
+        self._result_code: Optional[int] = None
         self._result_event: Optional[asyncio.Event] = None
         self._response_handler = None
         self._response_tasks: Set[asyncio.Task] = set()
@@ -66,6 +68,7 @@ class CaptchaProvider(ABC):
     def bind_response_listener(self, page: Page) -> None:
         """注册响应监听：校验协程入集合，完成时丢弃，cleanup 可取消。"""
         self._result = None
+        self._result_code = None
         self._result_event = asyncio.Event()
 
         async def _handle(response: Response) -> None:
@@ -240,6 +243,7 @@ class CaptchaProvider(ABC):
                     success=False,
                     cookies=None,
                     error=f"{self.name}: timeout waiting for result",
+                    code=-1,
                 )
         else:
             start = asyncio.get_event_loop().time()
@@ -252,15 +256,22 @@ class CaptchaProvider(ABC):
                     success=False,
                     cookies=None,
                     error=f"{self.name}: timeout waiting for result",
+                    code=-1,
                 )
 
         cookies = await page.context.cookies()
         page_url = getattr(page, "url", "")
         if not isinstance(page_url, str):
             page_url = ""
+        code = self._result_code
+        # Packet arrived. A missing numeric code is not a capture-face miss (-1);
+        # GestureSession would otherwise resample the same family.
+        if not self._result and code is None:
+            code = 1
         return SolveResult(
             success=bool(self._result),
             cookies=select_cookies_for_url(cookies, page_url),
+            code=code,
         )
 
     async def cleanup_after_result(self, page: Page) -> None:

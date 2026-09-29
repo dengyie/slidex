@@ -10,7 +10,13 @@ import time
 
 import pytest
 
-from slidex._drag import build_drag_events, dispatch_drag_timeline, human_events_to_points
+from slidex._drag import (
+    DragDispatchError,
+    apply_end_hold_scale,
+    build_drag_events,
+    dispatch_drag_timeline,
+    human_events_to_points,
+)
 
 
 def _make_timeline_points():
@@ -69,6 +75,28 @@ async def test_dispatch_pipeline_keeps_designed_rhythm_under_latency():
         assert abs(gap - designed[i] / 1000.0) < 0.12
     assert sent_types[0] == "mouseMoved"
     assert sent_types[-1] == "mouseReleased"
+
+
+def test_apply_end_hold_scale_multiplies_last_gap_only():
+    timeline = build_drag_events(0.0, 0.0, _make_timeline_points(), extra_overshoot=False)
+    original_last = timeline[-1][0]
+    original_prev = timeline[-2][0]
+    apply_end_hold_scale(timeline, 1.6)
+    assert timeline[-1][0] == pytest.approx(original_last * 1.6)
+    assert timeline[-2][0] == pytest.approx(original_prev)
+    apply_end_hold_scale(timeline, 1.0)  # no-op
+    assert timeline[-1][0] == pytest.approx(original_last * 1.6)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_raises_on_send_failure():
+    class _FailSession:
+        async def send(self, method, params=None):
+            raise RuntimeError("cdp closed")
+
+    timeline = build_drag_events(0.0, 0.0, [(10.0, 0.0, 0.0)], extra_overshoot=False)
+    with pytest.raises(DragDispatchError):
+        await dispatch_drag_timeline(_FailSession(), timeline)
 
 
 @pytest.mark.asyncio
@@ -156,7 +184,7 @@ def test_human_events_to_points_conversion():
     assert len(pts) == 4
     assert pts[0] == [0.0, 0.0, 800.0]                  # press-hold 原生保留
     assert pts[1][0] == 30.0 and pts[1][2] == 30.0
-    assert pts[-1] == [0.0, 0.0, 640.0]                # 末点=释放位
+    assert pts[-1] == [158.0, 0.0, 640.0]              # 末点=相对起点累计释放位
     assert distance == 158.0 and duration == 1500.0
 
 

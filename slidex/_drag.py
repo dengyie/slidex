@@ -36,9 +36,9 @@ def build_drag_events(
 
     points: 绝对坐标点 [(x, y, delay_ms)]；首点可为 (start_x, start_y, hold_ms)
     表示按下后按住不动的停顿（对 start 的 no-op move，仅吃掉 gap）。
-    extra_overshoot: provider 路径在点序之外追加过冲/回拖/手抖（与顺序路径
-    对齐）；legacy 的轨迹已由 generate_trajectory(overshoot_back=True) 烘焙
-    进点序，传 False 避免双重过冲。
+    extra_overshoot: 点序之外追加过冲/回拖/手抖。human 回放与已烘焙过冲
+    的家族必须传 False；由 GesturePlan.extra_overshoot 决定，禁止默认 True
+    盖掉 plan。
 
     事件序：接近移动 ×2 → 按下 → 位移点（buttons=1）→ [过冲/回拖/手抖] →
     末端握持 → 松键。
@@ -85,14 +85,33 @@ def build_drag_events(
     return ev
 
 
+def apply_end_hold_scale(
+    timeline: List[Tuple[float, Dict[str, Any]]],
+    scale: float,
+) -> List[Tuple[float, Dict[str, Any]]]:
+    """Multiply the pre-mouseup gap (last timeline item) by ``scale``. Mutates in place."""
+    factor = max(0.0, float(scale or 1.0))
+    if factor == 1.0 or not timeline:
+        return timeline
+    gap, params = timeline[-1]
+    timeline[-1] = (gap * factor, params)
+    return timeline
+
+
+class DragDispatchError(RuntimeError):
+    """CDP Input.dispatchMouseEvent failed mid-timeline. Not a packet-miss (-1)."""
+
+
 async def dispatch_drag_timeline(session: Any, timeline: List[Tuple[float, Dict[str, Any]]]) -> None:
     """按时间线 gap 流水线派发 Input 事件（不等每个 ack）。
 
     顺序保证：task 依创建序启动，playwright 连接层同步入队写帧 →
     驱动层对 CDP 的 send 支持多飞行（pipelining）→ 浏览器按序、按
     设计间隔收到事件。
+
+    任一次 send 失败会 raise ``DragDispatchError``：调用方不得把它折成
+    code=-1（那会锁死同一手势家族重试）。会话已死时应中止，而不是再拖一遍。
     """
-    loop = asyncio.get_running_loop()
     tasks = []
     for gap_ms, params in timeline:
         if gap_ms > 0:
@@ -101,8 +120,10 @@ async def dispatch_drag_timeline(session: Any, timeline: List[Tuple[float, Dict[
     results = await asyncio.gather(*tasks, return_exceptions=True)
     failed = [r for r in results if isinstance(r, BaseException)]
     if failed:
-        # 页面中途关闭等场景：让 solve 流程按既有失败路径收尾，不在拖动层炸出
         logger.warning(f"drag timeline: {len(failed)}/{len(tasks)} dispatches failed: {failed[0]}")
+        raise DragDispatchError(
+            f"{len(failed)}/{len(tasks)} Input.dispatchMouseEvent failed"
+        ) from failed[0]
 
 
 # ═══ 人类拖动轨迹学习 ═══
@@ -143,22 +164,26 @@ def human_events_to_points(events: List[Dict[str, Any]]) -> Tuple[List[List[floa
     """把录制的人类拖动事件序列转为轨迹池格式。
 
     events: [{dt, x, y, buttons}]（首事件=按下位置，末事件=松键位置）。
-    返回 (points, distance, duration_ms)：points = [[dx, dy, delay_ms]]，
-    末点即释放位（与轨迹池"末点录制自 up 事件"的语义一致）。
+    返回 (points, distance, duration_ms)：points 是相对 events[0] 的累计
+    位移 [[dx, dy, delay_ms]]（与 remote.py 录制同一套语义），末点即释放位。
     非真实拖动（位移 < 50px 或事件 < 5 个）返回 ([], 0, 0)。
     """
     if not events or len(events) < 5:
         return [], 0.0, 0.0
+    origin = events[0]
+    ox = float(origin["x"])
+    oy = float(origin["y"])
     pts = []
-    prev = events[0]
+    prev_dt = float(origin["dt"])
     for ev in events[1:]:
+        dt = float(ev["dt"])
         pts.append([
-            float(ev["x"]) - float(prev["x"]),
-            float(ev["y"]) - float(prev["y"]),
-            max(0.0, float(ev["dt"]) - float(prev["dt"])),
+            float(ev["x"]) - ox,
+            float(ev["y"]) - oy,
+            max(0.0, dt - prev_dt),
         ])
-        prev = ev
-    distance = float(events[-1]["x"]) - float(events[0]["x"])
+        prev_dt = dt
+    distance = float(events[-1]["x"]) - ox
     duration = float(events[-1]["dt"])
     if abs(distance) < 50:
         return [], 0.0, 0.0
