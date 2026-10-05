@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.6.31] - 2026-10-06
+
+出口探针默认开启：`_maybe_record_success` 的 egress 探针与主仓 `_check_browser_outbound_ip_consistency` 同源同默认（env 未设时用 api.ipify.org，置空关闭）——无需宿主 compose 注入 env 即可记录真实出口 IP。
+
 ## [0.6.30] - 2026-10-06
 
 成功链路记录 review 修复：摘要通道真实可用 + 出口 IP 接线 + 看门狗余量。

@@ -551,8 +551,10 @@ class SliderSolver(ProviderSolverMixin):
             return
         try:
             fingerprint = await capture_fingerprint(self.page) or self._fingerprint_at_init
+            # 与主仓 _check_browser_outbound_ip_consistency 同源同默认：env 置空可关
             egress_ip = await capture_egress_ip(
-                self.page, os.environ.get("XY_OUTBOUND_IP_PROBE_URL", "")
+                self.page,
+                os.environ.get("XY_OUTBOUND_IP_PROBE_URL", "https://api.ipify.org?format=json"),
             )
             duration = None
             t0 = getattr(self, "_solve_t0", None)

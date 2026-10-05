@@ -267,6 +267,29 @@ async def test_solver_record_never_raises(tmp_path):
     assert s.success_record is not None  # 记录仍组装成功（仅落盘跳过）
 
 
+@pytest.mark.asyncio
+async def test_capture_egress_ip_default_url_when_env_unset(monkeypatch):
+    """0.6.31：env 未设时探针默认 api.ipify.org（与主仓一致性门控同源同默认）。"""
+    monkeypatch.delenv("XY_OUTBOUND_IP_PROBE_URL", raising=False)
+    import tempfile, pathlib
+    tmp = pathlib.Path(tempfile.mkdtemp())
+    solver = SliderSolver(cookie_id="acct_1", config=SlidexConfig(telemetry_dir=str(tmp)))
+    page = _FakeEgressPage(text='{"ip":"9.9.9.9"}')
+    solver.page = page
+    solver._fingerprint_at_init = dict(FP)
+    solver._success_outcome = "provider_pass"
+    await solver._maybe_record_success(True, {"x5sec": "v"})
+    assert solver.success_record["environment"]["egress_ip"] == "9.9.9.9"
+    probe_args = [args for _, args in page.calls if args]  # 指纹 evaluate 无参，探针带 URL 参数
+    assert probe_args and "api.ipify.org" in probe_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_capture_egress_ip_env_empty_disables(monkeypatch):
+    monkeypatch.setenv("XY_OUTBOUND_IP_PROBE_URL", "")
+    assert await capture_egress_ip(_FakeEgressPage(text="1.2.3.4"), "") is None
+
+
 # ---------- 成功出口 outcome 标记（源码契约） ----------
 
 def test_outcome_markers_present_in_solver():

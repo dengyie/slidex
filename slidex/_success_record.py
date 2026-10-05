@@ -105,10 +105,11 @@ async def capture_fingerprint(page: Any, timeout_s: float = 5.0) -> Optional[Dic
     return info if isinstance(info, dict) else None
 
 
-# 出口 IP 探针：复用主仓已有的 XY_OUTBOUND_IP_PROBE_URL（ipify 支持 CORS）。
+# 出口 IP 探针：与主仓 _check_browser_outbound_ip_consistency 同源同默认
+# （XY_OUTBOUND_IP_PROBE_URL，缺省 api.ipify.org，ipify 支持 CORS；env 置空可关）。
 # 在**页面上下文**里 fetch——CDP 真机模式得到的是用户浏览器真实出口（风控
 # 实际看到的 IP），容器模式得到的是容器出口，语义正确。仅成功后补采一次，
-# 失败/未配置返回 None，绝不影响求解。
+# 失败返回 None，绝不影响求解。
 EGRESS_PROBE_JS = (
     "async (u) => { try { const r = await fetch(u, {cache: 'no-store'}); "
     "const t = await r.text(); return t.trim().slice(0, 128); } catch (e) { return null; } }"
