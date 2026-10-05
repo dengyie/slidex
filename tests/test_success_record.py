@@ -18,6 +18,7 @@ from slidex._success_record import (
     SCHEMA_VERSION,
     FINGERPRINT_AUDIT_JS,
     build_success_record,
+    capture_egress_ip,
     capture_fingerprint,
     persist_success_record,
 )
@@ -127,6 +128,55 @@ def test_build_success_record_no_cookies():
     assert rec["voucher"]["x5sec_len"] == 0
 
 
+# ---------- 出口 IP 探针 ----------
+
+class _FakeEgressPage:
+    def __init__(self, text=None, raise_eval=False):
+        self._text = text
+        self._raise = raise_eval
+        self.calls = []
+
+    async def evaluate(self, js, *args, **kw):
+        self.calls.append((js, args))
+        if self._raise:
+            raise RuntimeError("page gone")
+        return self._text
+
+
+@pytest.mark.asyncio
+async def test_capture_egress_ip_parses_json():
+    page = _FakeEgressPage(text='{"ip":"183.193.162.101"}\n')
+    ip = await capture_egress_ip(page, "https://api.ipify.org?format=json")
+    assert ip == "183.193.162.101"
+    # URL 经 evaluate 参数传入，不拼进 JS 字符串
+    assert page.calls[0][1] == ("https://api.ipify.org?format=json",)
+
+
+@pytest.mark.asyncio
+async def test_capture_egress_ip_plain_text_and_failures():
+    assert await capture_egress_ip(_FakeEgressPage(text="1.2.3.4"), "http://x") == "1.2.3.4"
+    assert await capture_egress_ip(_FakeEgressPage(raise_eval=True), "http://x") is None
+    assert await capture_egress_ip(_FakeEgressPage(text=None), "http://x") is None
+    assert await capture_egress_ip(None, "http://x") is None
+    assert await capture_egress_ip(_FakeEgressPage(text="1.2.3.4"), "") is None
+    assert await capture_egress_ip(_FakeEgressPage(text="   "), "http://x") is None
+
+
+def test_build_success_record_egress_ip_and_settle_semantics():
+    s = _FakeSolver()
+    s._telemetry_events = []  # 无结算事件但票据在手 → already_in_jar
+    rec = build_success_record(s, "voucher_harvest", {"x5sec": "v" * 10}, dict(FP), egress_ip="1.2.3.4")
+    assert rec["environment"]["egress_ip"] == "1.2.3.4"
+    assert rec["voucher"]["settle_source"] == "already_in_jar"
+    # 有结算事件时不改写
+    s2 = _FakeSolver()
+    rec2 = build_success_record(s2, "provider_pass", {"x5sec": "v"}, {})
+    assert rec2["voucher"]["settle_source"] == "bx_header"
+    # 无票据时保持 None
+    rec3 = build_success_record(s, "provider_pass", {}, {})
+    assert rec3["voucher"]["settle_source"] is None
+
+
 # ---------- persist_success_record ----------
 
 def test_persist_success_record_appends_jsonl(tmp_path):
@@ -174,7 +224,7 @@ async def test_solver_records_success_once(tmp_path):
     assert rec["outcome"] == "voucher_harvest"
     assert rec["fingerprint"]["ua"] == FP["ua"]
     assert rec["extra"] == {"attempt": 2}
-    assert s._telemetry_summary["success"] is rec
+    assert s._telemetry_summary["success_record"] is rec
     jsonl = tmp_path / "telemetry" / "successes.jsonl"
     assert jsonl.exists()
     saved = json.loads(jsonl.read_text(encoding="utf-8").strip())
@@ -184,6 +234,21 @@ async def test_solver_records_success_once(tmp_path):
     await s._maybe_record_success(True, {"x5sec": "v2"})
     lines = jsonl.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 1
+
+
+@pytest.mark.asyncio
+async def test_summary_record_survives_finalize_telemetry(tmp_path):
+    """0.6.30 回归：_finalize_telemetry 用布尔覆盖 summary["success"]，
+    记录必须活在独立的 success_record 键下，两个通道共存。"""
+    s = _mk_solver(tmp_path)
+    await s._maybe_record_success(True, {"x5sec": "v"})
+    s._finalize_telemetry(success=True, status="success", cookies={"x5sec": "v"})
+    assert isinstance(s._telemetry_summary["success_record"], dict)
+    assert s._telemetry_summary["success"] is True
+    summary_file = tmp_path / "telemetry" / f"{s._telemetry_run_id}.json"
+    saved = json.loads(summary_file.read_text(encoding="utf-8"))
+    assert saved["success_record"]["outcome"] == "voucher_harvest"
+    assert saved["success"] is True
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.30] - 2026-10-06
+
+成功链路记录 review 修复：摘要通道真实可用 + 出口 IP 接线 + 看门狗余量。
+
+### Fixed
+- **摘要键改名 `success` → `success_record`**：0.6.29 把记录写进 `summary["success"]`，但 `_finalize_telemetry` 随后用布尔覆盖同名键——per-run 摘要 JSON 里的记录块从未真正存在。改名后与布尔共存，docstring 同步修正。
+- **看门狗手工等待余量 15s → 25s**：收割后的轨迹导出、成功记录补采（指纹 ≤5s + 出口 IP ≤3s）与遥测落盘都在预算内跑，原余量偏紧。
+
+### Added
+- **`capture_egress_ip`**：成功后在页面上下文 fetch `XY_OUTBOUND_IP_PROBE_URL`（复用主仓既有探针 env，ipify 支持 CORS）——CDP 真机模式得到用户浏览器真实出口（风控实际看到的 IP），容器模式得到容器出口；未配置/失败返回 None。记录 `environment.egress_ip` 带回宿主落库（主仓 upsert 同步支持该列）。
+- **`settle_source="already_in_jar"`**：票据在结算前已落 jar 时 `_settle_x5sec` 早退无事件——显式标注，消除 None 的歧义。
+
 ## [0.6.29] - 2026-10-06
 
 成功链路记录（schema v1）：每次通过风控，把"指纹链路 × 执行环境 × 滑块/票据细节"落成结构化记录，供宿主入库与后续失败对照。

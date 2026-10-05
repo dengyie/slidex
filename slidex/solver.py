@@ -58,6 +58,7 @@ from slidex._success_record import (
     FINGERPRINT_AUDIT_JS,
     SCHEMA_VERSION,
     build_success_record,
+    capture_egress_ip,
     capture_fingerprint,
     persist_success_record,
 )
@@ -550,6 +551,9 @@ class SliderSolver(ProviderSolverMixin):
             return
         try:
             fingerprint = await capture_fingerprint(self.page) or self._fingerprint_at_init
+            egress_ip = await capture_egress_ip(
+                self.page, os.environ.get("XY_OUTBOUND_IP_PROBE_URL", "")
+            )
             duration = None
             t0 = getattr(self, "_solve_t0", None)
             if t0 is not None:
@@ -561,9 +565,12 @@ class SliderSolver(ProviderSolverMixin):
                 fingerprint,
                 duration_s=duration,
                 extra=self._success_extra,
+                egress_ip=egress_ip,
             )
             self.success_record = record
-            self._telemetry_summary["success"] = record
+            # 键名用 success_record：_finalize_telemetry 会写布尔 summary["success"]，
+            # 同名会被覆盖（0.6.29 踩过）
+            self._telemetry_summary["success_record"] = record
             persist_success_record(self._config.get_telemetry_dir(), record)
             logger.info(
                 f"[{self.pure_user_id}] success record saved "
@@ -961,7 +968,9 @@ class SliderSolver(ProviderSolverMixin):
             # （看门狗出口不结算票据，直接 False/None）。
             _t0 = getattr(self, "_solve_t0", None)
             if _t0 is not None:
-                remaining = self.SOLVE_WATCHDOG_TIMEOUT_S - (time.monotonic() - _t0) - 15.0
+                # 余量 25s：收割后的 _export_human_drag_recording、_maybe_record_success
+                # （指纹/出口 IP 补采 ≤8s）与 _finalize_telemetry 都在预算内跑
+                remaining = self.SOLVE_WATCHDOG_TIMEOUT_S - (time.monotonic() - _t0) - 25.0
                 if remaining < wait_s:
                     wait_s = max(0.0, remaining)
                     logger.info(

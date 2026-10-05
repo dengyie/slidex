@@ -16,7 +16,7 @@ provider_pass / legacy_pass / voucher_harvest / manual_pass_wait / jar_landed。
 
 持久化三通道（宿主读 1，2/3 为 slidex 独立运行时的落盘与导出口）：
 1. ``solver.success_record`` 属性 —— 宿主同步读取，随 Cookie 合并结果写库
-2. telemetry 摘要 ``{run_id}.json`` 的 ``success`` 块
+2. telemetry 摘要 ``{run_id}.json`` 的 ``success_record`` 块
 3. ``successes.jsonl``（telemetry 目录，append-only，一行一次成功）
 
 schema 字段即未来主仓 ``slider_success_records`` 表的 ingest 契约，改动需升版本。
@@ -105,6 +105,37 @@ async def capture_fingerprint(page: Any, timeout_s: float = 5.0) -> Optional[Dic
     return info if isinstance(info, dict) else None
 
 
+# 出口 IP 探针：复用主仓已有的 XY_OUTBOUND_IP_PROBE_URL（ipify 支持 CORS）。
+# 在**页面上下文**里 fetch——CDP 真机模式得到的是用户浏览器真实出口（风控
+# 实际看到的 IP），容器模式得到的是容器出口，语义正确。仅成功后补采一次，
+# 失败/未配置返回 None，绝不影响求解。
+EGRESS_PROBE_JS = (
+    "async (u) => { try { const r = await fetch(u, {cache: 'no-store'}); "
+    "const t = await r.text(); return t.trim().slice(0, 128); } catch (e) { return null; } }"
+)
+
+
+async def capture_egress_ip(page: Any, probe_url: str, timeout_s: float = 3.0) -> Optional[str]:
+    """在活页面上下文探测出口 IP；未配置/失败返回 None。"""
+    url = str(probe_url or "").strip()
+    if not url or page is None:
+        return None
+    try:
+        text = await asyncio.wait_for(page.evaluate(EGRESS_PROBE_JS, url), timeout=timeout_s)
+    except Exception:
+        return None
+    if not isinstance(text, str) or not text.strip():
+        return None
+    text = text.strip()
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict) and data.get("ip"):
+            return str(data["ip"])[:64]
+    except ValueError:
+        pass
+    return text[:64]
+
+
 def _slidex_version() -> str:
     try:
         from importlib.metadata import version
@@ -120,6 +151,7 @@ def build_success_record(
     fingerprint: Optional[Dict[str, Any]],
     duration_s: Optional[float] = None,
     extra: Optional[Dict[str, Any]] = None,
+    egress_ip: Optional[str] = None,
 ) -> Dict[str, Any]:
     """组装 schema v1 成功记录。solver 需暴露遥测/环境属性（均为 getattr 容错）。"""
     summary = dict(getattr(solver, "_telemetry_summary", {}) or {})
@@ -132,6 +164,9 @@ def build_success_record(
     x5sec_len = 0
     if isinstance(cookies, dict):
         x5sec_len = len(str(cookies.get("x5sec") or ""))
+    if settle_source is None and x5sec_len:
+        # 票据在结算前已落 jar：_settle_x5sec 早退、无结算事件——显式标注语义
+        settle_source = "already_in_jar"
     is_cdp = bool(getattr(solver, "_is_cdp_mode", False))
     record: Dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -152,6 +187,7 @@ def build_success_record(
             "backend": getattr(solver, "automation_backend", None) or ("playwright" if is_cdp else None),
             "channel": getattr(solver, "browser_channel", None) or ("bundled-chromium" if not is_cdp else None),
             "mode": getattr(solver, "_solve_mode", None) or ("cdp" if is_cdp else "container"),
+            "egress_ip": egress_ip,
             "headless": bool(getattr(solver, "headless", None)),
             "proxy_enabled": bool(getattr(solver, "proxy", None)),
             "trajectory_mode": getattr(solver, "trajectory_mode", None),
