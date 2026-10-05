@@ -54,6 +54,13 @@ from slidex._cookies import cookie_domain_for_url, parse_cookie_header, select_c
 from slidex._frames import iter_search_targets, query_in_targets, wait_in_targets
 from slidex._slide_geometry import clamp_travel, points_from_recorded
 from slidex._slide_result import interpret_slide_json
+from slidex._success_record import (
+    FINGERPRINT_AUDIT_JS,
+    SCHEMA_VERSION,
+    build_success_record,
+    capture_fingerprint,
+    persist_success_record,
+)
 
 
 # ════════════════════════════════════════════════════════════
@@ -161,6 +168,12 @@ class SliderSolver(ProviderSolverMixin):
         # 页面 checkCookie 回调才写进 document.cookie——环境不稳时回调不跑，票据
         # 就只能从这里自取（0.6.10）。
         self._bx_voucher: Optional[str] = None
+        # 成功链路记录（_success_record，schema v1）：成功出口标记 outcome，
+        # 求解入口统一组装，宿主读 self.success_record 同步入库
+        self.success_record: Optional[Dict[str, Any]] = None
+        self._success_outcome: Optional[str] = None
+        self._success_extra: Optional[Dict[str, Any]] = None
+        self._fingerprint_at_init: Optional[Dict[str, Any]] = None
         self._calibration = self._load_calibration()
         self._telemetry_run_id = uuid.uuid4().hex
         self._telemetry_events: List[Dict] = []
@@ -525,10 +538,48 @@ class SliderSolver(ProviderSolverMixin):
             return False, None
         return result
 
+    async def _maybe_record_success(self, success, cookies):
+        """成功时统一组装 success_record（schema v1，见 _success_record）。
+
+        指纹在活页面补采一次（CDP/真机也采——只读、页面已通过、无检测风险），
+        采集失败回退 browser_init 审计快照；随后挂 self.success_record（宿主
+        同步入库的主通道）、并入遥测摘要、append successes.jsonl。
+        任何失败都只降级为日志，绝不影响求解结果。
+        """
+        if not success or getattr(self, "success_record", None) is not None:
+            return
+        try:
+            fingerprint = await capture_fingerprint(self.page) or self._fingerprint_at_init
+            duration = None
+            t0 = getattr(self, "_solve_t0", None)
+            if t0 is not None:
+                duration = time.monotonic() - t0
+            record = build_success_record(
+                self,
+                self._success_outcome or "unknown",
+                cookies,
+                fingerprint,
+                duration_s=duration,
+                extra=self._success_extra,
+            )
+            self.success_record = record
+            self._telemetry_summary["success"] = record
+            persist_success_record(self._config.get_telemetry_dir(), record)
+            logger.info(
+                f"[{self.pure_user_id}] success record saved "
+                f"(outcome={record['outcome']}, schema v{SCHEMA_VERSION}, "
+                f"fp_keys={len(record['fingerprint'])})"
+            )
+        except Exception as e:
+            logger.debug(f"[{self.pure_user_id}] success record build failed: {e}")
+
     async def _solve_impl(self, verify_url):
         self.last_fallback_used = None
         self._is_cdp_mode = False
+        self._solve_mode = "browser"
         self._bx_voucher = None
+        self._success_outcome = None
+        self._success_extra = None
         self._solve_t0 = time.monotonic()
         self._emit_telemetry_event("solve_started", mode="browser", verify_url=verify_url)
         self._emit_step("solve", "solve_started", "started", mode="browser", verify_url=verify_url)
@@ -551,6 +602,7 @@ class SliderSolver(ProviderSolverMixin):
             await self._init_browser()
             await self._load_page(verify_url)
             success, cookies = await self._run_solve_loop(verify_url)
+            await self._maybe_record_success(success, cookies)
             self._finalize_telemetry(
                 success=success,
                 status="success" if success else "failed",
@@ -562,6 +614,7 @@ class SliderSolver(ProviderSolverMixin):
             logger.error(f"[{self.pure_user_id}] error: {e}")
             self._emit_step("solve", "solve_exception", "failed", reason=str(e))
             success, cookies = await self._fallback_or_fail(verify_url)
+            await self._maybe_record_success(success, cookies)
             self._finalize_telemetry(
                 success=success,
                 status="exception" if not success else "success",
@@ -628,7 +681,10 @@ class SliderSolver(ProviderSolverMixin):
     ) -> Tuple[bool, Optional[dict]]:
         self.last_fallback_used = None
         self._is_cdp_mode = True
+        self._solve_mode = "cdp"
         self._bx_voucher = None
+        self._success_outcome = None
+        self._success_extra = None
         self._solve_t0 = time.monotonic()
         self._verify_url = page_url or ""
         self._emit_telemetry_event("solve_started", mode="cdp", page_url=page_url)
@@ -640,6 +696,7 @@ class SliderSolver(ProviderSolverMixin):
             success, cookies = await self._run_solve_loop(page_url)
             if success:
                 await self._export_human_drag_recording(page_url)
+            await self._maybe_record_success(success, cookies)
             self._finalize_telemetry(
                 success=success,
                 status="success" if success else "failed",
@@ -664,7 +721,10 @@ class SliderSolver(ProviderSolverMixin):
         """在调用方持有的 Playwright Page 上求解，不接管浏览器生命周期。"""
         self.last_fallback_used = None
         self._is_cdp_mode = True
+        self._solve_mode = "playwright_page"
         self._bx_voucher = None
+        self._success_outcome = None
+        self._success_extra = None
         self._solve_t0 = time.monotonic()
         self.page = page
         self.context = page.context
@@ -691,6 +751,7 @@ class SliderSolver(ProviderSolverMixin):
                 self._emit_step("page", "page_load", "ok", page_url=page_url)
 
             success, cookies = await self._run_solve_loop(page_url)
+            await self._maybe_record_success(success, cookies)
             self._finalize_telemetry(
                 success=success,
                 status="success" if success else "failed",
@@ -733,6 +794,7 @@ class SliderSolver(ProviderSolverMixin):
                 self._emit_telemetry_event("provider_selected", provider_name=self._provider.name, selected_by="detect")
                 success, cookies = await self._solve_with_provider(self.page)
                 if success:
+                    self._success_outcome = "provider_pass"
                     return True, cookies
                 if self._bx_voucher:
                     # 拖动已挣到票据，但 provider 结果等待器只认自家流水线完成信号
@@ -814,6 +876,8 @@ class SliderSolver(ProviderSolverMixin):
             )
             if ok:
                 cookies = await self._get_cookies()
+                self._success_outcome = "legacy_pass"
+                self._success_extra = {"archetype": getattr(plan, "archetype", None), "attempt": attempt}
                 logger.success(f"[{self.pure_user_id}] pass! ({plan.archetype}, attempt={attempt})")
                 cookies = await self._settle_x5sec(self.page, cookies)
                 return True, cookies
@@ -879,6 +943,7 @@ class SliderSolver(ProviderSolverMixin):
                 # 标签澄清：该路径的票据绝大多数来自自动拖动（0.6.15-0.6.21 两战
                 # 均全自动），"manual" 旧标签曾误导排查——"manual pass" 专属
                 # CDP 人工等待期真人拖过的分支
+                self._success_outcome = "voucher_harvest"
                 logger.success(f"[{self.pure_user_id}] pass! (auto voucher harvest)")
                 await self._export_human_drag_recording(verify_url)
                 self._emit_step("solve", "voucher_harvest", "ok")
@@ -920,6 +985,7 @@ class SliderSolver(ProviderSolverMixin):
                         logger.warning(f"[{self.pure_user_id}] manual wait settle failed: {e}")
                         cookies = None
                     if self._has_validation_cookie(cookies):
+                        self._success_outcome = "manual_pass_wait"
                         logger.success(f"[{self.pure_user_id}] pass! (manual pass during wait)")
                         await self._export_human_drag_recording(verify_url)
                         self._emit_step("solve", "manual_wait", "ok")
@@ -929,6 +995,7 @@ class SliderSolver(ProviderSolverMixin):
                 except Exception:
                     jar = {}
                 if jar.get("x5sec"):
+                    self._success_outcome = "jar_landed"
                     logger.success(f"[{self.pure_user_id}] pass! (x5sec landed in jar during manual wait)")
                     await self._export_human_drag_recording(verify_url)
                     self._emit_step("solve", "manual_wait", "ok")
@@ -1358,65 +1425,9 @@ class SliderSolver(ProviderSolverMixin):
         self._emit_step("browser", "browser_init", "ok", profile_dir=str(self.profile_dir))
         await self._audit_browser_fingerprint()
 
-    # 指纹自审计：CDP 模式（用户真机）不跑——真机是对照组不是被审计对象
-    _FINGERPRINT_AUDIT_JS = r"""
-(async () => {
-  const out = {};
-  out.ua = navigator.userAgent;
-  out.webdriver = navigator.webdriver;
-  out.platform = navigator.platform;
-  out.languages = (navigator.languages || []).join(',');
-  out.hwConcurrency = navigator.hardwareConcurrency;
-  out.deviceMemory = navigator.deviceMemory;
-  out.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  out.tzOffset = new Date().getTimezoneOffset();
-  out.screen = screen.width + 'x' + screen.height + '@' + screen.colorDepth + ' dpr=' + devicePixelRatio;
-  out.viewport = innerWidth + 'x' + innerHeight;
-  out.plugins = navigator.plugins ? navigator.plugins.length : -1;
-  out.pdfViewer = !!navigator.pdfViewerEnabled;
-  out.chromeKeys = (window.chrome && typeof window.chrome === 'object') ? Object.keys(window.chrome).join('|') : '';
-  try {
-    const uad = navigator.userAgentData;
-    if (uad) {
-      out.brands = (uad.brands || []).map(b => b.brand + ' ' + b.version).join(' / ');
-      out.uadPlatform = uad.platform;
-      const he = await uad.getHighEntropyValues(['platformVersion', 'architecture', 'bitness', 'model', 'uaFullVersion']);
-      out.platformVersion = he.platformVersion;
-      out.arch = he.architecture;
-      out.bitness = he.bitness;
-      out.uaFullVersion = he.uaFullVersion;
-    }
-  } catch (e) { out.uadError = String(e).slice(0, 80); }
-  try {
-    const c = document.createElement('canvas');
-    const gl = c.getContext('webgl2') || c.getContext('webgl');
-    if (gl) {
-      const dbg = gl.getExtension('WEBGL_debug_renderer_info');
-      out.glVendor = dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR);
-      out.glRenderer = dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
-    } else { out.glRenderer = '(no webgl)'; }
-  } catch (e) { out.glRenderer = 'err:' + String(e).slice(0, 60); }
-  try {
-    const probe = ['Segoe UI', 'Microsoft YaHei', 'SimSun', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', 'Arial', 'Times New Roman', 'Helvetica', 'Roboto', 'Ubuntu', 'DejaVu Sans', 'Liberation Sans'];
-    const s = document.createElement('span');
-    s.style.cssText = 'position:absolute;visibility:hidden;font-size:48px';
-    s.textContent = 'mmmmmmmmmmlli';
-    document.body.appendChild(s);
-    const base = {};
-    for (const b of ['monospace', 'serif', 'sans-serif']) { s.style.fontFamily = b; base[b] = s.offsetWidth; }
-    const found = [];
-    for (const f of probe) {
-      for (const b of ['monospace', 'serif', 'sans-serif']) {
-        s.style.fontFamily = f + ',' + b;
-        if (s.offsetWidth !== base[b]) { found.push(f); break; }
-      }
-    }
-    s.remove();
-    out.fonts = found.join('|') || '(none)';
-  } catch (e) { out.fonts = 'err:' + String(e).slice(0, 60); }
-  return out;
-})()
-"""
+    # 指纹自审计：CDP 模式（用户真机）不跑——真机是对照组不是被审计对象。
+    # JS 唯一事实源在 _success_record.FINGERPRINT_AUDIT_JS（成功链路记录共用同一常量）
+    _FINGERPRINT_AUDIT_JS = FINGERPRINT_AUDIT_JS
 
     async def _audit_browser_fingerprint(self):
         """容器浏览器指纹自审计：把 UA/brands/WebGL 渲染串/字体/时区等硬信号量化进日志。
@@ -1424,6 +1435,7 @@ class SliderSolver(ProviderSolverMixin):
         容器路径的滑块被拒已定位为环境指纹问题（真人拖也 code=300，见部署文档
         0.6.15 节）；先看清容器浏览器在风控眼里长什么样，再决定下一轮迭代。
         一次性 evaluate + 一行 INFO，XY_SLIDER_FINGERPRINT_AUDIT=0 可关。
+        成功链路记录（_success_record）复用此处快照作为成功时补采失败的回退。
         """
         if os.environ.get("XY_SLIDER_FINGERPRINT_AUDIT", "1").strip().lower() in {"0", "false", "off", "no"}:
             return
@@ -1431,7 +1443,7 @@ class SliderSolver(ProviderSolverMixin):
             return
         try:
             info = await await_with_budget(
-                self.page.evaluate(self._FINGERPRINT_AUDIT_JS), self.FINGERPRINT_AUDIT_TIMEOUT_S
+                self.page.evaluate(FINGERPRINT_AUDIT_JS), self.FINGERPRINT_AUDIT_TIMEOUT_S
             )
         except Exception as e:
             logger.warning(f"[{self.pure_user_id}] fingerprint audit failed: {e}")
@@ -1439,6 +1451,7 @@ class SliderSolver(ProviderSolverMixin):
         if not isinstance(info, dict):
             logger.warning(f"[{self.pure_user_id}] fingerprint audit returned non-dict: {type(info).__name__}")
             return
+        self._fingerprint_at_init = info
         order = (
             "ua", "brands", "uadPlatform", "platformVersion", "arch", "bitness", "uaFullVersion",
             "platform", "webdriver", "glVendor", "glRenderer", "languages", "timezone", "tzOffset",
@@ -1614,10 +1627,17 @@ class SliderSolver(ProviderSolverMixin):
             btn = None
         if not btn:
             logger.warning(f"[{self.pure_user_id}] slider button gone before slide")
+            self._result_event.clear()
+            self._slide_code = None
+            self._slide_ok = None
             return
 
         box = await btn.bounding_box()
         if not box:
+            logger.warning(f"[{self.pure_user_id}] slider button box gone before slide")
+            self._result_event.clear()
+            self._slide_code = None
+            self._slide_ok = None
             return
 
         sx = box["x"] + box["width"] / 2 + random.uniform(-2.5, 2.5)

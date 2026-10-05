@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.29] - 2026-10-06
+
+成功链路记录（schema v1）：每次通过风控，把"指纹链路 × 执行环境 × 滑块/票据细节"落成结构化记录，供宿主入库与后续失败对照。
+
+### Added
+- **`slidex/_success_record.py`**：`FINGERPRINT_AUDIT_JS` 移为唯一事实源；`capture_fingerprint`（活页面只读补采，5s 预算，CDP 模式也采）；`build_success_record`（schema v1：标识/结局/滑块/票据/指纹/环境六块）；`persist_success_record`（telemetry 目录 `successes.jsonl` append-only）。
+- **solver 五个成功出口**标记 `_success_outcome`（provider_pass / legacy_pass / voucher_harvest / manual_pass_wait / jar_landed），三个求解入口（`_solve_impl` / `_solve_on_existing_impl` / `solve_on_page`）成功返回前统一走 `_maybe_record_success`：指纹成功时补采（失败回退 `_audit_browser_fingerprint` 的 init 快照）、挂 `solver.success_record`（宿主同步入库主通道）、并入遥测摘要 `success` 块、落 `successes.jsonl`。记录构建任何失败只降级为 debug 日志，绝不影响求解结果。
+- `_audit_browser_fingerprint` 顺手把审计快照存 `_fingerprint_at_init`（成功补采的回退源）。
+
 ## [0.6.28] - 2026-09-29
 
 正交手势库：失败重试按校验码换家族，真人点序改为相对起点累计。生产审查追补：`end_hold_scale` 接到 Aliyun、human `-1` 按新 travel 重缩放、GeeTest 填 code、派发失败不再伪装成 `-1`。
