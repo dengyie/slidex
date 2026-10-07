@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.6.32] - 2026-10-08
+
+外部 Chrome 睡眠/冻结标签页主动唤醒：
+- `_wake_cdp_targets`：在 Playwright 执行 `connect_over_cdp` 握手前，主动向 `/json/activate/<id>` 轮流触发激活，强制唤醒 Chrome Memory Saver 冻结或舍弃渲染进程的后台标签页，杜绝 `connect_over_cdp` 挂满 45s 超时。
+- 握手耗时从 45s 降至毫秒级（约 140ms）。
+
 ## [0.6.31] - 2026-10-06
 
 出口探针默认开启：`_maybe_record_success` 的 egress 探针与主仓 `_check_browser_outbound_ip_consistency` 同源同默认（env 未设时用 api.ipify.org，置空关闭）——无需宿主 compose 注入 env 即可记录真实出口 IP。

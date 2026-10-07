@@ -2,6 +2,7 @@ import asyncio, json, os, re, socket, threading, time, random, shutil, psutil, u
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List, Callable
 from urllib.parse import urlparse, parse_qs
+import urllib.request
 from loguru import logger
 from playwright.async_api import async_playwright
 
@@ -1473,8 +1474,57 @@ class SliderSolver(ProviderSolverMixin):
         extra = [f"{k}={v}" for k, v in info.items() if k.endswith("Error")]
         logger.info(f"[{self.pure_user_id}] browser fingerprint | " + " | ".join(parts + extra))
 
+    @staticmethod
+    def _wake_cdp_targets(cdp_endpoint: str) -> int:
+        """唤醒外部 Chrome 的睡眠/冻结标签页（Memory Saver / 标签舍弃）。
+
+        Playwright connect_over_cdp 时内部自动发送 Target.setAutoAttach(autoAttach=true)。
+        若浏览器内存在被 Chrome 内存节省程序（Memory Saver）置于睡眠或冻结状态的后台
+        标签页，该页面的渲染进程无法响应 Playwright 自动下发的 Page.enable / getFrameTree
+        等 RPC，导致整个 connect_over_cdp 挂满超时。
+        在发起 connect_over_cdp 之前，主动向 /json/activate/<id> 轮流触发一次激活，
+        强制 Chrome 唤醒各标签页的渲染进程，确保后续 CDP 会话握手在毫秒级内完成。
+        """
+        try:
+            parsed = urlparse(cdp_endpoint)
+            scheme = "https" if parsed.scheme in ("wss", "https") else "http"
+            netloc = parsed.netloc or parsed.path
+            if not netloc:
+                return 0
+            base_url = f"{scheme}://{netloc}"
+            json_url = f"{base_url}/json"
+            req = urllib.request.Request(json_url, headers={"User-Agent": "slidex-cdp-wake"})
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                targets = json.loads(resp.read().decode("utf-8"))
+            if not isinstance(targets, list):
+                return 0
+            woken = 0
+            for target in targets:
+                if isinstance(target, dict) and target.get("type") == "page" and target.get("id"):
+                    tid = target["id"]
+                    try:
+                        act_url = f"{base_url}/json/activate/{tid}"
+                        act_req = urllib.request.Request(act_url, headers={"User-Agent": "slidex-cdp-wake"})
+                        with urllib.request.urlopen(act_req, timeout=1.0) as act_resp:
+                            pass
+                        woken += 1
+                    except Exception:
+                        pass
+            return woken
+        except Exception as e:
+            logger.debug(f"[wake_cdp_targets] probe failed or not applicable: {e}")
+            return 0
+
     async def _connect_existing_browser(self, cdp_endpoint: str, page_url: str = ""):
         """连接已有浏览器（CDP 模式）— 不启动新浏览器"""
+        # 在 connect_over_cdp 握手前先异步唤醒外部浏览器的睡眠标签页
+        try:
+            woken = await asyncio.to_thread(self._wake_cdp_targets, cdp_endpoint)
+            if woken > 0:
+                logger.debug(f"[{self.pure_user_id}] pre-activated {woken} CDP page target(s)")
+        except Exception as wake_e:
+            logger.debug(f"[{self.pure_user_id}] pre-activate targets failed: {wake_e}")
+
         pw = await async_playwright().start()
         self._playwright = pw
 

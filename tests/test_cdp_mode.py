@@ -234,3 +234,50 @@ async def test_solve_on_existing_page_parallel_across_endpoints():
         solver.solve_on_existing_page(f"http://cdp-{uuid.uuid4().hex}:9222", ""),
     )
     assert state["max"] == 2  # 并行，互不阻塞
+
+
+def test_wake_cdp_targets_activates_page_targets(monkeypatch):
+    """唤醒睡眠/冻结标签：向 /json 获取 targets 并对所有 page 目标调用 /json/activate/<id>"""
+    import io
+    import json
+    from urllib.request import Request
+
+    called_urls = []
+
+    def fake_urlopen(req, timeout=None):
+        url = req.full_url if isinstance(req, Request) else str(req)
+        called_urls.append(url)
+        if url.endswith("/json"):
+            targets = [
+                {"id": "tab1", "type": "page", "title": "Tab 1"},
+                {"id": "tab2", "type": "page", "title": "Tab 2"},
+                {"id": "sw1", "type": "service_worker", "title": "SW"},
+                {"id": "iframe1", "type": "iframe", "title": "IFrame"},
+            ]
+            return io.BytesIO(json.dumps(targets).encode("utf-8"))
+        # /json/activate/tab1 etc.
+        return io.BytesIO(b"Target activated")
+
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    woken = SliderSolver._wake_cdp_targets("http://127.0.0.1:9222")
+    assert woken == 2
+    assert "http://127.0.0.1:9222/json" in called_urls
+    assert "http://127.0.0.1:9222/json/activate/tab1" in called_urls
+    assert "http://127.0.0.1:9222/json/activate/tab2" in called_urls
+    assert "http://127.0.0.1:9222/json/activate/sw1" not in called_urls
+
+
+def test_wake_cdp_targets_swallows_network_errors(monkeypatch):
+    """CDP 端点异常或网络不可达时静默返回 0，不抛出异常阻断流程"""
+    import urllib.request
+
+    def fake_urlopen(req, timeout=None):
+        raise ConnectionRefusedError("connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    woken = SliderSolver._wake_cdp_targets("http://127.0.0.1:9222")
+    assert woken == 0
+
