@@ -131,6 +131,10 @@ async def test_init_browser_uses_chrome_channel_and_consistency_args(monkeypatch
 @pytest.mark.asyncio
 async def test_init_browser_patchright_only_consistency_args(monkeypatch, tmp_path):
     monkeypatch.setenv("XY_SLIDER_AUTOMATION_BACKEND", "patchright")
+    # 固定"探测不到真 Chrome"前提：CI runner 预装 google-chrome-stable，
+    # 不 mock 会走 chrome channel，断言即挂（本机无 Chrome 时又恰好通过）。
+    monkeypatch.delenv("XY_SLIDER_BROWSER_CHANNEL", raising=False)
+    monkeypatch.setattr(solver_module.shutil, "which", lambda name: None)
     captured = {}
     monkeypatch.setattr(solver_module, "patchright_async_playwright", lambda: _FakePW(captured))
     monkeypatch.setattr(solver_module, "async_playwright", lambda: _FakePW(captured))
