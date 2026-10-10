@@ -54,7 +54,7 @@ from slidex._async_budget import await_with_budget
 from slidex._cookies import cookie_domain_for_url, parse_cookie_header, select_cookies_for_url
 from slidex._frames import iter_search_targets, query_in_targets, wait_in_targets
 from slidex._slide_geometry import clamp_travel, points_from_recorded
-from slidex._slide_result import interpret_slide_json
+from slidex._slide_result import interpret_slide_json, is_punish_slide_code
 from slidex._success_record import (
     FINGERPRINT_AUDIT_JS,
     SCHEMA_VERSION,
@@ -166,6 +166,9 @@ class SliderSolver(ProviderSolverMixin):
         self._result_event = asyncio.Event()
         self._slide_code = None
         self._slide_ok: Optional[bool] = None
+        # 本轮 solve 内最近一次 /slide 判决码（300=other-punish 等），
+        # 供宿主区分"风控惩罚拒绝"与"本地异常/轨迹质量失败"
+        self.last_slide_code: Optional[int] = None
         # punish 票据旁路：x5sec 随校验 XHR 的 bx-x5sec / bx-x5sec-root 响应头下发，
         # 页面 checkCookie 回调才写进 document.cookie——环境不稳时回调不跑，票据
         # 就只能从这里自取（0.6.10）。
@@ -590,6 +593,7 @@ class SliderSolver(ProviderSolverMixin):
         self._bx_voucher = None
         self._success_outcome = None
         self._success_extra = None
+        self.last_slide_code = None
         self._solve_t0 = time.monotonic()
         self._emit_telemetry_event("solve_started", mode="browser", verify_url=verify_url)
         self._emit_step("solve", "solve_started", "started", mode="browser", verify_url=verify_url)
@@ -695,6 +699,7 @@ class SliderSolver(ProviderSolverMixin):
         self._bx_voucher = None
         self._success_outcome = None
         self._success_extra = None
+        self.last_slide_code = None
         self._solve_t0 = time.monotonic()
         self._verify_url = page_url or ""
         self._emit_telemetry_event("solve_started", mode="cdp", page_url=page_url)
@@ -735,6 +740,7 @@ class SliderSolver(ProviderSolverMixin):
         self._bx_voucher = None
         self._success_outcome = None
         self._success_extra = None
+        self.last_slide_code = None
         self._solve_t0 = time.monotonic()
         self.page = page
         self.context = page.context
@@ -812,6 +818,16 @@ class SliderSolver(ProviderSolverMixin):
                     # （15s 找滑块 + 重试轮）直达收割——生产实测这段白耗 ~40s。
                     logger.info(f"[{self.pure_user_id}] voucher captured during provider solve — skipping legacy ceremony")
                     return await self._fallback_or_fail(verify_url)
+                _last_code = getattr(self, "last_slide_code", None)
+                if is_punish_slide_code(_last_code):
+                    # provider 循环已因 300 停止自动拖动:verifyRefresh 重建的挑战
+                    # 属于同一惩罚周期,legacy 循环再等再拖只会追加风控确认样本。
+                    # 跳过 legacy 直达被动恢复(票据收割 / 手动等待)。
+                    logger.warning(
+                        f"[{self.pure_user_id}] provider punish stop (code={_last_code}) — "
+                        "skipping legacy ceremony, entering passive recovery"
+                    )
+                    return await self._fallback_or_fail(verify_url)
                 logger.warning(f"[{self.pure_user_id}] provider mode failed, falling back to legacy")
             else:
                 logger.warning(f"[{self.pure_user_id}] provider detection failed, using legacy mode")
@@ -872,6 +888,7 @@ class SliderSolver(ProviderSolverMixin):
                 return await self._fallback_or_fail(verify_url)
             ok, code = await self._wait_slide_outcome(6.0, success_code)
             last_code = code if code is not None else -1
+            self.last_slide_code = last_code
             logger.info(
                 f"[{self.pure_user_id}] gesture {plan.archetype} attempt {attempt}: "
                 f"ok={ok} code={code}"
@@ -891,6 +908,18 @@ class SliderSolver(ProviderSolverMixin):
                 logger.success(f"[{self.pure_user_id}] pass! ({plan.archetype}, attempt={attempt})")
                 cookies = await self._settle_x5sec(self.page, cookies)
                 return True, cookies
+            if is_punish_slide_code(code):
+                # 300 = other-punish：设备/会话已被判罚，与轨迹无关。换手势再拖
+                # 不会改变判决，只会追加风控确认样本并加深惩罚——立即停止自动
+                # 拖动，转被动恢复（票据收割 / CDP 手动等待）。
+                logger.warning(
+                    f"[{self.pure_user_id}] slide code={code} (other-punish) — "
+                    "device/session penalized, stopping auto drags; entering passive recovery"
+                )
+                self._emit_telemetry_event(
+                    "slide_punish_stop", slide_code=code, attempt=attempt, mode="legacy"
+                )
+                break
             if self._bx_voucher:
                 return await self._fallback_or_fail(verify_url)
             if attempt < self.MAX_RETRIES:

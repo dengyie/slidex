@@ -15,6 +15,18 @@ from typing import Any, Optional
 _SUCCESS_TRUE = {True, 1, "1", "true", "success", "ok"}
 _SUCCESS_FALSE = {False, 0, "0", "false", "fail"}
 
+# baxia 惩罚码：300 = other-punish（设备/会话被判罚，非轨迹质量问题）。
+# 换手势重拖不改变判决，只会给风控追加确认样本——必须停止自动拖动转被动恢复。
+PUNISH_SLIDE_CODES = frozenset({300})
+
+
+def is_punish_slide_code(code: Any) -> bool:
+    """判决 code 是否为风控惩罚（other-punish）。"""
+    try:
+        return int(code) in PUNISH_SLIDE_CODES
+    except (TypeError, ValueError):
+        return False
+
 
 def interpret_slide_json(data: Any, success_code: int = 0) -> Optional[bool]:
     """把滑块校验 JSON 判成 True/False；非 dict 返回 None（不是结果包）。

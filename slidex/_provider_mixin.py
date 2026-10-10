@@ -13,6 +13,7 @@ from slidex._drag import DragDispatchError
 from slidex._gestures import GestureSession
 from slidex._slide_geometry import clamp_travel
 from slidex._cookies import select_cookies_for_url
+from slidex._slide_result import is_punish_slide_code
 
 
 class ProviderSolverMixin:
@@ -86,7 +87,19 @@ class ProviderSolverMixin:
             # 一次 solve 只建一个 GestureSession；环内每次 attempt 先 next 再只播 plan。
             for attempt in range(1, self.PROVIDER_SLIDE_RETRIES + 1):
                 # 1. 定位元素
-                elements = await self._provider.locate_elements(page)
+                try:
+                    elements = await self._provider.locate_elements(page)
+                except Exception as e:
+                    # "Slider button/track not found"（挑战 iframe 被拆除后 scope
+                    # 失效，或新 iframe 未渲染）：这是"该停了"的信号，不是可重试
+                    # 错误——降级为定位失败走被动路径，不重试定位、不打 error 堆栈
+                    logger.warning(
+                        f"[{self.pure_user_id}] elements not locatable (attempt {attempt}): {e}"
+                    )
+                    self._emit_telemetry_event(
+                        "provider_locate_failed", provider_name=self._provider.name, reason=str(e)
+                    )
+                    return False, None
                 if not elements:
                     logger.warning(f"[{self.pure_user_id}] elements not found (attempt {attempt})")
                     return False, None
@@ -150,6 +163,7 @@ class ProviderSolverMixin:
                 finally:
                     await self._provider.cleanup_after_result(page)
                 last_code = result.code if getattr(result, "code", None) is not None else -1
+                self.last_slide_code = last_code
                 if result.success:
                     logger.success(f"[{self.pure_user_id}] provider solve success! (attempt={attempt})")
                     break
@@ -162,6 +176,18 @@ class ProviderSolverMixin:
                     cookie_count=len(result.cookies or {}),
                     attempt=attempt,
                 )
+                if is_punish_slide_code(last_code):
+                    # 300 = other-punish：设备/会话被判罚，与轨迹无关。等
+                    # verifyRefresh 重建滑块再拖只会追加风控确认样本——立即停止
+                    # 自动拖动，上层会走被动恢复（票据收割 / 手动等待）。
+                    logger.warning(
+                        f"[{self.pure_user_id}] slide code={last_code} (other-punish) — "
+                        "device/session penalized, stopping auto drags; entering passive recovery"
+                    )
+                    self._emit_telemetry_event(
+                        "slide_punish_stop", slide_code=last_code, attempt=attempt, mode="provider"
+                    )
+                    break
                 if attempt < self.PROVIDER_SLIDE_RETRIES:
                     # 等前端 verifyRefresh/reset 完成（3s 附近），再进下一轮重定位
                     await page.wait_for_timeout(random.uniform(2800, 3600))

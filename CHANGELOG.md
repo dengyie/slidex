@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.33] - 2026-10-11
+
+风控惩罚码（300 other-punish）单发停止：判决命中惩罚码即停手转被动恢复，不再重定位重拖。
+
+### Added
+- **`slidex/_slide_result.py`**：`PUNISH_SLIDE_CODES = frozenset({300})` 与 `is_punish_slide_code(code)` 判据——300 = baxia other-punish（设备/会话被判罚，与轨迹质量无关）。换手势重拖不改变判决，只会追加风控确认样本并加深惩罚。
+- **`solver.last_slide_code`**：本轮 solve 内最近一次 `/slide` 判决码，三个求解入口（`_solve_impl` / `_solve_on_existing_impl` / `solve_on_page`）起始重置，供宿主区分"风控惩罚拒绝"与"本地异常/轨迹质量失败"。
+
+### Changed
+- **legacy 循环**：判决命中惩罚码时记录 `slide_punish_stop` 遥测并 `break`，不再进入下一轮"等 verifyRefresh 重建滑块再拖"。
+- **provider 循环**：同上，命中惩罚码即停（`mode="provider"`），不再等 2.8~3.6s 重建挑战。
+- **provider→legacy 交接**：provider 因惩罚码停止后直接走 `_fallback_or_fail` 被动恢复，跳过 legacy 全套仪式——重建的挑战属于同一惩罚周期，legacy 再等再拖只会追加确认样本。
+- **`_provider_mixin.locate_elements` 异常降级**：定位抛错（挑战 iframe 被拆除后 scope 失效、新 iframe 未渲染）不再上抛堆栈，降级为 `provider_locate_failed` 遥测 + 定位失败被动路径。
+
 ## [0.6.32] - 2026-10-08
 
 外部 Chrome 睡眠/冻结标签页主动唤醒：
