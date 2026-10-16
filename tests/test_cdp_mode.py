@@ -270,7 +270,7 @@ def test_wake_cdp_targets_activates_page_targets(monkeypatch):
 
 
 def test_wake_cdp_targets_swallows_network_errors(monkeypatch):
-    """CDP 端点异常或网络不可达时静默返回 0，不抛出异常阻断流程"""
+    """CDP 端点异常或网络不可达时静默返回 0,不抛出异常阻断流程"""
     import urllib.request
 
     def fake_urlopen(req, timeout=None):
@@ -280,4 +280,162 @@ def test_wake_cdp_targets_swallows_network_errors(monkeypatch):
 
     woken = SliderSolver._wake_cdp_targets("http://127.0.0.1:9222")
     assert woken == 0
+
+
+def test_wake_cdp_targets_skips_active_and_restores_focus(monkeypatch):
+    """已激活标签不再被切走;结束后把焦点还给用户原标签(减少可见抖动)。"""
+    import io
+    import json
+    from urllib.request import Request
+
+    called_urls = []
+
+    def fake_urlopen(req, timeout=None):
+        url = req.full_url if isinstance(req, Request) else str(req)
+        called_urls.append(url)
+        if url.endswith("/json"):
+            targets = [
+                {"id": "user-tab", "type": "page", "active": True},
+                {"id": "frozen-a", "type": "page"},
+                {"id": "frozen-b", "type": "page", "active": False},
+            ]
+            return io.BytesIO(json.dumps(targets).encode("utf-8"))
+        return io.BytesIO(b"Target activated")
+
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    woken = SliderSolver._wake_cdp_targets("http://127.0.0.1:9222", restore_focus=True)
+    assert woken == 2  # 只唤醒两个非激活标签
+    assert "http://127.0.0.1:9222/json/activate/frozen-a" in called_urls
+    assert "http://127.0.0.1:9222/json/activate/frozen-b" in called_urls
+    # 焦点还原:被唤醒的冻结标签先切前,最后必须切回用户原标签
+    assert called_urls[-1] == "http://127.0.0.1:9222/json/activate/user-tab"
+
+
+def test_cdp_pre_activate_defaults_off_and_env_enables(monkeypatch):
+    monkeypatch.delenv("SLIDEX_CDP_PRE_ACTIVATE", raising=False)
+    assert SliderSolver._cdp_pre_activate_enabled() is False
+    monkeypatch.setenv("SLIDEX_CDP_PRE_ACTIVATE", "1")
+    assert SliderSolver._cdp_pre_activate_enabled() is True
+    monkeypatch.setenv("SLIDEX_CDP_PRE_ACTIVATE", "off")
+    assert SliderSolver._cdp_pre_activate_enabled() is False
+
+
+@pytest.mark.asyncio
+async def test_connect_existing_browser_does_not_wake_by_default(monkeypatch):
+    """默认不主动 activate 任何标签:消除「打开前先切一遍 tab」的抖动。"""
+    import urllib.request
+
+    solver = _make_solver()
+    solver._verify_url = "https://h5api.m.goofish.com/punish?x5secdata=x"
+    page = _FakePage()
+    context = _FakeContext(page)
+    browser = _FakeBrowser(context)
+    monkeypatch.setattr(solver_module, "async_playwright", lambda: _FakePWFactory(browser))
+    monkeypatch.delenv("SLIDEX_CDP_PRE_ACTIVATE", raising=False)
+
+    def _boom(*a, **k):
+        raise AssertionError("default path must not touch /json targets")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _boom)
+
+    await solver._connect_existing_browser("http://localhost:9222", "https://h5api.m.goofish.com/punish?x5secdata=x")
+    assert solver.page in context.created_pages
+
+
+class _FlakyChromium:
+    """首次 connect 失败、第二次成功——验证有限重试。"""
+
+    def __init__(self, browser, failures=1):
+        self._browser = browser
+        self._failures = failures
+        self.calls = 0
+
+    async def connect_over_cdp(self, endpoint, timeout=None):
+        self.calls += 1
+        if self.calls <= self._failures:
+            raise RuntimeError("BrowserType.connect_over_cdp: Timeout 45000ms exceeded.")
+        return self._browser
+
+
+class _FlakyPWFactory:
+    def __init__(self, chromium):
+        self._chromium = chromium
+
+    async def start(self):
+        class _PW:
+            pass
+
+        pw = _PW()
+        pw.chromium = self._chromium
+        pw.stopped = False
+
+        async def _stop():
+            pw.stopped = True
+
+        pw.stop = _stop
+        return pw
+
+
+@pytest.mark.asyncio
+async def test_connect_existing_browser_retries_once_after_wake(monkeypatch):
+    """connect 超时(多为冻结标签)时唤醒一次并重试,第二次成功即正常继续。"""
+    import urllib.request
+
+    solver = _make_solver()
+    solver._verify_url = "https://h5api.m.goofish.com/punish?x5secdata=x"
+    page = _FakePage()
+    context = _FakeContext(page)
+    browser = _FakeBrowser(context)
+    chromium = _FlakyChromium(browser, failures=1)
+    monkeypatch.setattr(solver_module, "async_playwright", lambda: _FlakyPWFactory(chromium))
+    monkeypatch.delenv("SLIDEX_CDP_PRE_ACTIVATE", raising=False)
+
+    wake_calls = []
+    monkeypatch.setattr(
+        SliderSolver, "_wake_cdp_targets",
+        staticmethod(lambda ep, restore_focus=True: wake_calls.append(ep) or 1),
+    )
+
+    await solver._connect_existing_browser("http://localhost:9222", "https://h5api.m.goofish.com/punish?x5secdata=x")
+    assert chromium.calls == 2
+    assert wake_calls  # 重试前唤醒过一次
+    assert solver.page in context.created_pages
+
+
+@pytest.mark.asyncio
+async def test_connect_existing_browser_raises_after_second_failure(monkeypatch):
+    """两次都失败则上抛首个异常,并停掉 playwright,不白等第三个超时。"""
+    import urllib.request
+
+    solver = _make_solver()
+    solver._verify_url = "https://h5api.m.goofish.com/punish?x5secdata=x"
+    page = _FakePage()
+    context = _FakeContext(page)
+    browser = _FakeBrowser(context)
+    chromium = _FlakyChromium(browser, failures=5)
+    factory = _FlakyPWFactory(chromium)
+    started = []
+    _orig_start = factory.start
+
+    async def _start():
+        pw = await _orig_start()
+        started.append(pw)
+        return pw
+
+    factory.start = _start
+    monkeypatch.setattr(solver_module, "async_playwright", lambda: factory)
+    monkeypatch.setattr(
+        SliderSolver, "_wake_cdp_targets",
+        staticmethod(lambda ep, restore_focus=True: 0),
+    )
+
+    with pytest.raises(RuntimeError):
+        await solver._connect_existing_browser(
+            "http://localhost:9222", "https://h5api.m.goofish.com/punish?x5secdata=x"
+        )
+    assert chromium.calls == 2  # 只重试一次
+    assert solver._playwright is None
+    assert started and started[0].stopped is True
 
