@@ -1,0 +1,58 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>slidex point select sim</title>
+<style>
+  #board{position:relative;width:360px;height:120px;background:#f2f2f2;
+         margin:60px auto;display:flex;align-items:center;justify-content:space-around}
+  #board span{font-size:34px;font-family:sans-serif;cursor:pointer;user-select:none}
+  #txt{text-align:center;font-family:sans-serif;color:#555}
+</style>
+</head>
+<body>
+<div id="board" data-board="1">
+  <span data-ch="的">的</span>
+  <span data-ch="了">了</span>
+  <span data-ch="我">我</span>
+  <span data-ch="你">你</span>
+  <span data-ch="好">好</span>
+</div>
+<div id="txt">请依次点击【的】【了】【我】</div>
+<script>
+/* 本地点选仿真（离线测试专用，绝不连真实风控）。
+   模拟文字点选挑战对输入的关键判定面：
+   - 只接受 isTrusted 输入（合成事件直接忽略）
+   - 必须按提示顺序点击，字面与顺序都对才判过
+   - 顺序错/多点 → 判败；序列未点完不判过
+   - 判过/判败均向 /_____tmd_____/pointSelect 发起一次回执（测试路由拦截），
+     结果写入 window.__sim 供断言。
+
+   布局契约（测试的假识别引擎依赖它）：#board 宽 360px、5 个字用
+   space-around 均分，y 居中。归一化中心点约为 x=0.1/0.3/0.5/0.7/0.9, y=0.5。 */
+(function () {
+  var WANT = ['的', '了', '我'];
+  var picked = [], done = false;
+  window.__sim = { pass: false, reason: 'not_run', picked: [] };
+
+  function report(pass, reason) {
+    if (done) return;
+    done = true;
+    window.__sim = { pass: pass, reason: reason, picked: picked.slice() };
+    try { fetch('/_____tmd_____/pointSelect?sim=1&code=' + (pass ? 0 : 300)).catch(function () {}); } catch (e) {}
+    document.getElementById('txt').textContent = pass ? 'SIM_PASS' : 'SIM_FAIL:' + reason;
+  }
+
+  document.getElementById('board').addEventListener('click', function (e) {
+    if (done || !e.isTrusted) return;
+    var ch = e.target && e.target.getAttribute ? e.target.getAttribute('data-ch') : null;
+    if (!ch) return;
+    picked.push(ch);
+    if (picked.length > WANT.length) { report(false, 'too_many_clicks'); return; }
+    if (ch !== WANT[picked.length - 1]) { report(false, 'wrong_order'); return; }
+    if (picked.length === WANT.length) report(true, 'ok');
+  });
+})();
+</script>
+</body>
+</html>

@@ -9,10 +9,24 @@ from slidex.remote import CaptchaRemoteController, captcha_controller
 from slidex._concurrency import SliderConcurrencyManager, concurrency_manager
 from slidex.providers import CaptchaProvider, ProviderRegistry, ProviderElements, SolveResult
 from slidex.providers.builtin import AliyunNoCaptchaProvider, GeeTestProvider
-from slidex.ocr import FakeOcrExtractor, OcrBox, OcrInput, OcrResult, OcrTextExtractor
+from slidex.ocr import (
+    FakeOcrExtractor,
+    Instruction,
+    OcrBox,
+    OcrInput,
+    OcrResult,
+    OcrTextExtractor,
+    parse_instruction,
+)
 from slidex.vision import (
     ChallengeType,
+    ClickPlan,
+    ClickPoint,
+    GraphCaptchaChars,
+    GraphCaptchaExecutor,
+    GraphCaptchaPlan,
     ManualFallbackSession,
+    PointSelectExecutor,
     ProviderDecision,
     ProviderManifest,
     SliderImageResult,
@@ -22,6 +36,11 @@ from slidex.vision import (
     VisualChallengeRequest,
     VisualChallengeResult,
     VisualChallengeSolver,
+    is_punish_graph_code,
+    is_punish_point_code,
+    normalize_chars,
+    plan_click_points,
+    plan_graph_chars,
 )
 from slidex._chromium_lifecycle import (
     get_pid_lock,
@@ -46,6 +65,19 @@ __all__ = [
     "SliderImageMatcher",
     "find_gap",
     "find_gap_from_bytes",
+    "Instruction",
+    "parse_instruction",
+    "ClickPlan",
+    "ClickPoint",
+    "PointSelectExecutor",
+    "plan_click_points",
+    "is_punish_point_code",
+    "GraphCaptchaChars",
+    "GraphCaptchaExecutor",
+    "GraphCaptchaPlan",
+    "plan_graph_chars",
+    "normalize_chars",
+    "is_punish_graph_code",
     "CaptchaRemoteController",
     "captcha_controller",
     "SliderConcurrencyManager",

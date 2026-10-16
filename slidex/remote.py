@@ -6,6 +6,7 @@
 import asyncio
 import base64
 import json
+import random
 import secrets
 from typing import Optional, Dict, Any
 from loguru import logger
@@ -248,6 +249,14 @@ class CaptchaRemoteController:
             elif event_type == 'up':
                 await page.mouse.up()
                 logger.debug(f"鼠标释放: ({x}, {y})")
+            elif event_type == 'click':
+                # 0.6.35: 文字点选需要的是「点某位置」，而 down/up 两段事件要求
+                # 控制页知道人在拖——点选没有拖。合成一次 move+down+up，语义上
+                # 等于一次真实点击，供控制页只发一个事件即可。
+                await page.mouse.move(x, y)
+                await page.mouse.down()
+                await page.mouse.up()
+                logger.debug(f"鼠标点击: ({x}, {y})")
             else:
                 logger.warning(f"未知事件类型: {event_type}")
                 return False
@@ -256,6 +265,35 @@ class CaptchaRemoteController:
 
         except Exception as e:
             logger.error(f"处理鼠标事件失败: {e}")
+            return False
+
+    async def handle_text_input(self, session_id: str, text: str) -> bool:
+        """把人工输入的字符送进当前聚焦的输入框（0.6.35 字符图形验证码）。
+
+        与鼠标事件分开：字符验证码的动作是「填几个字」而非「点某位置」，
+        硬塞进 ``handle_mouse_event`` 会让一个方法同时管两套语义。
+
+        逐字键入（``type`` 带间隔）而非整块 ``fill``——真实用户是逐字敲的，
+        整块填充在行为特征上与真人差异明显。
+        """
+        if session_id not in self.active_sessions:
+            logger.warning(f"会话不存在: {session_id}")
+            return False
+        if not text:
+            return False
+
+        try:
+            page = self.active_sessions[session_id]['page']
+            delay_pair = self.active_sessions[session_id].get('input_delay_ms', (80, 220))
+            lo, hi = (delay_pair if isinstance(delay_pair, (tuple, list)) and len(delay_pair) == 2
+                      else (80, 220))
+            for ch in str(text):
+                await page.keyboard.type(ch, delay=random.uniform(lo, hi))
+            self.record_audit(session_id, "text_input", length=len(str(text)))
+            logger.debug(f"文本输入: {len(str(text))} 字符")
+            return True
+        except Exception as e:
+            logger.error(f"处理文本输入失败: {e}")
             return False
 
     CAPTCHA_SELECTORS = [

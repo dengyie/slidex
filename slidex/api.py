@@ -128,7 +128,10 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 )
 
                 if success:
-                    if event_type == 'up':
+                    # up 与 click 都是"一次完整动作收尾"：滑块拖完 / 点选点完，
+                    # 都该查一次是否已通过。click 单独带上，否则全靠点击解决的
+                    # 挑战永远不会上报 completed。
+                    if event_type in ('up', 'click'):
                         await asyncio.sleep(1.0)
                         completed = await captcha_controller.check_completion(session_id)
 
@@ -151,13 +154,29 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                                     'screenshot': screenshot
                                 })
                     else:
-                        if event_type in ['down', 'move']:
+                        # down/move 是拖动过程（低画质省带宽）；click 是一次
+                        # 完整动作，落点后画面会变，点选场景必须回传新截图。
+                        if event_type in ['down', 'move', 'click']:
                             screenshot = await captcha_controller.update_screenshot(session_id, quality=30)
                             if screenshot:
                                 await websocket.send_json({
                                     'type': 'screenshot_update',
                                     'screenshot': screenshot
                                 })
+
+            elif msg_type == 'text_input':
+                # 0.6.35 字符图形验证码：人工把看到的字符敲进去。与鼠标事件
+                # 分开投递——两套语义，控制页不该共用一个消息类型。
+                success = await captcha_controller.handle_text_input(
+                    session_id, data.get('text', '')
+                )
+                if success:
+                    screenshot = await captcha_controller.update_screenshot(session_id, quality=30)
+                    if screenshot:
+                        await websocket.send_json({
+                            'type': 'screenshot_update',
+                            'screenshot': screenshot
+                        })
 
             elif msg_type == 'check_completion':
                 completed = await captcha_controller.check_completion(session_id)

@@ -200,6 +200,99 @@ def build_success_record(
     return record
 
 
+def build_point_select_record(
+    result: Any,
+    *,
+    challenge_context: Optional[str] = None,
+    fingerprint: Optional[Dict[str, Any]] = None,
+    egress_ip: Optional[str] = None,
+) -> Dict[str, Any]:
+    """组装点选成功记录（schema v1，点选子块）。
+
+    点选没有 slidex 的遥测/轨迹池，``build_success_record`` 依赖 solver 属性
+    不适用，故单列一个面向 ``VisualChallengeResult`` 的构建器。落盘与滑块
+    共用 ``successes.jsonl``，靠 ``outcome`` 前缀区分（``point_select_*``）。
+
+    要点：把「识别出的文案、目标序列、每字置信度、点击坐标、引擎通道」全部
+    留下——调识别准确率时对照的就是这批数据（滑块侧同类需求见 0.6.29）。
+    """
+    metadata = dict(getattr(result, "metadata", {}) or {})
+    clicks = metadata.get("clicks") or []
+    verdict = metadata.get("verdict") or {}
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ts": time.time(),
+        "outcome": f"point_select_{getattr(result, 'error_code', None) or 'unknown'}",
+        "duration_s": round((getattr(result, "duration_ms", 0.0) or 0.0) / 1000.0, 2),
+        "point_select": {
+            "provider": getattr(result, "provider", None),
+            "confidence": getattr(result, "confidence", None),
+            "context": challenge_context or metadata.get("context"),
+            "targets": list(metadata.get("targets") or []),
+            "engine_provider": metadata.get("engine_provider"),
+            "clicks": clicks,
+            "click_count": len(clicks),
+            "verdict": verdict,
+            "notes": metadata.get("notes") or [],
+        },
+        "fingerprint": fingerprint or {},
+        "environment": {
+            "egress_ip": egress_ip,
+            "slidex_version": _slidex_version(),
+            "python": platform.python_version(),
+        },
+        "extra": {},
+    }
+
+
+def build_graph_chars_record(
+    result: Any,
+    *,
+    challenge_context: Optional[str] = None,
+    fingerprint: Optional[Dict[str, Any]] = None,
+    egress_ip: Optional[str] = None,
+) -> Dict[str, Any]:
+    """组装字符图形验证码的记录（schema v1，graph_chars 子块）。
+
+    与点选同构，落盘共用 ``successes.jsonl``，靠 ``graph_chars_*`` 前缀区分。
+
+    要点：字符识别的错误是**离散**的（错一个字即全错），没有中间态可观察。
+    因此必须同时留下**识别原值**与**归一后提交值**——线上出现"填了 AE20 却
+    没过"时，只有这两者并列才能区分是模型读错（raw 就错）还是归一改错
+    （raw 对、提交值被易混字符折叠改坏，见 0.6.35 踩坑）。
+    """
+    metadata = dict(getattr(result, "metadata", {}) or {})
+    verdict = metadata.get("verdict") or {}
+    engine_meta = metadata.get("engine_meta") or {}
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "ts": time.time(),
+        "outcome": f"graph_chars_{getattr(result, 'error_code', None) or 'unknown'}",
+        "duration_s": round((getattr(result, "duration_ms", 0.0) or 0.0) / 1000.0, 2),
+        "graph_chars": {
+            "provider": getattr(result, "provider", None),
+            "confidence": getattr(result, "confidence", None),
+            "context": challenge_context or metadata.get("context"),
+            "chars": metadata.get("chars"),
+            "raw_chars": metadata.get("raw_chars"),
+            "normalized_from": metadata.get("normalized_from"),
+            "recognition_only": bool(metadata.get("recognition_only")),
+            "submit_attempted": bool(metadata.get("submit_attempted")),
+            "engine_provider": metadata.get("engine_provider"),
+            "engine_meta": engine_meta,
+            "verdict": verdict,
+            "notes": metadata.get("notes") or [],
+        },
+        "fingerprint": fingerprint or {},
+        "environment": {
+            "egress_ip": egress_ip,
+            "slidex_version": _slidex_version(),
+            "python": platform.python_version(),
+        },
+        "extra": {},
+    }
+
+
 def persist_success_record(telemetry_dir: Any, record: Dict[str, Any]) -> Optional[str]:
     """append-only 落盘 successes.jsonl；失败静默（记录永不影响求解）。"""
     try:

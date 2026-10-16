@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "slidex"
-version = "0.6.33"
+version = "0.6.35"
 description = "专业滑块验证码求解库 | Professional Slider CAPTCHA Solver — Multi-provider auto-detection, CDP mode, plugin-extensible"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{name = "Slidex Authors"}]
-keywords = ["captcha", "slider", "nocaptcha", "playwright", "opencv", "automation"]
+keywords = ["captcha", "slider", "point-select", "graph-chars", "ocr", "llm-vision", "nocaptcha", "playwright", "opencv", "automation"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -36,6 +36,11 @@ automation-kit = [
 # 未安装时 SliderImageSolver 静默回退到零依赖的模板匹配 / 轮廓 / 列剖面策略。
 vision = [
     "captcha-recognizer>=1.0.0,<2.0.0",
+    # 本地 OCR 降级后端（点选第一遍）。选 RapidOCR(onnxruntime) 而非
+    # PaddleOCR 是为了不把 paddlepaddle 拖进依赖树，保持核心轻依赖
+    # （loguru/opencv/numpy/playwright/psutil）；未安装时点选自动回落到
+    # 多模态通道，不报错。
+    "rapidocr-onnxruntime>=1.3.0,<2.0.0",
 ]
 remote = [
     "fastapi>=0.111.0,<2.0.0",

@@ -11,6 +11,78 @@ CDP 唤醒兜底根治：不再依赖 Chrome `/json` 里并不存在的 `active`
 - **唤醒预算常量化并对齐实现**：`_WAKE_REQUEST_TIMEOUT_S=1.0` / `_WAKE_MAX_WORKERS=4` / `_WAKE_TOTAL_BUDGET_S=3.0`。原 docstring 声称「单请求 1s，整体 2s」，与实现（`fut.result(timeout=2.0)` × N）不符。
 - 删除已无意义的 `restore_focus` 形参（两个调用点都传 `True`，且还原分支不可能执行）。
 
+## [0.6.35] - 2026-10-16
+
+字符图形验证码通用能力（`GRAPH_CHARS`）：「识别图里的几个字 → 填进输入框 → 提交」。与 0.6.34 的文字点选**共用同一个识别引擎**，但换了一套执行器——两种形态的执行动作根本不同，正好验证了 0.6.34 的两段式解耦是走对的。
+
+形态由真实样本判定：闲鱼日志里的 `FAIL_SYS_USER_VALIDATE` + `RGV587_ERROR::SM::哎哟喂` 是阿里云 baxia，其图形挑战是**字符验证码**（实测样本 150×50、4 位大写字母彩色字符），既不是滑块也不是文字点选，是独立的第三种形态。
+
+### Added
+- **`slidex/vision/graph_captcha.py`**：**规划器**（`plan_graph_chars`，纯函数：识别文本 → 校验长度/字符集 → 可提交字符）+ **执行器**（`GraphCaptchaExecutor`：逐字键入 → 提交 → 可选读判决码）。惩罚码判定 `is_punish_graph_code` 复用滑块 300 语义。
+- **`ChallengeType.GRAPH_CHARS`** 与 `VisualChallengeRequest.input_element` / `submit_element` / `expected_char_count`；`VisualChallengeSolver._solve_graph_chars` 全流程（取图→识别→规划→填入→提交→判决）。
+- **`LlmVisionExtractor.read_chars()`**：字符识别走独立纯文本提示（不要坐标、不要 JSON）——实测 JSON 提示在 token 预算吃紧时内容被截在 `{"text` 就没了，纯文本直出稳定得多。长度校验**不在引擎层**（渠道各异），放规划器，那里才知道期望值。
+- 本地风控模拟器 `slidex/fixtures/graph_chars_sim.html` + `tests/test_graph_captcha_sim.py`（严格比对答案；识别注入假引擎故不依赖任何视觉 API）；`tests/test_graph_captcha.py` ×28。
+
+### Changed
+- **`max_tokens` 默认 100 → 512 并从 config 收口**（`SLIDEX_VISION_MAX_TOKENS`）。实测 GLM 系列是 reasoning 模型，会先花 `reasoning_tokens` 再给答案：`max_tokens=64` 时 reasoning 吃掉 59、正文一个字没吐；100 时 3 次里 2 次被截断。**这条阈值不能调低**。
+- **网关超时（504/524）重发一次**（`SLIDEX_VISION_GATEWAY_RETRIES`，默认 1）。524 是 Cloudflare 等网关**等不到上游**，不是模型失败，重发通常命中已预热的连接。不做退避——单次响应本身可能几十秒，退避只会让整体超时更早到来。
+- **截断与「没认清」分开**（`_was_truncated`）：reasoning 模型预算耗尽时 `content` 为空、`finish_reason=length`，那是「没说完」不是「没认清」。编排层据此**允许重发**（同一个模型对同一张图的答案不变），而 401/403/通道未配置一律**一次停手**（重发换不来新信息，只空耗配额）。
+- **重试编排**同样只包住「取图 + 识别 + 规划」，`submit_attempted` 一旦置位即停手——**提交错字符就是一次判罚**，重发同一个答案只会加深确认样本（0.6.28 纪律）。
+- **字符图形验证码成功记录**：`build_graph_chars_record`（schema v1 graph_chars 子块）与点选共用 `successes.jsonl`（`graph_chars_*` 前缀）。同时落**识别原值**与**归一后提交值**——字符识别是离散的（错一字即全错），线上出现「填了 AE20 却没过」时，只有两者并列才能区分是模型读错还是归一改错。
+- **人工面板事件语义扩展**（补 0.6.34 的 known gap）：`handle_mouse_event` 新增 `click`（合成一次 move+down+up，点选没有「拖」这回事，不该逼控制页拆三段）；新增 `handle_text_input` 逐字键入（字符图形验证码的动作是「填几个字」，与鼠标事件分成两个方法/消息类型，一套方法管两套语义迟早会混）。WS 新增 `text_input` 消息类型；`click` 与 `up` 同样触发 `check_completion`——否则全靠点击解决的挑战永远不会上报 `completed`。滑块路径为纯增量，`down/move/up` 语义未变。
+- `pyproject` 版本 → 0.6.35；keywords 增补 graph-chars/llm-vision。
+
+### Fixed
+- **易混字符归一会把对的答案改错**（本版最危险的一个坑）。初版无条件把 `Q→0`、`Z→2`、`S→5`、`B→8`、`G→6`、`D→0`、`I→1`，而 baxia 的字符集是**字母数字混合**，`Q` 与 `0` 都是合法字符——字母本来是对的，改完必然错：实测正确答案 `AEZQ` 被这套映射改写成 `AE20`，由对变错。改为**字符集驱动**：折叠只在调用方声明受限字符集时发生（`ALPHABET_DIGITS_ONLY` 字母→数字、`ALPHABET_UPPER_ONLY` 数字→字母），混合字符集（默认 `ALPHABET_ANY`）一律不动。
+- **反向折叠的歧义位**：`D→0` 而 `O`、`Q` 也 `→0`，反向一对多无解。原实现用 dict 推导让顺序悄悄决定结果，会让两个策略得出互不自洽的结论；改为显式 `_REVERSE_AMBIGUOUS`，歧义位原样保留。
+- `_safe_int` 在引擎侧补上负数回退：`SlidexConfig._safe_int` 接受负值，一个手滑的 env 值（如 `SLIDEX_VISION_GATEWAY_RETRIES=-5`）会静默把重试关掉。
+
+### Design notes
+- **纯识别模式**：`input_element` 留空时只识别、不碰页面，结果停在 `recognition_only=True` 交调用方自己填。识别与执行解耦在这里比点选更有价值——多数宿主本来就有自己的填值逻辑。
+- **点完不擅自判成功**：与点选同纪律，结果停在 `graph_chars_verdict_pending`，惩罚码 300 → `graph_chars_punished` 且不可重试。响应形状各家不同，slidex 不猜。
+- **填入用逐字键入而非整块 `fill`**：真实用户是逐字敲的，整块填充在行为特征上与真人差异明显。
+- **长度不符一律拒判**：长度不对说明漏识或多识了字，填进去必错；宁可换新图重识别（这一步在活页面是可重试的），也不提交一个已知可疑的答案。
+- **重试只在「真的换了图」时才发生**：编排层每次重试都重新截图，所以活页面场景下长度不符换图重试有意义。但调用方若传的是静态 `image_bytes`/`image_path`，重试只会把同一张图再认一遍、得到同一个错误答案——这种场景 `retryable=False` 并在 metadata 标 `from_live_page=False`，把换图的责任交还调用方。宁可一次停手，也不要让「重试机制在工作」成为假象。
+
+### Known gaps
+- 真实渠道的**提交**未验证：遵守「禁止以线上真实风控做验证」（0.6.25）。本版只做了真实样本的**识别**验证（3/3 正确 `AEZQ`，未提交）；接真实渠道时建议先跑 `recognition_only=True` 看 `chars`/`raw_chars`/`normalized_from` 遥测，确认无误再放开填入。
+- 字符图形验证码**延迟不可控**：实测同模型同图 4.4s~80.5s（reasoning 模型冷热差异极大），且偶发 HTTP 524。上层 `timeout_ms` 需按最坏情况设置，或换非 reasoning 模型。
+- 控制页前端本身未同步适配新事件（本版只改了后端 `remote.py` / `api.py`）：`click` 与 `text_input` 需要控制页主动发出来才生效。
+
+### Notes
+- 测试 626 绿（12 skip，均为既有的可选依赖缺失/Windows 符号链接权限，与本版无关）；未触碰滑块链路，既有测试全绿无回归。
+- 真实样本端到端验证（仅识别）：`glm-5.3-flash` + `max_tokens=512` → `AEZQ`，`truncated=False`，`completion_tokens=98`（含 reasoning），`plan_graph_chars` 通过。
+
+## [0.6.34] - 2026-10-16
+
+识图（文字点选）验证通用能力：把「给一句指令 → 在图里按序点出对应文字」做成引擎无关的通用链路，不绑定任何渠道。
+
+### Added
+- **`slidex/ocr/instruction.py`**：点选指令解析（`parse_instruction` / `Instruction`）。把「请依次点击【的】【了】【我】」这类提示解析为有序目标序列，剥离模板噪声、统一全角半角、限制目标数上限 8。**解析不出返回 None 而非空序列**——宁可漏认（上层重截图/降级人工）也绝不猜错，点选判错一字即整体失败。
+- **`slidex/ocr/llm.py`**：多模态点选识别器（`LlmVisionExtractor`）。识别与定位由同一模型一次给出（字符粘连时字框会碎，规则匹配难兜），坐标一律 0..1 归一化返回；指令已知时校验模型返回字序列，不符即整体判为不可信（`vision_target_mismatch`）。走标准库 urllib，不给核心依赖树新增 HTTP 库。
+- **`slidex/ocr/local.py`**：本地 RapidOCR(onnxruntime) 降级后端，返回全图字框。未安装时调用返回 `ocr_local_unavailable`，让降级链自然回落多模态通道，不在 import 期炸包。
+- **`slidex/vision/point_select.py`**：**规划器**（`plan_click_points`，纯函数：识别结果 + 指令 → 有序归一化坐标）+ **执行器**（`PointSelectExecutor`：坐标换算 → 依序人工化点击 → 可选读判决码）。两段解耦是「通用能力」的关键——换识别引擎改第一段输入，换验证形态改第二段，下游渠道只需传一个 `VisualChallengeRequest`。
+- **`ChallengeType.POINT_SELECT`** 与 `VisualChallengeRequest.target_element` / `instruction_text`；`VisualChallengeSolver._solve_point_select` 全流程（截图→解析→识别→规划→点击→判决）。
+- 本地风控模拟器 `slidex/fixtures/point_select_sim.html` + `tests/test_point_select_sim.py`（只接受 isTrusted、校验点击顺序；识别注入假引擎故不依赖任何视觉 API）；`tests/test_ocr_instruction.py` / `test_point_select.py` / `test_ocr_llm_vision.py`。
+
+### Changed
+- **重试编排落地**：`VisualChallengeSolver._solve_point_select` 现在是编排层——识别不可信时**重新截图换通道**再试（默认 3 次、硬顶 5，`metadata.max_attempts` 可调），循环**只包住「截图+识别+规划」**；一旦进入点击阶段即标记 `click_attempted` 停止重试（重复点击比点错更易触发判罚），惩罚码立即停手转被动恢复。0.6.33 只到信号层、本版把纪律编进执行。
+- **配置收口**：`LlmVisionConfig` 改为从 `SlidexConfig` 取值（`from_config`），消除与 config 中同名字段的重复 env 解析，改默认值只有一处事实源。
+- **点选成功记录**：`build_point_select_record`（schema v1 点选子块）把目标序列、每字置信度、点击坐标、引擎通道、判决码落进共用的 `successes.jsonl`（靠 `outcome` 前缀 `point_select_*` 区分），供调识别准确率时对照。
+- `pyproject` 版本 → 0.6.34；`vision` extra 增加可选 `rapidocr-onnxruntime`（选 RapidOCR 而非 PaddleOCR 以保持核心轻依赖）；keywords 增补 point-select/ocr。
+
+### Design notes
+- **点击刻意逐点 await、不复用 0.6.24 拖动流水线**：点选时间尺度是「人看图再点」的数百毫秒量级，隧道 RTT 相对可忽略；拖动流水线是为解决 25-75ms 间隔被 RTT 撕碎而设计，照搬反而把点击节奏压成机器匀速。
+- **点完默认不声称成功**：各家点选渠道响应形状不同，结果停在 `point_select_verdict_pending` 交调用方判读，避免把「点完了」误报成「过了」（0.6.30 同类假成功教训）；惩罚码 300 复用滑块语义，命中即 `point_select_punished` 停手。
+- **置信度闸门**：`low_confidence` / `target_char_not_found` 视为可重试的识别失败，交编排层重新截图，而非在同一猜测上连点（0.6.28 纪律）。
+
+### Known gaps
+- 点选尚未接入 `remote.py` 人工面板（面板事件语义仍是滑块专属的 down/move/up）；点选需要的是「点某位置」而非「按下-移动-抬起」。
+- 真实验证码上的识别准确率未验证（遵守「禁止以线上真实验证码做验证」）；接真实多模态通道时建议先只跑识别、看 `clicks`/`notes` 遥测确认字面与坐标合理再放开点击。
+
+### Notes
+- 测试 580 绿（12 skip）；本版未触碰滑块链路，既有 461 测试全绿无回归。新增 `tests/test_point_select_retry.py` ×9锁定重试纪律（重截图、不连点、点击后不重试、惩罚码停手）。
+
 ## [0.6.33] - 2026-10-11
 
 风控惩罚码（300 other-punish）单发停止：判决命中惩罚码即停手转被动恢复，不再重定位重拖。

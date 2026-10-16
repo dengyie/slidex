@@ -1,0 +1,78 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>slidex graph chars sim</title>
+<style>
+  body{font-family:sans-serif;}
+  #board{display:block;margin:40px auto;border:1px solid #ccc;}
+  #answer{width:220px;height:34px;font-size:20px;letter-spacing:4px;margin:20px auto;display:block;}
+  #submit{display:block;margin:0 auto;width:120px;height:34px;}
+  #txt{text-align:center;color:#555;}
+</style>
+</head>
+<body>
+<canvas id="board" width="150" height="50"></canvas>
+<input id="answer" maxlength="8" autocomplete="off">
+<button id="submit">验证</button>
+<div id="txt">graph chars sim</div>
+<script>
+/* 本地字符图形验证码仿真（离线测试专用，绝不连真实风控）。
+   模拟阿里云 baxia 字符验证码对输入的关键判定面：
+   - 答案在页面里以彩色字符绘制（测试的识别引擎由此反推）
+   - 提交时**严格比对**：大小写不敏感、非字母数字字符忽略
+   - 错答 → 判败（真实渠道行为），结果写入 window.__sim 供断言
+   - 判过/判败均向 /_____tmd_____/graphChars 发起一次回执（测试路由拦截），
+     结果写入 window.__sim 供断言
+   答案由 URL 的 ?answer= 参数指定，默认 AEQQ（长度与实测样本一致）。 */
+(function () {
+  var canvas = document.getElementById('board');
+  var answer = document.getElementById('answer');
+  var submit = document.getElementById('submit');
+  var txt = document.getElementById('txt');
+  var params = new URLSearchParams(location.search);
+  var truth = (params.get('answer') || 'AEQQ').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  window.__sim = { pass: false, reason: 'not_run', attempts: 0, truth: truth };
+
+  function draw() {
+    var ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#f0f0f0';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.font = '30px sans-serif';
+    var step = canvas.width / (truth.length + 1);
+    for (var i = 0; i < truth.length; i++) {
+      // 彩色 + 轻微竖直抖动，贴近真实干扰
+      ctx.fillStyle = 'hsl(' + ((i * 67) % 360) + ',70%,45%)';
+      ctx.fillText(truth[i], step * (i + 1) - 12, 34 + ((i % 2) ? 4 : -4));
+    }
+  }
+  draw();
+
+  function report(pass, reason) {
+    window.__sim = {
+      pass: pass, reason: reason, attempts: window.__sim.attempts, truth: truth,
+    };
+    try {
+      fetch('/_____tmd_____/graphChars?sim=1&code=' + (pass ? 0 : 300)).catch(function () {});
+    } catch (e) {}
+    txt.textContent = pass ? 'SIM_PASS' : 'SIM_FAIL:' + reason;
+  }
+
+  submit.addEventListener('click', function () {
+    window.__sim.attempts += 1;
+    var got = (answer.value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (!got) { report(false, 'empty'); return; }
+    if (got !== truth) {
+      // 真实渠道错答即判败。仿真保持同一张图（不轮换），让断言确定；
+      // 编排层的"换新图重试"由测试用多张 fixture/多引擎脚本覆盖，
+      // 页面侧只负责判过/判败这条判定面。
+      answer.value = '';
+      report(false, 'wrong');
+      return;
+    }
+    report(true, 'ok');
+  });
+})();
+</script>
+</body>
+</html>

@@ -21,6 +21,15 @@ class ChallengeType(str, Enum):
     SLIDER_CAPTCHA = "slider_captcha"
     OCR_TEXT = "ocr_text"
     IMAGE_TEXT = "image_text"
+    # 0.6.34: 文字点选。区别于 OCR_TEXT —— OCR_TEXT 只**读**文字（结果里
+    # 拿到 text 即成功），POINT_SELECT 需要"按序点在图上"：识别目标字 →
+    # 换算坐标 → 依序点击 → 读判决码。承载页面交互，故只在 PLAYWRIGHT_PAGE /
+    # CDP 上下文有意义。
+    POINT_SELECT = "point_select"
+    # 0.6.35: 字符图形验证码。识别图片里的字符序列 → 填进输入框 → 提交。
+    # 与 IMAGE_TEXT 的区别在于**必须提交并读判决**——IMAGE_TEXT 只要读到字就
+    # 算成功（纯读取），GRAPH_CHARS 读到字只是中间态，不提交等于没解。
+    GRAPH_CHARS = "graph_chars"
     VISUAL_ELEMENT = "visual_element"
     MANUAL_FALLBACK = "manual_fallback"
     # HOLD — a "press-and-hold" human-presence challenge (e.g. Outlook
@@ -129,6 +138,21 @@ class VisualChallengeRequest:
     provider: str = "auto"
     timeout_ms: int = 30_000
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    # ── point_select / graph_chars 专用（0.6.34、0.6.35）─────────────────
+    #: 承载挑战的元素（iframe / 容器）。截图与点击都以它为基准坐标系：
+    #: 截图取它的 screenshot，页面坐标取它的 bounding_box()。
+    target_element: Optional[Any] = None
+    #: 提示文案原文。给定时优先按它解析目标序列（比让模型自读提示更稳）；
+    #: 留空则由识别引擎自行给出 targets（适用于提示就在图里的形态）。
+    instruction_text: str = ""
+    # ── graph_chars 专用（0.6.35）──────────────────────────────────────
+    #: 待填输入框与提交按钮。留空则执行器不做页面交互，只回识别结果
+    #: （纯识别场景：调用方自己填，slidex 不碰页面）。
+    input_element: Optional[Any] = None
+    submit_element: Optional[Any] = None
+    #: 期望字符数。给定时严格校验长度，不符即拒判；留空则接受 4~6 位。
+    expected_char_count: Optional[int] = None
 
 
 @dataclass

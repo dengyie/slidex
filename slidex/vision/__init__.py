@@ -10,6 +10,21 @@ from slidex.vision.models import (
 )
 from slidex.vision.artifacts import build_artifact_path, safe_artifact_metadata
 from slidex.vision.manual import ManualFallbackSession
+from slidex.vision.graph_captcha import (
+    GraphCaptchaChars,
+    GraphCaptchaExecutor,
+    GraphCaptchaPlan,
+    is_punish_graph_code,
+    normalize_chars,
+    plan_graph_chars,
+)
+from slidex.vision.point_select import (
+    ClickPlan,
+    ClickPoint,
+    PointSelectExecutor,
+    is_punish_point_code,
+    plan_click_points,
+)
 from slidex.vision.slider_image import SliderImageResult, SliderImageSolver
 
 __all__ = [
@@ -24,6 +39,17 @@ __all__ = [
     "SliderImageSolver",
     "SliderImageResult",
     "ManualFallbackSession",
+    "ClickPlan",
+    "ClickPoint",
+    "PointSelectExecutor",
+    "is_punish_point_code",
+    "plan_click_points",
+    "GraphCaptchaChars",
+    "GraphCaptchaExecutor",
+    "GraphCaptchaPlan",
+    "is_punish_graph_code",
+    "normalize_chars",
+    "plan_graph_chars",
     "build_artifact_path",
     "redact_sensitive",
     "safe_artifact_metadata",
