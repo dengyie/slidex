@@ -1517,22 +1517,52 @@ class SliderSolver(ProviderSolverMixin):
             "1", "true", "yes", "on",
         }
 
+    # /json/activate 兜底的预算:单请求 1s、最多 4 路并发、整体 3s。超出整体预算
+    # 就不再等剩余结果(线程池收尾时各任务最多再各耗 1s)。
+    _WAKE_REQUEST_TIMEOUT_S = 1.0
+    _WAKE_TOTAL_BUDGET_S = 3.0
+    _WAKE_MAX_WORKERS = 4
+
     @staticmethod
-    def _wake_cdp_targets(cdp_endpoint: str, restore_focus: bool = True) -> int:
-        """唤醒外部 Chrome 的睡眠/冻结标签页(Memory Saver / 标签舍弃)。
+    def _cdp_connect_timeout_s() -> float:
+        """CDP 握手超时(秒),默认 45s;空值/非数字/非正数一律回落默认值。
+
+        环境变量写错(如 SLIDEX_CDP_CONNECT_TIMEOUT= 或 =abc)不该让整条求解链路
+        抛 ValueError——那属于最难排查的一类失败。
+        """
+        raw = (os.environ.get("SLIDEX_CDP_CONNECT_TIMEOUT") or "").strip()
+        if raw:
+            try:
+                value = float(raw)
+            except ValueError:
+                logger.warning(f"SLIDEX_CDP_CONNECT_TIMEOUT={raw!r} 不是数字,按默认 45s 处理")
+            else:
+                if value > 0:
+                    return value
+                logger.warning(f"SLIDEX_CDP_CONNECT_TIMEOUT={raw!r} 非正数,按默认 45s 处理")
+        return 45.0
+
+    @staticmethod
+    def _wake_cdp_targets(cdp_endpoint: str) -> int:
+        """兜底唤醒外部 Chrome 的睡眠/冻结标签页(Memory Saver / 标签舍弃)。
 
         Playwright connect_over_cdp 时内部自动发送 Target.setAutoAttach(autoAttach=true)。
-        若浏览器内存在被 Chrome 内存节省程序(Memory Saver)置于睡眠或冻结状态的后台
-        标签页,该页面的渲染进程无法响应 Playwright 自动下发的 Page.enable / getFrameTree
-        等 RPC,导致整个 connect_over_cdp 挂满超时。
+        若浏览器内存在被 Chrome 内存节省程序置于睡眠或冻结状态的后台标签页,该页面的
+        渲染进程无法响应 Playwright 自动下发的 Page.enable / getFrameTree 等 RPC,
+        导致整个 connect_over_cdp 挂满超时。Chrome 没有"只解冻、不切前台"的 HTTP 接口,
+        唯一的事前手段就是 /json/activate,而它必然把目标标签切到前台。因此本函数只在
+        connect 已经失败之后作为兜底调用一次,代价是用户前台 tab 会停在某个被激活的页上。
 
-        与旧实现(串行激活全部 page 目标)的区别,就是为了不打扰用户:
-          - 跳过当前已激活的标签(它不在冻结态,激活它等于白切一次);
-          - 其余目标并发激活(单请求 1s、整体 2s 预算),把可见抖动压到最短;
-          - 结束时把焦点还给原先激活的标签(restore_focus),不让用户停在
-            被切走的页上。
-        默认不在连接前调用;只有显式开启 SLIDEX_CDP_PRE_ACTIVATE=1 或 connect
-        超时兜底时才走这里。
+        不再做"跳过激活标签 + 结束时切回"的原因:Chrome 的 /json 序列化器
+        (content/browser/devtools/devtools_http_handler.cc 的
+        DevToolsHttpHandler::SerializeDescriptor)只输出 id / parentId / type / title /
+        description / url / faviconUrl / webSocketDebuggerUrl / devtoolsFrontendUrl,
+        **没有 active 字段**。原先基于 target["active"] 的判断恒为假,既跳不过当前标签,
+        也不可能切回——那是死代码,不是优化。想根治切前台抖动请在用户 PC 侧用启动参数
+        关掉内存节省(见宿主 scripts/cdp_tunnel.ps1),而不是靠切前台去解冻。
+
+        返回真正激活成功的目标数;0 表示"什么都没做成"(端点不可达 / 无 page 目标),
+        调用方据此决定是否值得再等一轮握手超时。
         """
         try:
             parsed = urlparse(cdp_endpoint)
@@ -1541,48 +1571,46 @@ class SliderSolver(ProviderSolverMixin):
             if not netloc:
                 return 0
             base_url = f"{scheme}://{netloc}"
-            json_url = f"{base_url}/json"
-            req = urllib.request.Request(json_url, headers={"User-Agent": "slidex-cdp-wake"})
+            req = urllib.request.Request(f"{base_url}/json", headers={"User-Agent": "slidex-cdp-wake"})
             with urllib.request.urlopen(req, timeout=3.0) as resp:
                 targets = json.loads(resp.read().decode("utf-8"))
             if not isinstance(targets, list):
                 return 0
 
-            active_id = None
-            page_ids = []
-            for target in targets:
-                if not (isinstance(target, dict) and target.get("type") == "page" and target.get("id")):
-                    continue
-                if target.get("active"):
-                    active_id = target["id"]
-                page_ids.append(target["id"])
-            # 已激活的标签不是冻结态:跳过,避免无意义地把它切走再切回
-            to_wake = [tid for tid in page_ids if tid != active_id]
+            page_ids = [
+                t["id"]
+                for t in targets
+                if isinstance(t, dict) and t.get("type") == "page" and t.get("id")
+            ]
+            if not page_ids:
+                return 0
 
             def _activate(tid: str) -> bool:
                 try:
-                    act_url = f"{base_url}/json/activate/{tid}"
-                    act_req = urllib.request.Request(act_url, headers={"User-Agent": "slidex-cdp-wake"})
-                    with urllib.request.urlopen(act_req, timeout=1.0):
+                    act_req = urllib.request.Request(
+                        f"{base_url}/json/activate/{tid}",
+                        headers={"User-Agent": "slidex-cdp-wake"},
+                    )
+                    with urllib.request.urlopen(act_req, timeout=SliderSolver._WAKE_REQUEST_TIMEOUT_S):
                         pass
                     return True
                 except Exception:
                     return False
 
+            from concurrent.futures import ThreadPoolExecutor
             woken = 0
-            if to_wake:
-                from concurrent.futures import ThreadPoolExecutor
-                with ThreadPoolExecutor(max_workers=min(4, len(to_wake))) as pool:
-                    futures = [pool.submit(_activate, tid) for tid in to_wake]
-                    for fut in futures:
-                        try:
-                            if fut.result(timeout=2.0):
-                                woken += 1
-                        except Exception:
-                            pass
-            # 焦点还原:把用户原本的标签切回前台,不留"停在别的 tab"的副作用
-            if restore_focus and active_id:
-                _activate(active_id)
+            deadline = time.monotonic() + SliderSolver._WAKE_TOTAL_BUDGET_S
+            with ThreadPoolExecutor(max_workers=min(SliderSolver._WAKE_MAX_WORKERS, len(page_ids))) as pool:
+                futures = [pool.submit(_activate, tid) for tid in page_ids]
+                for fut in futures:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    try:
+                        if fut.result(timeout=remaining):
+                            woken += 1
+                    except Exception:
+                        pass
             return woken
         except Exception as e:
             logger.debug(f"[wake_cdp_targets] probe failed or not applicable: {e}")
@@ -1594,7 +1622,7 @@ class SliderSolver(ProviderSolverMixin):
         # 不做;只有显式开启 SLIDEX_CDP_PRE_ACTIVATE=1 时才主动唤醒一次。
         if self._cdp_pre_activate_enabled():
             try:
-                woken = await asyncio.to_thread(self._wake_cdp_targets, cdp_endpoint, True)
+                woken = await asyncio.to_thread(self._wake_cdp_targets, cdp_endpoint)
                 if woken > 0:
                     logger.debug(f"[{self.pure_user_id}] pre-activated {woken} CDP page target(s)")
             except Exception as wake_e:
@@ -1603,26 +1631,37 @@ class SliderSolver(ProviderSolverMixin):
         pw = await async_playwright().start()
         self._playwright = pw
 
-        # connect_over_cdp 默认 180s:外部 Chrome 存在冻结标签(省内存模式)时
-        # 附加阶段会挂满整个超时。收敛为可配置的短超时,快速失败交还周期。
-        connect_timeout_s = float(os.environ.get("SLIDEX_CDP_CONNECT_TIMEOUT", "45"))
+        # connect_over_cdp 默认 180s:外部 Chrome 存在冻结标签(省内存模式)时附加
+        # 阶段会挂满整个超时。收敛为可配置的超时(SLIDEX_CDP_CONNECT_TIMEOUT,默认 45s),
+        # 快速失败交还周期。
+        connect_timeout_s = self._cdp_connect_timeout_s()
         try:
             browser = await pw.chromium.connect_over_cdp(cdp_endpoint, timeout=connect_timeout_s * 1000)
         except Exception as connect_e:
-            # 首次握手失败最常见的原因是外部 Chrome 含冻结标签(未开 pre-activate
-            # 时不会预先唤醒)。此时兜底唤醒一次(结束即还原焦点)再重试一轮;
-            # 仍失败就快速上抛,不再白等第二个完整超时。
+            # 兜底:首次握手失败最常见的原因是外部 Chrome 含冻结标签(默认不开
+            # SLIDEX_CDP_PRE_ACTIVATE,所以只有到这一步才唤醒)。唤醒成功才值得再等
+            # 一轮握手;一个 page 目标都没激活(端点不可达 / 浏览器里没有 page 标签)
+            # 说明失败与冻结标签无关,直接快速上抛,不再白等第二个完整超时。
             logger.warning(
                 f"[{self.pure_user_id}] connect_over_cdp failed "
-                f"({type(connect_e).__name__}), retrying once after waking frozen tabs"
+                f"({type(connect_e).__name__}), waking frozen tabs before one retry"
             )
+            woken = 0
             try:
-                await asyncio.to_thread(self._wake_cdp_targets, cdp_endpoint, True)
+                woken = await asyncio.to_thread(self._wake_cdp_targets, cdp_endpoint)
             except Exception as wake_e:
                 logger.debug(f"[{self.pure_user_id}] retry wake failed: {wake_e}")
-            try:
-                browser = await pw.chromium.connect_over_cdp(cdp_endpoint, timeout=connect_timeout_s * 1000)
-            except Exception:
+            browser = None
+            if woken > 0:
+                logger.info(
+                    f"[{self.pure_user_id}] woke {woken} CDP page target(s) "
+                    f"(用户前台 tab 会停在其中之一), retrying handshake once"
+                )
+                try:
+                    browser = await pw.chromium.connect_over_cdp(cdp_endpoint, timeout=connect_timeout_s * 1000)
+                except Exception:
+                    browser = None
+            if browser is None:
                 try:
                     await pw.stop()
                 except Exception:
