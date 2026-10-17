@@ -23,6 +23,7 @@ CDP 唤醒兜底根治：不再依赖 Chrome `/json` 里并不存在的 `active`
 ### Notes
 - 631 绿 / 12 skip。滑块链路未触碰。
 - embed 模式下仍隐藏 `.instructions`：该模式已把 header / 日志 / 状态卡一并精简，是刻意做窄的界面；形态改由可见的输入面板与「挑战类型：…」日志行点明。
+- **CI 从此真跑浏览器端到端**：`.github/workflows/ci.yml` 补 `python -m playwright install --with-deps chromium`。此前 `[remote]` extra 只装 pip 包不装浏览器二进制，四个仿真测试各自捕获 launch 失败后 `pytest.skip`，CI 长期「全绿」却一行浏览器端到端都没跑过——而点选与字符图形验证码这两条新链路恰恰只由它们覆盖。实测 run 38993157405：**643 passed / 0 skipped**（3.10 与 3.12 双矩阵），此前为 631 / 12。
 
 ## [0.6.35] - 2026-10-17
 
