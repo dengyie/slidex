@@ -24,5 +24,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install -e ./automation-kit
       - run: python -m pip install -e './slidex[dev,remote]'
+      # `[remote]` 只装 playwright 这个 pip 包，不含浏览器二进制。不装 chromium
+      # 的话 test_slider_sim / test_point_select_sim / test_graph_captcha_sim /
+      # test_point_select_smoke 会各自 pytest.skip("local chromium unavailable")，
+      # 于是 CI 全绿却一行浏览器端到端都没跑过 —— 绿灯是假的。--with-deps 顺带
+      # 装系统库，ubuntu-latest 镜像缺的那些（libnss3 等）否则会在 launch 时炸。
+      - run: python -m playwright install --with-deps chromium
       - run: python -m pytest -q
         working-directory: slidex
