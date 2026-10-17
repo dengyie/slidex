@@ -30,6 +30,13 @@ calibration/
 debug_screenshots/
 logs/
 
+# Test artifacts
+# pytest 把 -q 输出重定向到 runN.log 这类临时文件时容易被 `git add -A` 捎进提交；
+# 历史里已出现过一次 run3.log，规则补在这里而不是只删文件。
+run*.log
+*.log
+.pytest_cache/
+
 # Playwright
 .playwright-browsers/
 
