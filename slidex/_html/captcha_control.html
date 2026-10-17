@@ -208,6 +208,44 @@
             transition: background 0.3s;
         }
 
+        /* 字符图形验证码输入面板（0.6.35）。视觉与 session-input 保持一致，
+           否则同一页面里两种形态的控件看起来像来自不同产品。 */
+        .text-input-panel {
+            display: flex;
+            gap: 10px;
+            margin: 15px 0;
+            justify-content: center;
+        }
+        .text-input-panel input {
+            flex: 1;
+            max-width: 260px;
+            padding: 12px;
+            border: 2px solid #dee2e6;
+            border-radius: 8px;
+            font-size: 20px;
+            letter-spacing: 6px;
+            text-align: center;
+            text-transform: uppercase;
+            font-family: monospace;
+        }
+        .text-input-panel input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        .text-input-panel button {
+            padding: 12px 24px;
+            background: #28a745;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        .text-input-panel button:hover {
+            background: #218838;
+        }
         .session-input button:hover {
             background: #5568d3;
         }
@@ -267,14 +305,21 @@
             <button id="connectBtn" onclick="connectSession()">连接</button>
         </div>
 
-        <div class="instructions">
+        <div class="instructions" id="instructions">
             <h3>📋 使用说明</h3>
-            <ol>
+            <ol id="instructionList">
                 <li>输入会话ID并点击"连接"按钮</li>
                 <li>等待页面截图加载</li>
                 <li>使用鼠标在滑块按钮上按下并拖动</li>
                 <li>释放鼠标完成验证</li>
             </ol>
+        </div>
+
+        <!-- 字符图形验证码：按 challenge_type 自动显示，无需用户手动切换 -->
+        <div class="text-input-panel" id="textInputPanel" style="display:none;">
+            <input type="text" id="charsInput" placeholder="输入图中验证码" maxlength="12"
+                   autocomplete="off" autocapitalize="characters" spellcheck="false" />
+            <button id="sendCharsBtn" onclick="sendTextInput()">提交字符</button>
         </div>
 
         <div class="info-panel">
@@ -318,6 +363,9 @@
         let trajectoryPoints = [];
         let trajectoryStartX = 0, trajectoryStartY = 0;
         let currentSessionToken = null;
+        // 当前挑战形态（0.6.35）。slider_captcha 拖拽；graph_chars 填字符；
+        // point_select 点位置。后端 session_info 已在下发该字段，此前前端一直没读。
+        let challengeType = 'slider_captcha';
 
         // 初始化
         document.addEventListener('DOMContentLoaded', () => {
@@ -332,6 +380,9 @@
                 // 隐藏不必要的元素
                 document.querySelector('.header').style.display = 'none';
                 document.querySelector('.session-input').style.display = 'none';
+                // embed 下藏说明：这一模式已把 header / 日志 / 状态卡一并精简，
+                // 是刻意做窄的界面，说明文字是全量版指引，留着反而是噪音。
+                // 形态由可见的输入面板与「挑战类型：…」日志行点明。
                 document.querySelector('.instructions').style.display = 'none';
                 document.querySelector('.info-panel').style.display = 'none';
                 document.querySelector('.log').style.display = 'none';
@@ -436,11 +487,80 @@
             }
         }
 
+        function applyChallengeType(type) {
+            challengeType = type || 'slider_captcha';
+            const isGraphChars = challengeType === 'graph_chars';
+            const isPointSelect = challengeType === 'point_select';
+
+            // 说明文案跟着形态走，否则文字点选用户会看到"按下并拖动"而不知为何。
+            const list = document.getElementById('instructionList');
+            if (list) {
+                if (isGraphChars) {
+                    list.innerHTML = '<li>输入会话ID并点击"连接"按钮</li>' +
+                        '<li>等待验证码图片加载</li>' +
+                        '<li>看清图中字符，在下方输入框逐字填写</li>' +
+                        '<li>点击"提交字符"完成验证</li>';
+                } else if (isPointSelect) {
+                    list.innerHTML = '<li>输入会话ID并点击"连接"按钮</li>' +
+                        '<li>等待页面截图加载</li>' +
+                        '<li>按提示顺序，依次点击图中对应文字</li>' +
+                        '<li>每次点击为一个独立动作，不要拖动</li>';
+                } else {
+                    list.innerHTML = '<li>输入会话ID并点击"连接"按钮</li>' +
+                        '<li>等待页面截图加载</li>' +
+                        '<li>使用鼠标在滑块按钮上按下并拖动</li>' +
+                        '<li>释放鼠标完成验证</li>';
+                }
+            }
+
+            const panel = document.getElementById('textInputPanel');
+            if (panel) panel.style.display = isGraphChars ? 'flex' : 'none';
+
+            if (isGraphChars) {
+                log('挑战类型：字符图形验证码 —— 请填写图中字符', 'info');
+            } else if (isPointSelect) {
+                log('挑战类型：文字点选 —— 请依次点击对应文字', 'info');
+            }
+        }
+
+        async function sendTextInput() {
+            const input = document.getElementById('charsInput');
+            const btn = document.getElementById('sendCharsBtn');
+            if (!input || !ws || ws.readyState !== WebSocket.OPEN) {
+                log('未连接到会话，无法提交', 'error');
+                return;
+            }
+            const text = (input.value || '').trim();
+            if (!text) {
+                log('请先输入图中字符', 'error');
+                return;
+            }
+            btn.disabled = true;
+            document.getElementById('verificationStatus').textContent = '验证中...';
+            log(`提交字符: ${text}`, 'info');
+            ws.send(JSON.stringify({ type: 'text_input', text: text }));
+            // 后端在填完字后回传截图（可能已换新图），由 screenshot_update 处理。
+            // 这里不自行清空输入：若后端判错并换了新图，保留原值方便对照修正。
+            setTimeout(() => { btn.disabled = false; }, 800);
+        }
+
+        // Enter 直接提交，省一次点击（人工接管的场景下每一步都要快）。
+        document.addEventListener('DOMContentLoaded', () => {
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && document.activeElement &&
+                    document.activeElement.id === 'charsInput') {
+                    e.preventDefault();
+                    sendTextInput();
+                }
+            });
+        });
+
         function handleWebSocketMessage(data) {
             const type = data.type;
 
             if (type === 'session_info') {
                 log('收到会话信息', 'success');
+                applyChallengeType(data.challenge_type);
                 
                 // 保存验证码容器偏移量
                 if (data.captcha_info && data.captcha_info.x !== undefined) {
@@ -512,9 +632,24 @@
                 return;
             }
 
-            isMouseDown = true;
             const coords = getMouseCoords(event);
-            
+
+            // 文字点选（0.6.35）：一次按下即一次点击，没有"拖"这回事。
+            // 若照走 down/move/up 路径，松手时会被当成一次拖动结束——
+            // 而点选挑战的语义是"点某位置"，那会让后端收到不该有的移动序列。
+            if (challengeType === 'point_select') {
+                log(`点击: (${coords.x}, ${coords.y})`, 'info');
+                document.getElementById('verificationStatus').textContent = '验证中...';
+                ws.send(JSON.stringify({
+                    type: 'mouse_event',
+                    event_type: 'click',
+                    x: coords.x,
+                    y: coords.y
+                }));
+                return;
+            }
+
+            isMouseDown = true;
             log(`鼠标按下: (${coords.x}, ${coords.y})`, 'info');
             
             ws.send(JSON.stringify({
@@ -532,6 +667,11 @@
         }
 
         function handleMouseMove(event) {
+            // 点选模式下 press 只用于发一次 click，没有按住态；后续 move/up
+            // 都不该再发（否则又变回拖动语义）。
+            if (challengeType === 'point_select') {
+                return;
+            }
             if (!ws || ws.readyState !== WebSocket.OPEN || !isMouseDown) {
                 return;
             }
@@ -559,6 +699,9 @@
         }
 
         function handleMouseUp(event) {
+            if (challengeType === 'point_select') {
+                return;
+            }
             if (!ws || ws.readyState !== WebSocket.OPEN || !isMouseDown) {
                 return;
             }

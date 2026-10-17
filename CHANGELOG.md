@@ -11,7 +11,20 @@ CDP 唤醒兜底根治：不再依赖 Chrome `/json` 里并不存在的 `active`
 - **唤醒预算常量化并对齐实现**：`_WAKE_REQUEST_TIMEOUT_S=1.0` / `_WAKE_MAX_WORKERS=4` / `_WAKE_TOTAL_BUDGET_S=3.0`。原 docstring 声称「单请求 1s，整体 2s」，与实现（`fut.result(timeout=2.0)` × N）不符。
 - 删除已无意义的 `restore_focus` 形参（两个调用点都传 `True`，且还原分支不可能执行）。
 
-## [0.6.35] - 2026-10-16
+## [0.6.36] - 2026-10-17
+
+人工控制页适配 0.6.34/0.6.35 新增的 `click` 与 `text_input` 事件。后端在 0.6.34/0.6.35 就已支持这两类事件，但控制页从不发它们——**面板永远只能用鼠标拖拽**。本版把最后一公里补上。
+
+### Added
+- **控制页按 `challenge_type` 自动切换形态**（`applyChallengeType`）：收到 `session_info` 后据其 `challenge_type` 改写使用说明文案，并按需显示字符输入面板。这是个一直存在却从未被读的字段：后端 `slidex/api.py` 早就在下发它，前端却没有任何消费者，所以面板永远按滑块的假设渲染。
+- **字符输入面板**（`#textInputPanel` / `#charsInput` / `#sendCharsBtn`）：`graph_chars` 下显示，发 `{type:'text_input', text}`；回车直接提交。提交后**不清空输入**——若后端判错并换了新图，保留原值便于对照修正。视觉沿用 `session-input` 的规格，避免同一页里两种形态的控件像来自不同产品。
+- **点选形态改走单次 `click`**：`handleMouseDown` 在 `point_select` 下发一次 `event_type:'click'` 即返回，`handleMouseMove` / `handleMouseUp` 直接短路。若沿用 down/move/up，松手会被当成一次拖动结束，把「点某位置」的语义变成拖拽序列。
+
+### Notes
+- 631 绿 / 12 skip。滑块链路未触碰。
+- embed 模式下仍隐藏 `.instructions`：该模式已把 header / 日志 / 状态卡一并精简，是刻意做窄的界面；形态改由可见的输入面板与「挑战类型：…」日志行点明。
+
+## [0.6.35] - 2026-10-17
 
 字符图形验证码通用能力（`GRAPH_CHARS`）：「识别图里的几个字 → 填进输入框 → 提交」。与 0.6.34 的文字点选**共用同一个识别引擎**，但换了一套执行器——两种形态的执行动作根本不同，正好验证了 0.6.34 的两段式解耦是走对的。
 
@@ -24,8 +37,8 @@ CDP 唤醒兜底根治：不再依赖 Chrome `/json` 里并不存在的 `active`
 - 本地风控模拟器 `slidex/fixtures/graph_chars_sim.html` + `tests/test_graph_captcha_sim.py`（严格比对答案；识别注入假引擎故不依赖任何视觉 API）；`tests/test_graph_captcha.py` ×28。
 
 ### Changed
-- **`max_tokens` 默认 100 → 512 并从 config 收口**（`SLIDEX_VISION_MAX_TOKENS`）。实测 GLM 系列是 reasoning 模型，会先花 `reasoning_tokens` 再给答案：`max_tokens=64` 时 reasoning 吃掉 59、正文一个字没吐；100 时 3 次里 2 次被截断。**这条阈值不能调低**。
-- **网关超时（504/524）重发一次**（`SLIDEX_VISION_GATEWAY_RETRIES`，默认 1）。524 是 Cloudflare 等网关**等不到上游**，不是模型失败，重发通常命中已预热的连接。不做退避——单次响应本身可能几十秒，退避只会让整体超时更早到来。
+- **`max_tokens` 默认 64 → 100000 并从 config 收口**（`SLIDEX_VISION_MAX_TOKENS`）。实测 GLM 系列是 reasoning 模型，会先花 `reasoning_tokens` 再给答案：`max_tokens=64` 时 reasoning 吃掉 59、正文一个字没吐；100 时 3 次里 2 次被截断。**这条阈值不能调低**。
+- **网关超时（504/524）重发**（`SLIDEX_VISION_GATEWAY_RETRIES`，默认 3）。524 是 Cloudflare 等网关**等不到上游**，不是模型失败，重发通常命中已预热的连接。不做退避——单次响应本身可能几十秒，退避只会让整体超时更早到来。`vision_timeout_s` 默认同步放宽到 180s，否则重试次数还没用满就先被本地超时砍掉。
 - **截断与「没认清」分开**（`_was_truncated`）：reasoning 模型预算耗尽时 `content` 为空、`finish_reason=length`，那是「没说完」不是「没认清」。编排层据此**允许重发**（同一个模型对同一张图的答案不变），而 401/403/通道未配置一律**一次停手**（重发换不来新信息，只空耗配额）。
 - **重试编排**同样只包住「取图 + 识别 + 规划」，`submit_attempted` 一旦置位即停手——**提交错字符就是一次判罚**，重发同一个答案只会加深确认样本（0.6.28 纪律）。
 - **字符图形验证码成功记录**：`build_graph_chars_record`（schema v1 graph_chars 子块）与点选共用 `successes.jsonl`（`graph_chars_*` 前缀）。同时落**识别原值**与**归一后提交值**——字符识别是离散的（错一字即全错），线上出现「填了 AE20 却没过」时，只有两者并列才能区分是模型读错还是归一改错。
@@ -45,13 +58,14 @@ CDP 唤醒兜底根治：不再依赖 Chrome `/json` 里并不存在的 `active`
 - **重试只在「真的换了图」时才发生**：编排层每次重试都重新截图，所以活页面场景下长度不符换图重试有意义。但调用方若传的是静态 `image_bytes`/`image_path`，重试只会把同一张图再认一遍、得到同一个错误答案——这种场景 `retryable=False` 并在 metadata 标 `from_live_page=False`，把换图的责任交还调用方。宁可一次停手，也不要让「重试机制在工作」成为假象。
 
 ### Known gaps
-- 真实渠道的**提交**未验证：遵守「禁止以线上真实风控做验证」（0.6.25）。本版只做了真实样本的**识别**验证（3/3 正确 `AEZQ`，未提交）；接真实渠道时建议先跑 `recognition_only=True` 看 `chars`/`raw_chars`/`normalized_from` 遥测，确认无误再放开填入。
-- 字符图形验证码**延迟不可控**：实测同模型同图 4.4s~80.5s（reasoning 模型冷热差异极大），且偶发 HTTP 524。上层 `timeout_ms` 需按最坏情况设置，或换非 reasoning 模型。
-- 控制页前端本身未同步适配新事件（本版只改了后端 `remote.py` / `api.py`）：`click` 与 `text_input` 需要控制页主动发出来才生效。
+- 真实渠道的**提交**已验证（2026-10-17，经用户授权仅对自己名下 `xianyu.mangoqwq.com` 登录页做端到端；仍遵守不在第三方生产风控上做验证）：识别 `BSLZ` → 落到「请输入用户名和密码」，对照组故意填 `XXXX` → 「验证码已过期，请刷新」，两次返回**不同的**后端错误文案，证明校验链路真实生效且该次识别正确。另一轮 `UGNL` → 「用户名或密码错误」同样通过。
+- 字符图形验证码**延迟不可控**：实测同模型同图 4.4s~80.5s（reasoning 模型冷热差异极大），且偶发 HTTP 524。`vision_timeout_s` 默认已放宽到 180s，并对 504/524 做网关重试；上层 `timeout_ms` 仍需按最坏情况设置，或换非 reasoning 模型。
+- ~~控制页前端本身未同步适配新事件~~：已于 2026-10-17 补齐（见 0.6.36）。
 
 ### Notes
-- 测试 626 绿（12 skip，均为既有的可选依赖缺失/Windows 符号链接权限，与本版无关）；未触碰滑块链路，既有测试全绿无回归。
-- 真实样本端到端验证（仅识别）：`glm-5.3-flash` + `max_tokens=512` → `AEZQ`，`truncated=False`，`completion_tokens=98`（含 reasoning），`plan_graph_chars` 通过。
+- 测试 631 绿（12 skip，均为既有的可选依赖缺失/Windows 符号链接权限，与本版无关）；未触碰滑块链路，既有测试全绿无回归。
+- 真实样本端到端验证（仅识别）：`glm-5.3-flash` → `AEZQ`，`truncated=False`（含 reasoning）。
+- **`max_tokens` 必须给足**：GLM 系先吐 `reasoning_tokens` 再出正文，`max_tokens=64` 时 reasoning 吃掉 59、正文为空，`max_tokens=100` 时正文被截断 2/3。默认值已从 64 放宽到 **100000**（`vision_max_tokens` / `SLIDEX_VISION_MAX_TOKENS`）。这条不是"宽一点更保险"的调参，是正确性前提——识别结果为空会被误判成"没认出字"，进而触发无意义的重试。
 
 ## [0.6.34] - 2026-10-16
 
