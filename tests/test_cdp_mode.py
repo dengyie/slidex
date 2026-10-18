@@ -560,6 +560,7 @@ class _FakeWS:
 
     def __init__(self, reply=None, exc=None):
         self.sent = []
+        self.closed = False
         self._reply = reply
         self._exc = exc
 
@@ -571,10 +572,21 @@ class _FakeWS:
             raise self._exc
         return self._reply
 
+    async def close(self):
+        self.closed = True
+
 
 class _FakeWSConn:
+    """既可 `await` 也可 `async with` —— 探针走的是 await 形式。"""
+
     def __init__(self, ws):
         self._ws = ws
+
+    def __await__(self):
+        async def _connected():
+            return self._ws
+
+        return _connected().__await__()
 
     async def __aenter__(self):
         return self._ws
@@ -709,6 +721,61 @@ async def test_probe_cdp_target_alive_false_without_websockets(monkeypatch):
 async def test_probe_cdp_target_alive_false_without_ws_url(monkeypatch):
     _install_websockets(monkeypatch, lambda url, kw: _FakeWS(reply=_alive_reply()))
     assert await SliderSolver._probe_cdp_target_alive("") is False
+
+
+@pytest.mark.asyncio
+async def test_probe_cdp_target_state_tristate(monkeypatch):
+    """三态:应答=alive、只连不答=frozen、连不上=unknown。
+
+    「连不上」绝不能折成「冻了」—— 那会让自愈把所有标签都切一遍前台。
+    """
+    _install_websockets(monkeypatch, lambda url, kw: _FakeWS(reply=_alive_reply()))
+    assert await SliderSolver._probe_cdp_target_state(_WS_A) == "alive"
+
+    _install_websockets(monkeypatch, _timeout_handler)
+    assert await SliderSolver._probe_cdp_target_state(_WS_A) == "frozen"
+
+    def boom(url, kw):
+        raise OSError("handshake refused")
+
+    _install_websockets(monkeypatch, boom)
+    assert await SliderSolver._probe_cdp_target_state(_WS_A) == "unknown"
+
+    monkeypatch.setitem(sys.modules, "websockets", None)
+    assert await SliderSolver._probe_cdp_target_state(_WS_A) == "unknown"
+    assert await SliderSolver._probe_cdp_target_state("") == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_probe_frozen_cdp_targets_noop_when_no_handshake_succeeds(monkeypatch):
+    """安全阀:所有目标都连不上(探针本身不可用/版本不兼容)时不做任何判定。
+
+    否则「探针坏掉」会被翻译成「所有标签都冻了」,把用户每个 tab 都切一遍前台。
+    """
+    _install_cdp_http(monkeypatch, _PAGE_TARGETS)
+
+    def boom(url, kw):
+        raise OSError("handshake refused")
+
+    _install_websockets(monkeypatch, boom)
+    assert await SliderSolver._probe_frozen_cdp_targets("http://127.0.0.1:9222") == []
+
+
+@pytest.mark.asyncio
+async def test_probe_frozen_cdp_targets_counts_handshake_failure_as_frozen_when_probe_works(monkeypatch):
+    """探针本身可用(有目标应答)时,连不上的那个目标仍算冻结——它同样会挂住握手。"""
+    _install_cdp_http(monkeypatch, _PAGE_TARGETS)
+
+    def handler(url, kw):
+        if url == _WS_A:
+            return _FakeWS(reply=_alive_reply())
+        if url == _WS_B:
+            raise OSError("handshake refused")
+        return _FakeWS(exc=asyncio.TimeoutError())
+
+    _install_websockets(monkeypatch, handler)
+    frozen = await SliderSolver._probe_frozen_cdp_targets("http://127.0.0.1:9222")
+    assert [t["id"] for t in frozen] == ["frozen-b", "frozen-c"]
 
 
 @pytest.mark.asyncio

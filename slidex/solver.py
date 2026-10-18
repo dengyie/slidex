@@ -1692,48 +1692,72 @@ class SliderSolver(ProviderSolverMixin):
             return 0
 
     @staticmethod
-    async def _probe_cdp_target_alive(ws_url: str, timeout_s: Optional[float] = None) -> bool:
-        """用裸 WebSocket 探一次目标是否活着:发 Runtime.evaluate,等应答。
+    async def _probe_cdp_target_state(ws_url: str, timeout_s: Optional[float] = None) -> str:
+        """探一个目标的状态:"alive" / "frozen" / "unknown"。
 
-        判活标准不是"WebSocket 连得上"而是"能拿到应答":被内存节省冻结的标签,
-        WS 握手常常仍能建立(浏览器进程代答),但渲染进程不处理 RPC,所以只有收到
-        {"id":1,...} 才算活。超时/连不上/协议错一律判死。需要 websockets(remote extra);
-        未安装时返回 False —— 调用方 _probe_frozen_cdp_targets 已提前挡掉,不会误判。
+        判活标准不是"WebSocket 连得上"而是"能拿到应答":被内存节省冻结的标签,WS 握手
+        常常仍能建立(浏览器进程代答),但渲染进程不处理 RPC,所以只有收到 {"id":1,...}
+        才算活。需要 websockets(remote extra);未安装时返回 unknown。
+
+        为什么是三态而不是布尔:"连不上"与"连得上但不答"必须分开。后者才是冻结标签的
+        签名;前者更可能是目标已消失,或探针在这台机器上根本不可用(容器里的 websockets
+        版本不兼容这套调用、端点被中间设备拦掉),把它也算成冻结会让自愈退化成"把所有
+        标签都切一遍前台"—— 那正是本版要消灭的行为。所以连不上一律记 unknown,由调用方
+        决定这份判定是否可信(见 _probe_frozen_cdp_targets 的安全阀)。
         """
         if not ws_url:
-            return False
+            return "unknown"
         try:
             import websockets
         except Exception as e:  # pragma: no cover - 仅在未装 remote extra 时走到
             logger.debug(f"[probe_cdp_target] websockets unavailable: {e}")
-            return False
+            return "unknown"
         budget = timeout_s if timeout_s and timeout_s > 0 else SliderSolver._PROBE_TIMEOUT_S
         try:
-            async with websockets.connect(ws_url, open_timeout=budget, close_timeout=budget) as ws:
-                await ws.send(json.dumps({
-                    "id": 1,
-                    "method": "Runtime.evaluate",
-                    "params": {"expression": "1", "returnByValue": True},
-                }))
-                raw = await asyncio.wait_for(ws.recv(), timeout=budget)
-            try:
-                msg = json.loads(raw)
-            except Exception:
-                return False
-            return isinstance(msg, dict) and msg.get("id") == 1
-        except asyncio.TimeoutError:
-            return False
+            ws = await websockets.connect(ws_url, open_timeout=budget, close_timeout=budget)
         except Exception as e:
-            logger.debug(f"[probe_cdp_target] {ws_url[:60]} unresponsive: {type(e).__name__}: {e}")
-            return False
+            logger.debug(f"[probe_cdp_target] {ws_url[:60]} handshake failed: {type(e).__name__}: {e}")
+            return "unknown"
+        try:
+            await ws.send(json.dumps({
+                "id": 1,
+                "method": "Runtime.evaluate",
+                "params": {"expression": "1", "returnByValue": True},
+            }))
+            raw = await asyncio.wait_for(ws.recv(), timeout=budget)
+        except asyncio.TimeoutError:
+            return "frozen"
+        except Exception as e:
+            logger.debug(f"[probe_cdp_target] {ws_url[:60]} no usable reply: {type(e).__name__}: {e}")
+            return "frozen"
+        finally:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+        try:
+            msg = json.loads(raw)
+        except Exception:
+            return "frozen"
+        return "alive" if isinstance(msg, dict) and msg.get("id") == 1 else "frozen"
 
     @staticmethod
-    async def _probe_frozen_cdp_targets(cdp_endpoint: str) -> List[Dict[str, Any]]:
-        """返回探活失败的 page 目标列表;空列表表示"全活"或"判定不了"。
+    async def _probe_cdp_target_alive(ws_url: str, timeout_s: Optional[float] = None) -> bool:
+        """_probe_cdp_target_state 的布尔视图:只有确证活着才算 True(unknown 不算活)。"""
+        return await SliderSolver._probe_cdp_target_state(ws_url, timeout_s) == "alive"
+
+    @staticmethod
+    async def _probe_cdp_target_states(cdp_endpoint: str) -> List[Tuple[Dict[str, Any], str]]:
+        """探测所有 page 目标,返回 (target, state) 对;判定不了时返回空列表。
 
         判定不了的情况(websockets 未安装、/json 不可达、没有带 ws 地址的 page 目标)
-        一律返回空列表:自愈只应作用于**确证冻结**的标签,判定不了就什么都不做,
+        一律返回空列表:自愈只应作用于**确证有问题**的标签,判定不了就什么都不做,
         退回原有"握手超时后兜底唤醒"的路径。
+
+        **安全阀**:若所有目标都停在"连不上"(没有一个是 frozen 或 alive),说明问题出在
+        探针这一侧而不是标签——容器里 websockets 版本不兼容、端点被中间设备拦掉等等。
+        此时一律返回空列表:宁可不做,也不能把"探针坏掉"翻译成"所有标签都冻了"进而把
+        用户的每个 tab 都切一遍前台。
         """
         try:
             import websockets  # noqa: F401
@@ -1752,11 +1776,30 @@ class SliderSolver(ProviderSolverMixin):
 
         async def _one(target: Dict[str, Any]):
             async with sem:
-                alive = await SliderSolver._probe_cdp_target_alive(target.get("webSocketDebuggerUrl") or "")
-            return None if alive else target
+                state = await SliderSolver._probe_cdp_target_state(target.get("webSocketDebuggerUrl") or "")
+            return (target, state)
 
         results = await asyncio.gather(*(_one(t) for t in pages), return_exceptions=True)
-        return [r for r in results if isinstance(r, dict)]
+        judged = [r for r in results if isinstance(r, tuple)]
+        if not any(state != "unknown" for _, state in judged):
+            logger.warning(
+                f"[probe_frozen] {len(pages)} page target(s) 全部连不上 WS,探针无法判定"
+                f"(websockets 不可用/版本不兼容?),跳过自愈以免误伤全部标签"
+            )
+            return []
+        return judged
+
+    @staticmethod
+    async def _probe_frozen_cdp_targets(cdp_endpoint: str) -> List[Dict[str, Any]]:
+        """需要处理的标签(非 alive):确证冻结的,以及探针可用时连不上的。
+
+        探针可用(至少一个目标给了确定判定)时,连不上的目标同样可疑——它要么是渲染
+        进程已消失,要么是会挂住 Playwright 附加的死目标,激活它无害且可能救命;
+        真空洞的目标激活失败也无副作用。但**重建**只认确证冻结的(见
+        _self_heal_frozen_cdp_tabs):有损操作需要最强证据。
+        """
+        states = await SliderSolver._probe_cdp_target_states(cdp_endpoint)
+        return [t for t, state in states if state != "alive"]
 
     @staticmethod
     def _rebuild_cdp_target(cdp_endpoint: str, target: Dict[str, Any]) -> bool:
@@ -1819,10 +1862,12 @@ class SliderSolver(ProviderSolverMixin):
         )
         if not self._cdp_rebuild_frozen_enabled():
             return healed
-        # 激活解冻是异步生效的(标签要重新调度渲染进程),留一点时间再复探,
-        # 只对"复探仍无响应"的标签做有损重建。
+        # 激活解冻是异步生效的(标签要重新调度渲染进程),留一点时间再复探。
+        # 有损重建只认"复探仍无响应"(确证冻结)的标签 —— 连不上的目标不重建,
+        # 否则一个刚被用户关掉的标签会被我们重新打开、变成一个多余的新 tab。
         await asyncio.sleep(self._REBUILD_SETTLE_S)
-        still = await self._probe_frozen_cdp_targets(cdp_endpoint)
+        states = await self._probe_cdp_target_states(cdp_endpoint)
+        still = [t for t, state in states if state == "frozen"]
         if not still:
             return healed
         rebuilt = 0
