@@ -474,8 +474,6 @@ class _FlakyPWFactory:
 @pytest.mark.asyncio
 async def test_connect_existing_browser_retries_once_after_wake(monkeypatch):
     """connect 超时(多为冻结标签)时唤醒一次并重试,第二次成功即正常继续。"""
-    import urllib.request
-
     solver = _make_solver()
     solver._verify_url = "https://h5api.m.goofish.com/punish?x5secdata=x"
     page = _FakePage()
