@@ -358,6 +358,36 @@ def test_cdp_connect_timeout_parsing(monkeypatch):
     assert SliderSolver._cdp_connect_timeout_s() == 8.0
 
 
+def test_cdp_probe_timeout_parsing(monkeypatch):
+    """探针预算同样容错,并可被 env 覆盖——慢链路(反向隧道)靠它调,不必改常数发版。"""
+    monkeypatch.delenv("SLIDEX_CDP_PROBE_TIMEOUT", raising=False)
+    assert SliderSolver._cdp_probe_timeout_s() == SliderSolver._PROBE_TIMEOUT_S
+    monkeypatch.setenv("SLIDEX_CDP_PROBE_TIMEOUT", "")
+    assert SliderSolver._cdp_probe_timeout_s() == SliderSolver._PROBE_TIMEOUT_S
+    monkeypatch.setenv("SLIDEX_CDP_PROBE_TIMEOUT", "   ")
+    assert SliderSolver._cdp_probe_timeout_s() == SliderSolver._PROBE_TIMEOUT_S
+    monkeypatch.setenv("SLIDEX_CDP_PROBE_TIMEOUT", "abc")
+    assert SliderSolver._cdp_probe_timeout_s() == SliderSolver._PROBE_TIMEOUT_S
+    monkeypatch.setenv("SLIDEX_CDP_PROBE_TIMEOUT", "0")
+    assert SliderSolver._cdp_probe_timeout_s() == SliderSolver._PROBE_TIMEOUT_S
+    monkeypatch.setenv("SLIDEX_CDP_PROBE_TIMEOUT", "-1")
+    assert SliderSolver._cdp_probe_timeout_s() == SliderSolver._PROBE_TIMEOUT_S
+    monkeypatch.setenv("SLIDEX_CDP_PROBE_TIMEOUT", "12.5")
+    assert SliderSolver._cdp_probe_timeout_s() == 12.5
+    monkeypatch.setenv("SLIDEX_CDP_PROBE_TIMEOUT", "9")
+    assert SliderSolver._cdp_probe_timeout_s() == 9.0
+
+
+def test_probe_default_budget_has_headroom_over_tunnel_latency():
+    """默认预算必须明显大于生产隧道的实测往返(2.05~2.12s)。
+
+    0.6.37 的 2.0s 恰好卡在实测值之下,导致六个标签全判"连不上"、安全阀把探针
+    整体降级——功能静默失效。这里把"必须留有余量"锁进测试,防止再被调回贴着
+    实测延迟的数值。
+    """
+    assert SliderSolver._PROBE_TIMEOUT_S >= 3.0
+
+
 @pytest.mark.asyncio
 async def test_connect_existing_browser_uses_parsed_timeout_env(monkeypatch):
     """解析后的超时值必须真的传给 connect_over_cdp(毫秒)。"""
@@ -685,6 +715,16 @@ async def test_probe_cdp_target_alive_true_only_on_reply(monkeypatch):
     assert await SliderSolver._probe_cdp_target_alive(_WS_A) is True
     assert calls and calls[0][0] == _WS_A
     assert calls[0][1]["open_timeout"] == SliderSolver._PROBE_TIMEOUT_S
+
+
+@pytest.mark.asyncio
+async def test_probe_respects_env_budget(monkeypatch):
+    """env 覆盖的预算必须真的落到 websockets.connect 上,否则这个旋钮只是个摆设。"""
+    monkeypatch.setenv("SLIDEX_CDP_PROBE_TIMEOUT", "11.5")
+    calls = _install_websockets(monkeypatch, lambda url, kw: _FakeWS(reply=_alive_reply()))
+    assert await SliderSolver._probe_cdp_target_alive(_WS_A) is True
+    assert calls[0][1]["open_timeout"] == 11.5
+    assert calls[0][1]["close_timeout"] == 11.5
 
 
 @pytest.mark.asyncio

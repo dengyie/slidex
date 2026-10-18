@@ -1,11 +1,24 @@
 # Changelog
 
+## [0.6.38] - 2026-10-18
+
+冻结探针的预算从 2s 提到 6s，并开放 `SLIDEX_CDP_PROBE_TIMEOUT` 覆盖 —— 0.6.37 上线后在生产环境实测发现 2s 比这条链路还紧，探针静默失效。
+
+### Fixed
+- **探针默认预算 2.0s → 6.0s**：0.6.37 的 2s 是按局域网想的（活标签毫秒级应答）。生产拓扑是容器 → 反向隧道 → 用户 PC 的 Chrome，**实测活标签的 `connect + Runtime.evaluate` 往返 2.05~2.12s**，比预算还长：六个 page 目标全部超时 → 三态判成 `unknown` → 安全阀按设计把整次探测降级为「无法判定」→ 自愈什么都不做，功能等于永不生效（还白花 2s）。6s 给这条链路约 3 倍余量；8 路并发下即使所有标签都冻住，整体也只多等 6s，相对一次 45s 的握手超时仍然划算。
+- **新增 `SLIDEX_CDP_PROBE_TIMEOUT`**：按实际链路调预算，不必为改一个常数发版。解析与 `SLIDEX_CDP_CONNECT_TIMEOUT` 同样容错 —— 空值 / 非数字 / 非正数一律回落默认并告警，不抛 `ValueError`。
+
+### Notes
+- 顺带印证了 0.6.37 安全阀的价值：探针在这台生产机上**确实失灵了**（全部 `unknown`），而它没有退化成「把所有标签切一遍前台」，只是安静地什么都不做。失灵是可见的（一条 WARNING + `would_heal_count: 0`），不是静默误伤。
+- 生产实测数据来自容器内**只读**探针（只发一条 `Runtime.evaluate("1")`，不 activate / 不 close / 不 rebuild）：`/json` 可达、6 个 page 目标、`_cdp_http_base` 推出 `http://172.19.0.1:9222` 正确。
+- 测试 +3（env 解析的六种坏值 + 「默认预算必须明显大于实测隧道延迟」的回归锁 + env 预算真的落到 `websockets.connect`）。本机 663 passed / 12 skipped，CI 双矩阵 675 passed / 0 skipped。
+
 ## [0.6.37] - 2026-10-18
 
 连接前冻结标签探针 + 可选重建自愈：不再非要等一个完整握手超时（默认 45s）才发现外部 Chrome 有被内存节省冻结的标签，而是 connect **之前**先用裸 WebSocket 逐个探活，只对**真冻**的标签切前台解冻。
 
 ### Added
-- **连接前冻结探针**（`SLIDEX_CDP_PROBE_FROZEN=1` 开启，默认关闭）：`_probe_cdp_target_alive` 对每个 page 目标的 `webSocketDebuggerUrl` 发一条 `Runtime.evaluate`，以「**收到应答**」而非「WS 连得上」判活——被冻结的标签 WS 握手常由浏览器进程代答成功，但渲染进程不响应 RPC，所以连得上不等于活着。单探 2s、8 路并发，即使全冻也只需 2s 上下，远小于一次握手超时。
+- **连接前冻结探针**（`SLIDEX_CDP_PROBE_FROZEN=1` 开启，默认关闭）：`_probe_cdp_target_alive` 对每个 page 目标的 `webSocketDebuggerUrl` 发一条 `Runtime.evaluate`，以「**收到应答**」而非「WS 连得上」判活——被冻结的标签 WS 握手常由浏览器进程代答成功，但渲染进程不响应 RPC，所以连得上不等于活着。单探 2s、8 路并发，即使全冻也只需 2s 上下，远小于一次握手超时（**0.6.38 起预算提到 6s 并可用 `SLIDEX_CDP_PROBE_TIMEOUT` 覆盖 —— 2s 在生产反向隧道上比活标签的实测往返 2.1s 还紧，见上**）。
 - **探针三态 + 安全阀**：`_probe_cdp_target_state` 返回 `alive` / `frozen` / `unknown`，把「连不上」与「连得上但不答」分开——后者才是冻结标签的签名。若**所有**目标都停在「连不上」，说明问题在探针这一侧（容器里的 `websockets` 版本不兼容这套调用、端点被中间设备拦掉），一律判「无法判定」并跳过自愈：宁可不做，也不能把「探针坏掉」翻译成「所有标签都冻了」而把用户每个 tab 都切一遍前台。探针可用时，连不上的目标仍会参与**解冻**（它同样会挂住握手），但**不参与重建**：一个刚被用户关掉的标签不该被我们重新打开成多余的新 tab。
 - **只解冻确证冻结的标签**（`_self_heal_frozen_cdp_tabs`）：探针判负的标签才 `/json/activate`，活标签绝不被切到前台——这是相对 0.6.32 兜底唤醒「激活全部 page」的收敛。
 - **可选重建仍冻结的标签**（`SLIDEX_CDP_REBUILD_FROZEN=1`，默认关闭，有损）：激活解冻异步生效，留 `_REBUILD_SETTLE_S` 复探一次，仍无响应的才 `PUT /json/new?<原URL>`（先开后关，避免丢 URL）重建；URL 整段 `quote`，否则其中的 `&` / `#` 会被当成参数分隔符截断。

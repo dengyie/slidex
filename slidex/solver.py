@@ -1550,11 +1550,15 @@ class SliderSolver(ProviderSolverMixin):
     _WAKE_TOTAL_BUDGET_S = 3.0
     _WAKE_MAX_WORKERS = 4
 
-    # 冻结探针(0.6.37)预算:单个 Runtime.evaluate 往返 2s、最多 8 路并发。
-    # 2s 是按"活标签毫秒级返回、冻结标签必然超时"取的:即使所有标签都判超时,
-    # 8 路并发下整体也只需 2s 上下,远小于一次 45s 的握手超时。重建后留 0.5s
-    # 让新标签的渲染进程起来,再复探一次确认自愈是否真的生效。
-    _PROBE_TIMEOUT_S = 2.0
+    # 冻结探针(0.6.37)预算:单个 Runtime.evaluate 往返 6s、最多 8 路并发。
+    # 判据是"活标签能在预算内答话、冻结标签必然不答",所以预算必须大于这条链路
+    # 上**活标签的实测往返**。0.6.37 定的 2s 是按局域网(毫秒级)想的,结果在生产
+    # 的反向隧道上实测活标签握手要 2.05~2.12s —— 比预算还长,于是六个标签全判
+    # "连不上",安全阀把探针整体降级为"无法判定",功能等于永不生效(还不如不做,
+    # 只是白花 2s)。6s 给这条链路留了约 3 倍余量,而 8 路并发下即使全部标签都
+    # 冻住,整体也只多等 6s,相对一次 45s 的握手超时仍然划算。预算可用
+    # SLIDEX_CDP_PROBE_TIMEOUT 覆盖(见 _cdp_probe_timeout_s)。
+    _PROBE_TIMEOUT_S = 6.0
     _PROBE_MAX_CONCURRENCY = 8
     _REBUILD_SETTLE_S = 0.5
 
@@ -1576,6 +1580,31 @@ class SliderSolver(ProviderSolverMixin):
                     return value
                 logger.warning(f"SLIDEX_CDP_CONNECT_TIMEOUT={raw!r} 非正数,按默认 45s 处理")
         return 45.0
+
+    @staticmethod
+    def _cdp_probe_timeout_s() -> float:
+        """冻结探针的单目标预算(秒),默认 6s;空值/非数字/非正数一律回落默认值。
+
+        为什么要给这个旋钮:探针的判据是"预算内答不上话就算冻",而这个预算同时是
+        这条链路的**延迟上限**。生产上容器经反向隧道连用户 PC 的 Chrome,活标签
+        握手实测 2.05~2.12s;隧道更绕、或用户 PC 上行更差时只会更慢。硬编码一个
+        按局域网想的数字,会让探针在慢链路上把所有标签都判成"连不上",安全阀随即
+        把整次探测降级为"无法判定"—— 功能静默失效。给了 env 就能按实际链路调,
+        而不用为了改一个常数发版。
+
+        与 _cdp_connect_timeout_s 同样的容错:写错的值不该让求解链路抛 ValueError。
+        """
+        raw = (os.environ.get("SLIDEX_CDP_PROBE_TIMEOUT") or "").strip()
+        if raw:
+            try:
+                value = float(raw)
+            except ValueError:
+                logger.warning(f"SLIDEX_CDP_PROBE_TIMEOUT={raw!r} 不是数字,按默认 6s 处理")
+            else:
+                if value > 0:
+                    return value
+                logger.warning(f"SLIDEX_CDP_PROBE_TIMEOUT={raw!r} 非正数,按默认 6s 处理")
+        return SliderSolver._PROBE_TIMEOUT_S
 
     @staticmethod
     def _cdp_http_base(cdp_endpoint: str) -> Optional[str]:
@@ -1712,7 +1741,7 @@ class SliderSolver(ProviderSolverMixin):
         except Exception as e:  # pragma: no cover - 仅在未装 remote extra 时走到
             logger.debug(f"[probe_cdp_target] websockets unavailable: {e}")
             return "unknown"
-        budget = timeout_s if timeout_s and timeout_s > 0 else SliderSolver._PROBE_TIMEOUT_S
+        budget = timeout_s if timeout_s and timeout_s > 0 else SliderSolver._cdp_probe_timeout_s()
         try:
             ws = await websockets.connect(ws_url, open_timeout=budget, close_timeout=budget)
         except Exception as e:
