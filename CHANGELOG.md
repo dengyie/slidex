@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.40] - 2026-10-19
+
+密码登录页导航不再被 `networkidle` 假超时打断 —— 新增 `_goto_login_page` 降级策略，与 solver 侧既有做法对齐。
+
+### Fixed
+- **密码登录 `page.goto(login_url, wait_until='networkidle', timeout=60000)` 假超时**（`XianyuSliderStealth.login_with_password_playwright`）：闲鱼/淘宝的处罚页会持续跑后台信标，`networkidle`（连续 500ms 无网络连接）**永不达成**，60s 后必抛 `Page.goto: Timeout 60000ms exceeded` —— 而页面其实早已可用。历史实现把这个 Timeout 直接上抛，整条密码登录链路当场中断；上游（xianyu-auto-bot）的「令牌/Session 过期 → 密码登录」恢复因此失败并触发 init-auth 失败循环（生产 2026-10-19 03:01 现场）。新逻辑与 `solver._goto_page` 同策略：**仅当错误类型名含 Timeout 时降级 `domcontentloaded`（30s）继续，其余错误照抛**；连接类错误（`ERR_CONNECTION_CLOSED` / `RESET` / `REFUSED`）仍按原逻辑 3 次重试。登录表单是否存在交由后续 `_find_login_form_with_retry` 判定 —— **导航等待不是成败判据**。
+
+### Notes
+- 抽取为 `XianyuSliderStealth._goto_login_page(page, login_url, pure_user_id)` 静态方法（返回实际采用的 `wait_until`），便于单测。降级导航本身再失败也只告警不上抛：页面可能已部分可用，交由后续表单探测。
+- 测试 +5（首试成功 / 超时降级 / 降级再失败软放行 / 连接错误重试 / 非超时非连接错误照抛）。本机 668 passed / 12 skipped。
+
 ## [0.6.39] - 2026-10-19
 
 跟随 automation-kit `0.5.0` 的发布，把 `automation-kit` extra 的下限提到 `0.5.0` —— 旧上限 `<0.5.0` 会把已发布的 kit `0.5.0` 判成不兼容。
