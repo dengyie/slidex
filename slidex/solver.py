@@ -1583,10 +1583,18 @@ class SliderSolver(ProviderSolverMixin):
 
         Playwright 的 endpoint 既可能是 ws://host:port/devtools/browser/<id>,也可能是
         裸 host:port 或 http://host:port;而 /json 一族只挂在 http(s)://host:port 上。
+
+        裸 host:port 不走 urlparse 的结果:它对这种「不是 URL 的 URL」的切分随 Python
+        版本而变 —— 3.11+ 因 scheme 必须以字母开头而整串落进 path,3.10 及更早却会把
+        `127.0.0.1` 当成 scheme、只剩端口号落进 path(实测同一个 `127.0.0.1:9222`
+        在两版上分别得到 `127.0.0.1:9222` 与 `9222`)。它本来就不是合法 URL,直接取
+        原串的 authority 段反而稳定。
         """
         parsed = urlparse(cdp_endpoint)
         scheme = "https" if parsed.scheme in ("wss", "https") else "http"
-        netloc = parsed.netloc or parsed.path
+        netloc = parsed.netloc
+        if not netloc:
+            netloc = cdp_endpoint.strip().lstrip("/").split("/", 1)[0]
         if not netloc:
             return None
         return f"{scheme}://{netloc}"
