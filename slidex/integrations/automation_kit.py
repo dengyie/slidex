@@ -24,7 +24,7 @@ def _import_automation_kit_types() -> Tuple[Any, Any, Any, Any, Any]:
         from automation_core.drivers import ArtifactHandle
     except ImportError as exc:
         raise ImportError(
-            "automation-kit>=0.3.0 is required. Install slidex[automation-kit] "
+            "automation-kit>=0.5.0 is required. Install slidex[automation-kit] "
             "to use SlidexVisualCapability."
         ) from exc
     return (

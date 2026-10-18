@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.39] - 2026-10-19
+
+跟随 automation-kit `0.5.0` 的发布，把 `automation-kit` extra 的下限提到 `0.5.0` —— 旧上限 `<0.5.0` 会把已发布的 kit `0.5.0` 判成不兼容。
+
+### Changed
+- **`automation-kit` extra 依赖范围 `>=0.4.0,<0.5.0` → `>=0.5.0,<0.6.0`**：kit `0.5.0` 已于 2026-10-18 发布（tag `v0.5.0`，`main` 快进到 `a29bb82`，CI 全绿）。跨仓顺序是 automation-kit → Slidex → app；两个 app 仓的 `slidex-contract` 早已声明 `>=0.5.0,<0.6.0` 并对着上游 `main` 校验，本次补上中间这一环。
+- **缺依赖提示与 extra 对齐**：`slidex/integrations/automation_kit.py` 的 `ImportError` 文案原写 `automation-kit>=0.3.0`，比 extra 声明的下限还旧两档（`>=0.3.0` / `>=0.4.0` 两代都没跟上），现在两边一致写 `>=0.5.0`。
+
+### Notes
+- 纯元数据变更：没有任何代码路径、算法或运行时行为发生变化，测试计数与 0.6.38 相同（本机 663 passed / 12 skipped；12 skip 是需要 sibling 检出 `automation-kit` 的契约测试，CI 里会真跑）。
+- `automation-kit` 仍不在包源上，所以 `pip install 'slidex[automation-kit]'` 在任何环境都还没法用（找不到 `automation-kit` 这个发行版，不是范围问题）。本仓 CI 走 sibling 检出 + `-e` 安装，不吃这个范围，契约测试照跑；kit 侧已补发布门禁（构建 → 安装 → 安装件自证，打 tag 触发 `publish.yml`），trusted publisher 配好后即可上架，届时本 extra 无需再改。
+
 ## [0.6.38] - 2026-10-18
 
 冻结探针的预算从 2s 提到 6s，并开放 `SLIDEX_CDP_PROBE_TIMEOUT` 覆盖 —— 0.6.37 上线后在生产环境实测发现 2s 比这条链路还紧，探针静默失效。
