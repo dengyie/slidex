@@ -1,8 +1,8 @@
 # Changelog
 
-## [Unreleased]
+## [0.6.36] - 2026-10-17
 
-CDP 唤醒兜底根治：不再依赖 Chrome `/json` 里并不存在的 `active` 字段。
+CDP 唤醒兜底根治（**补记**：代码随 0.6.34 进入 main，本节此前误置于 `[Unreleased]`）：不再依赖 Chrome `/json` 里并不存在的 `active` 字段。
 
 ### Fixed
 - **`_wake_cdp_targets` 删掉基于 `target["active"]` 的「跳过当前标签 + 结束还原焦点」**：Chrome 的 `/json` 序列化器（`content/browser/devtools/devtools_http_handler.cc` 的 `DevToolsHttpHandler::SerializeDescriptor`）只输出 `id` / `parentId` / `type` / `title` / `description` / `url` / `faviconUrl` / `webSocketDebuggerUrl` / `devtoolsFrontendUrl`，**没有 `active` 字段**。该判断恒为假 — 既跳不过当前标签，`restore_focus` 分支也永不执行，是死代码而非优化。现在如实写进 docstring：兜底唤醒必然把用户前台 tab 切到某个被激活的页上。要根治切前台请在用户 PC 侧用启动参数关掉内存节省（见主仓 `scripts/cdp_tunnel.ps1`）。
@@ -10,8 +10,6 @@ CDP 唤醒兜底根治：不再依赖 Chrome `/json` 里并不存在的 `active`
 - **`SLIDEX_CDP_CONNECT_TIMEOUT` 容错**：空值 / 非数字 / 非正数一律回落默认 45s，不再抛 `ValueError`。旧写法 `float(os.environ.get("SLIDEX_CDP_CONNECT_TIMEOUT", "45"))` 在 env 存在但为空字符串时直接炸，而空值恰恰是 compose 里最常见的配置形态。
 - **唤醒预算常量化并对齐实现**：`_WAKE_REQUEST_TIMEOUT_S=1.0` / `_WAKE_MAX_WORKERS=4` / `_WAKE_TOTAL_BUDGET_S=3.0`。原 docstring 声称「单请求 1s，整体 2s」，与实现（`fut.result(timeout=2.0)` × N）不符。
 - 删除已无意义的 `restore_focus` 形参（两个调用点都传 `True`，且还原分支不可能执行）。
-
-## [0.6.36] - 2026-10-17
 
 人工控制页适配 0.6.34/0.6.35 新增的 `click` 与 `text_input` 事件。后端在 0.6.34/0.6.35 就已支持这两类事件，但控制页从不发它们——**面板永远只能用鼠标拖拽**。本版把最后一公里补上。
 
@@ -116,7 +114,7 @@ CDP 唤醒兜底根治：不再依赖 Chrome `/json` 里并不存在的 `active`
 
 外部 Chrome 睡眠/冻结标签页主动唤醒：
 - `_wake_cdp_targets`：在 Playwright 执行 `connect_over_cdp` 握手前，主动向 `/json/activate/<id>` 轮流触发激活，强制唤醒 Chrome Memory Saver 冻结或舍弃渲染进程的后台标签页，杜绝 `connect_over_cdp` 挂满 45s 超时。
-- ⚠️ **更正（见 [Unreleased]）**：这条「连接前唤醒」的代价是**每次求解前都先把用户的 tab 逐个切到前台**（即现场看到的「打开前先被切一遍 tab」），已改为默认关闭（`SLIDEX_CDP_PRE_ACTIVATE=1` 才开），只在 connect 失败后兜底调用一次。
+- ⚠️ **更正（见 [0.6.36] 的 CDP 补记）**：这条「连接前唤醒」的代价是**每次求解前都先把用户的 tab 逐个切到前台**（即现场看到的「打开前先被切一遍 tab」），已改为默认关闭（`SLIDEX_CDP_PRE_ACTIVATE=1` 才开），只在 connect 失败后兜底调用一次。
 - 握手耗时从 45s 降至毫秒级（约 140ms）—更正：这是某次隧道 RTT 下的个案观测，不是稳定承诺。
 
 ## [0.6.31] - 2026-10-06
