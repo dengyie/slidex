@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.37] - 2026-10-18
+
+连接前冻结标签探针 + 可选重建自愈：不再非要等一个完整握手超时（默认 45s）才发现外部 Chrome 有被内存节省冻结的标签，而是 connect **之前**先用裸 WebSocket 逐个探活，只对**真冻**的标签切前台解冻。
+
+### Added
+- **连接前冻结探针**（`SLIDEX_CDP_PROBE_FROZEN=1` 开启，默认关闭）：`_probe_cdp_target_alive` 对每个 page 目标的 `webSocketDebuggerUrl` 发一条 `Runtime.evaluate`，以「**收到应答**」而非「WS 连得上」判活——被冻结的标签 WS 握手常由浏览器进程代答成功，但渲染进程不响应 RPC，所以连得上不等于活着。单探 2s、8 路并发，即使全冻也只需 2s 上下，远小于一次握手超时。
+- **只解冻确证冻结的标签**（`_self_heal_frozen_cdp_tabs`）：探针判负的标签才 `/json/activate`，活标签绝不被切到前台——这是相对 0.6.32 兜底唤醒「激活全部 page」的收敛。
+- **可选重建仍冻结的标签**（`SLIDEX_CDP_REBUILD_FROZEN=1`，默认关闭，有损）：激活解冻异步生效，留 `_REBUILD_SETTLE_S` 复探一次，仍无响应的才 `PUT /json/new?<原URL>`（先开后关，避免丢 URL）重建；URL 整段 `quote`，否则其中的 `&` / `#` 会被当成参数分隔符截断。
+- **前置自愈与 0.6.32 兜底的分工**：探针路径互斥优先于 `SLIDEX_CDP_PRE_ACTIVATE`（它是"少切几个 tab"的超集）；探针路径任何一步失败只记日志不抛出，退回照常握手——自愈是纯优化，绝不能因自愈本身把连接搞挂。
+- 测试 +26（探针判活 / 并发探冻 / 重建顺序与 quote / 降级路径 / env 门控 / 连接编排 / 真 websockets 服务端对照）。657 绿 / 12 skip。`websockets` 仍是 remote extra 的可选依赖，未安装时探针自动降级为空操作，不误判全冻。
+
 ## [0.6.36] - 2026-10-17
 
 CDP 唤醒兜底根治（**补记**：代码随 0.6.34 进入 main，本节此前误置于 `[Unreleased]`）：不再依赖 Chrome `/json` 里并不存在的 `active` 字段。

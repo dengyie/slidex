@@ -5,6 +5,7 @@ punish 的 x5secdata 绑定 bot 侧会话：借外部浏览器（用户 PC Chrom
 浏览器自己的会话上，bot 合并无效。
 """
 import asyncio
+import sys
 from unittest import mock
 
 import pytest
@@ -532,4 +533,420 @@ async def test_connect_existing_browser_raises_after_second_failure(monkeypatch)
     assert chromium.calls == 2  # 只重试一次
     assert solver._playwright is None
     assert started and started[0].stopped is True
+
+
+# ---------------------------------------------------------------------------
+# 0.6.37: 连接前冻结标签探针 + 解冻 + 可选重建自愈
+#
+# 动机:0.6.32 的兜底唤醒只在 connect 失败之后跑,必然先白等一个完整握手超时
+# (默认 45s),而且它切的是**全部** page 标签。裸 WebSocket 探针可以在 connect
+# 之前先问一句"你还活着吗",于是只对真冻的标签动手。
+# ---------------------------------------------------------------------------
+
+_WS_A = "ws://127.0.0.1:9222/devtools/page/alive"
+_WS_B = "ws://127.0.0.1:9222/devtools/page/frozen-b"
+_WS_C = "ws://127.0.0.1:9222/devtools/page/frozen-c"
+
+_PAGE_TARGETS = [
+    {"id": "alive", "type": "page", "title": "A", "url": "https://a.example/", "webSocketDebuggerUrl": _WS_A},
+    {"id": "frozen-b", "type": "page", "title": "B", "url": "https://b.example/", "webSocketDebuggerUrl": _WS_B},
+    {"id": "frozen-c", "type": "page", "title": "C", "url": "https://c.example/#x", "webSocketDebuggerUrl": _WS_C},
+    {"id": "sw", "type": "service_worker", "url": "https://a.example/sw.js"},
+]
+
+
+class _FakeWS:
+    """裸 WS 对端:记录发出去的帧,按需给应答或抛错。"""
+
+    def __init__(self, reply=None, exc=None):
+        self.sent = []
+        self._reply = reply
+        self._exc = exc
+
+    async def send(self, data):
+        self.sent.append(data)
+
+    async def recv(self):
+        if self._exc is not None:
+            raise self._exc
+        return self._reply
+
+
+class _FakeWSConn:
+    def __init__(self, ws):
+        self._ws = ws
+
+    async def __aenter__(self):
+        return self._ws
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
+def _install_websockets(monkeypatch, handler):
+    """替换 sys.modules["websockets"];handler(url, kwargs) -> _FakeWS,返回调用记录。"""
+    calls = []
+
+    class _WSModule:
+        @staticmethod
+        def connect(url, **kwargs):
+            calls.append((url, kwargs))
+            return _FakeWSConn(handler(url, kwargs))
+
+    monkeypatch.setitem(sys.modules, "websockets", _WSModule)
+    return calls
+
+
+def _install_cdp_http(monkeypatch, targets, json_error=None):
+    """假 DevTools HTTP:GET /json 返回 targets,其余返回 200;记录 (method, url)。"""
+    import io
+    import json as _json
+    import urllib.request
+    from urllib.request import Request
+
+    calls = []
+
+    def fake_urlopen(req, timeout=None):
+        url = req.full_url if isinstance(req, Request) else str(req)
+        calls.append((getattr(req, "method", None), url))
+        if url.endswith("/json"):
+            if json_error is not None:
+                raise json_error
+            return io.BytesIO(_json.dumps(targets).encode("utf-8"))
+        return io.BytesIO(b"ok")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    return calls
+
+
+def _alive_reply():
+    return '{"id":1,"result":{"type":"number","value":1}}'
+
+
+def _timeout_handler(url, kwargs):
+    return _FakeWS(exc=asyncio.TimeoutError())
+
+
+def test_cdp_probe_frozen_defaults_off_and_env_enables(monkeypatch):
+    """探针默认关闭——它会切前台(尽管只切真冻的),不能替用户决定。"""
+    monkeypatch.delenv("SLIDEX_CDP_PROBE_FROZEN", raising=False)
+    assert SliderSolver._cdp_probe_frozen_enabled() is False
+    monkeypatch.setenv("SLIDEX_CDP_PROBE_FROZEN", "1")
+    assert SliderSolver._cdp_probe_frozen_enabled() is True
+    monkeypatch.setenv("SLIDEX_CDP_PROBE_FROZEN", "off")
+    assert SliderSolver._cdp_probe_frozen_enabled() is False
+
+
+def test_cdp_rebuild_frozen_defaults_off_and_env_enables(monkeypatch):
+    """重建会关掉用户标签,默认必须关闭,且只能显式开启。"""
+    monkeypatch.delenv("SLIDEX_CDP_REBUILD_FROZEN", raising=False)
+    assert SliderSolver._cdp_rebuild_frozen_enabled() is False
+    monkeypatch.setenv("SLIDEX_CDP_REBUILD_FROZEN", "true")
+    assert SliderSolver._cdp_rebuild_frozen_enabled() is True
+    monkeypatch.setenv("SLIDEX_CDP_REBUILD_FROZEN", "0")
+    assert SliderSolver._cdp_rebuild_frozen_enabled() is False
+
+
+def test_cdp_http_base_maps_ws_and_bare_endpoints():
+    """/json 一族只挂 http(s),ws/wss 与裸 host:port 都要能映射过去。"""
+    assert SliderSolver._cdp_http_base("http://127.0.0.1:9222") == "http://127.0.0.1:9222"
+    assert SliderSolver._cdp_http_base("ws://127.0.0.1:9222/devtools/browser/abc") == "http://127.0.0.1:9222"
+    assert SliderSolver._cdp_http_base("wss://tunnel.example:443/devtools/browser/a") == "https://tunnel.example:443"
+    assert SliderSolver._cdp_http_base("127.0.0.1:9222") == "http://127.0.0.1:9222"
+    assert SliderSolver._cdp_http_base("") is None
+
+
+def test_page_targets_filters_type_and_ws_url():
+    assert [t["id"] for t in SliderSolver._page_targets(_PAGE_TARGETS)] == ["alive", "frozen-b", "frozen-c"]
+    assert [t["id"] for t in SliderSolver._page_targets(_PAGE_TARGETS, require_ws=True)] == [
+        "alive", "frozen-b", "frozen-c",
+    ]
+    assert SliderSolver._page_targets(None) == []
+    assert SliderSolver._page_targets([{"id": "x", "type": "page"}], require_ws=True) == []
+    assert SliderSolver._page_targets(["junk", {"type": "page"}]) == []
+
+
+@pytest.mark.asyncio
+async def test_probe_cdp_target_alive_true_only_on_reply(monkeypatch):
+    """判活标准是"收到应答",不是"WS 连得上"——冻结标签的 WS 握手照样能成功。"""
+    calls = _install_websockets(monkeypatch, lambda url, kw: _FakeWS(reply=_alive_reply()))
+    assert await SliderSolver._probe_cdp_target_alive(_WS_A) is True
+    assert calls and calls[0][0] == _WS_A
+    assert calls[0][1]["open_timeout"] == SliderSolver._PROBE_TIMEOUT_S
+
+
+@pytest.mark.asyncio
+async def test_probe_cdp_target_alive_false_on_timeout(monkeypatch):
+    _install_websockets(monkeypatch, _timeout_handler)
+    assert await SliderSolver._probe_cdp_target_alive(_WS_B) is False
+
+
+@pytest.mark.asyncio
+async def test_probe_cdp_target_alive_false_on_connect_error(monkeypatch):
+    def handler(url, kw):
+        raise OSError("ws handshake failed")
+
+    _install_websockets(monkeypatch, handler)
+    assert await SliderSolver._probe_cdp_target_alive(_WS_B) is False
+
+
+@pytest.mark.asyncio
+async def test_probe_cdp_target_alive_false_on_garbage_reply(monkeypatch):
+    """应答不是本探针的 id 就不能算活(比如撞上了别人的 WS 会话)。"""
+    _install_websockets(monkeypatch, lambda url, kw: _FakeWS(reply="not json"))
+    assert await SliderSolver._probe_cdp_target_alive(_WS_A) is False
+    _install_websockets(monkeypatch, lambda url, kw: _FakeWS(reply='{"id":7,"result":{}}'))
+    assert await SliderSolver._probe_cdp_target_alive(_WS_A) is False
+
+
+@pytest.mark.asyncio
+async def test_probe_cdp_target_alive_false_without_websockets(monkeypatch):
+    monkeypatch.setitem(sys.modules, "websockets", None)
+    assert await SliderSolver._probe_cdp_target_alive(_WS_A) is False
+
+
+@pytest.mark.asyncio
+async def test_probe_cdp_target_alive_false_without_ws_url(monkeypatch):
+    _install_websockets(monkeypatch, lambda url, kw: _FakeWS(reply=_alive_reply()))
+    assert await SliderSolver._probe_cdp_target_alive("") is False
+
+
+@pytest.mark.asyncio
+async def test_probe_frozen_cdp_targets_returns_only_unresponsive_pages(monkeypatch):
+    _install_cdp_http(monkeypatch, _PAGE_TARGETS)
+    probed = []
+
+    def handler(url, kw):
+        probed.append(url)
+        return _FakeWS(reply=_alive_reply()) if url == _WS_A else _FakeWS(exc=asyncio.TimeoutError())
+
+    _install_websockets(monkeypatch, handler)
+    frozen = await SliderSolver._probe_frozen_cdp_targets("http://127.0.0.1:9222")
+    assert [t["id"] for t in frozen] == ["frozen-b", "frozen-c"]
+    assert set(probed) == {_WS_A, _WS_B, _WS_C}  # service_worker 不在探活之列
+
+
+@pytest.mark.asyncio
+async def test_probe_frozen_cdp_targets_noop_without_websockets(monkeypatch):
+    """没装 websockets 时绝不能把全部标签当冻结——那会退化成"全切前台"。"""
+    _install_cdp_http(monkeypatch, _PAGE_TARGETS)
+    monkeypatch.setitem(sys.modules, "websockets", None)
+    assert await SliderSolver._probe_frozen_cdp_targets("http://127.0.0.1:9222") == []
+
+
+@pytest.mark.asyncio
+async def test_probe_frozen_cdp_targets_noop_when_endpoint_unreachable(monkeypatch):
+    _install_cdp_http(monkeypatch, [], json_error=ConnectionRefusedError("refused"))
+    _install_websockets(monkeypatch, lambda url, kw: _FakeWS(reply=_alive_reply()))
+    assert await SliderSolver._probe_frozen_cdp_targets("http://127.0.0.1:9222") == []
+
+
+@pytest.mark.asyncio
+async def test_probe_frozen_cdp_targets_noop_when_pages_lack_ws_url(monkeypatch):
+    _install_cdp_http(monkeypatch, [{"id": "p", "type": "page", "url": "https://a.example/"}])
+    _install_websockets(monkeypatch, lambda url, kw: _FakeWS(reply=_alive_reply()))
+    assert await SliderSolver._probe_frozen_cdp_targets("http://127.0.0.1:9222") == []
+
+
+@pytest.mark.asyncio
+async def test_probe_cdp_target_alive_against_real_ws_server():
+    """真 websockets 服务端对照(不用 fake):应答的判活、只连不答的判冻。
+
+    fake 能证明逻辑分支,但证明不了 `websockets.connect(open_timeout=/close_timeout=)`
+    这套实参在当前装的版本上真的成立 —— 这条测试补上那一段。
+    """
+    ws_lib = pytest.importorskip("websockets")
+    import json as _json
+
+    async def reply_handler(ws, *args):
+        try:
+            async for raw in ws:
+                msg = _json.loads(raw)
+                await ws.send(_json.dumps({"id": msg.get("id"), "result": {"type": "number", "value": 1}}))
+        except Exception:
+            pass
+
+    async def silent_handler(ws, *args):
+        # 收下帧但不回:模拟冻结标签「WS 连得上、渲染进程不答」
+        try:
+            async for _ in ws:
+                await asyncio.sleep(1.5)
+        except Exception:
+            pass
+
+    async with ws_lib.serve(reply_handler, "127.0.0.1", 0) as reply_srv:
+        async with ws_lib.serve(silent_handler, "127.0.0.1", 0) as silent_srv:
+            reply_port = reply_srv.sockets[0].getsockname()[1]
+            silent_port = silent_srv.sockets[0].getsockname()[1]
+            assert await SliderSolver._probe_cdp_target_alive(f"ws://127.0.0.1:{reply_port}/devtools/page/a") is True
+            assert await SliderSolver._probe_cdp_target_alive(
+                f"ws://127.0.0.1:{silent_port}/devtools/page/b", timeout_s=0.3
+            ) is False
+
+
+def test_rebuild_cdp_target_puts_new_then_closes_old(monkeypatch):
+    """Chrome 111+ 的 /json/new 只接受 PUT;URL 必须整段 quote,否则 & / # 会被截断。"""
+    from urllib.parse import quote
+
+    calls = _install_cdp_http(monkeypatch, [])
+    url = "https://b.example/q?a=1&b=2#frag"
+    assert SliderSolver._rebuild_cdp_target("http://127.0.0.1:9222", {"id": "frozen-b", "url": url}) is True
+    assert [m for m, _ in calls] == ["PUT", None]  # 先开后关,顺序不能反
+    assert calls[0][1] == "http://127.0.0.1:9222/json/new?" + quote(url, safe="")
+    assert calls[1][1] == "http://127.0.0.1:9222/json/close/frozen-b"
+
+
+def test_rebuild_cdp_target_false_when_reopen_fails(monkeypatch):
+    """重开失败时不得再关旧标签——否则用户的页就被彻底弄丢了。"""
+    import urllib.request
+    from urllib.request import Request
+
+    calls = []
+
+    def fake_urlopen(req, timeout=None):
+        calls.append(req.full_url if isinstance(req, Request) else str(req))
+        raise OSError("405 Method Not Allowed")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    target = {"id": "frozen-b", "url": "https://b.example/"}
+    assert SliderSolver._rebuild_cdp_target("http://127.0.0.1:9222", target) is False
+    assert len(calls) == 1  # 没有 /json/close
+
+
+def test_rebuild_cdp_target_defaults_to_about_blank(monkeypatch):
+    calls = _install_cdp_http(monkeypatch, [])
+    assert SliderSolver._rebuild_cdp_target("http://127.0.0.1:9222", {"id": "frozen-b"}) is True
+    assert calls[0][1] == "http://127.0.0.1:9222/json/new?about%3Ablank"
+
+
+@pytest.mark.asyncio
+async def test_self_heal_activates_only_frozen_targets(monkeypatch):
+    """核心承诺:活标签绝不被切到前台,只有真冻的那些被 activate。"""
+    solver = _make_solver()
+    calls = _install_cdp_http(monkeypatch, _PAGE_TARGETS)
+
+    def handler(url, kw):
+        return _FakeWS(reply=_alive_reply()) if url == _WS_A else _FakeWS(exc=asyncio.TimeoutError())
+
+    _install_websockets(monkeypatch, handler)
+    healed = await solver._self_heal_frozen_cdp_tabs("http://127.0.0.1:9222")
+    assert healed == 2
+    activates = sorted(u for _, u in calls if "/json/activate/" in u)
+    assert activates == [
+        "http://127.0.0.1:9222/json/activate/frozen-b",
+        "http://127.0.0.1:9222/json/activate/frozen-c",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_self_heal_noop_when_nothing_frozen(monkeypatch):
+    solver = _make_solver()
+    calls = _install_cdp_http(monkeypatch, _PAGE_TARGETS)
+    _install_websockets(monkeypatch, lambda url, kw: _FakeWS(reply=_alive_reply()))
+    assert await solver._self_heal_frozen_cdp_tabs("http://127.0.0.1:9222") == 0
+    assert not [u for _, u in calls if "/json/activate/" in u]
+
+
+@pytest.mark.asyncio
+async def test_self_heal_never_rebuilds_by_default(monkeypatch):
+    """默认绝不关闭用户标签:解冻后不再复探、不重建。"""
+    solver = _make_solver()
+    monkeypatch.delenv("SLIDEX_CDP_REBUILD_FROZEN", raising=False)
+    calls = _install_cdp_http(monkeypatch, _PAGE_TARGETS)
+    _install_websockets(monkeypatch, _timeout_handler)
+    assert await solver._self_heal_frozen_cdp_tabs("http://127.0.0.1:9222") == 3
+    assert not [u for _, u in calls if "/json/close/" in u or "/json/new?" in u]
+
+
+@pytest.mark.asyncio
+async def test_self_heal_rebuilds_still_frozen_when_enabled(monkeypatch):
+    """SLIDEX_CDP_REBUILD_FROZEN=1:复探仍冻的标签才重建,URL 用原 URL。"""
+    solver = _make_solver()
+    monkeypatch.setattr(SliderSolver, "_REBUILD_SETTLE_S", 0.0)
+    monkeypatch.setenv("SLIDEX_CDP_REBUILD_FROZEN", "1")
+    calls = _install_cdp_http(monkeypatch, _PAGE_TARGETS)
+    _install_websockets(monkeypatch, _timeout_handler)
+
+    assert await solver._self_heal_frozen_cdp_tabs("http://127.0.0.1:9222") == 6  # 3 解冻 + 3 重建
+    reopened = [u for _, u in calls if "/json/new?" in u]
+    assert all(m == "PUT" for m, u in calls if "/json/new?" in u)
+    assert "http://127.0.0.1:9222/json/new?https%3A%2F%2Fc.example%2F%23x" in reopened
+    closed = sorted(u.rsplit("/", 1)[-1] for _, u in calls if "/json/close/" in u)
+    assert closed == ["alive", "frozen-b", "frozen-c"]
+
+
+@pytest.mark.asyncio
+async def test_self_heal_skips_rebuild_when_second_probe_comes_back_alive(monkeypatch):
+    """解冻是异步生效的:复探已活就不许再动用户的标签。"""
+    solver = _make_solver()
+    monkeypatch.setattr(SliderSolver, "_REBUILD_SETTLE_S", 0.0)
+    monkeypatch.setenv("SLIDEX_CDP_REBUILD_FROZEN", "1")
+    calls = _install_cdp_http(monkeypatch, _PAGE_TARGETS)
+    rounds = {"n": 0}
+
+    def handler(url, kw):
+        if url == _WS_A:
+            return _FakeWS(reply=_alive_reply())
+        rounds["n"] += 1
+        if rounds["n"] <= 2:  # 首轮:B、C 都冻
+            return _FakeWS(exc=asyncio.TimeoutError())
+        return _FakeWS(reply=_alive_reply())  # 复探:已解冻
+
+    _install_websockets(monkeypatch, handler)
+    assert await solver._self_heal_frozen_cdp_tabs("http://127.0.0.1:9222") == 2
+    assert not [u for _, u in calls if "/json/close/" in u or "/json/new?" in u]
+
+
+@pytest.mark.asyncio
+async def test_self_heal_rebuild_failure_is_tolerated(monkeypatch):
+    """重建失败(旧标签关不掉/新标签开不出)不影响返回值语义,也不抛异常。"""
+    solver = _make_solver()
+    monkeypatch.setattr(SliderSolver, "_REBUILD_SETTLE_S", 0.0)
+    monkeypatch.setenv("SLIDEX_CDP_REBUILD_FROZEN", "1")
+    _install_cdp_http(monkeypatch, _PAGE_TARGETS)
+    _install_websockets(monkeypatch, _timeout_handler)
+    monkeypatch.setattr(SliderSolver, "_rebuild_cdp_target", staticmethod(lambda ep, t: False))
+    assert await solver._self_heal_frozen_cdp_tabs("http://127.0.0.1:9222") == 3
+
+
+@pytest.mark.asyncio
+async def test_connect_existing_browser_self_heals_before_connect_when_enabled(monkeypatch):
+    """SLIDEX_CDP_PROBE_FROZEN=1 时走探针路径,且不再叠加"全量切前台"的 pre-activate。"""
+    solver = _make_solver()
+    context = _FakeContext(_FakePage())
+    monkeypatch.setattr(solver_module, "async_playwright", lambda: _FakePWFactory(_FakeBrowser(context)))
+    monkeypatch.setenv("SLIDEX_CDP_PROBE_FROZEN", "1")
+    monkeypatch.setenv("SLIDEX_CDP_PRE_ACTIVATE", "1")
+
+    order = []
+
+    async def _heal(endpoint):
+        order.append(("heal", endpoint))
+        return 2
+
+    monkeypatch.setattr(solver, "_self_heal_frozen_cdp_tabs", _heal)
+    monkeypatch.setattr(
+        SliderSolver, "_wake_cdp_targets",
+        staticmethod(lambda ep: order.append(("wake", ep)) or 3),
+    )
+
+    await solver._connect_existing_browser("http://localhost:9222", "")
+    assert order == [("heal", "http://localhost:9222")]
+    assert solver.page in context.created_pages
+
+
+@pytest.mark.asyncio
+async def test_connect_existing_browser_survives_self_heal_failure(monkeypatch):
+    """自愈只是优化:探针/解冻抛错也必须照常完成连接。"""
+    solver = _make_solver()
+    context = _FakeContext(_FakePage())
+    monkeypatch.setattr(solver_module, "async_playwright", lambda: _FakePWFactory(_FakeBrowser(context)))
+    monkeypatch.setenv("SLIDEX_CDP_PROBE_FROZEN", "1")
+
+    async def _heal(endpoint):
+        raise RuntimeError("probe exploded")
+
+    monkeypatch.setattr(solver, "_self_heal_frozen_cdp_tabs", _heal)
+    await solver._connect_existing_browser("http://localhost:9222", "")
+    assert solver.page in context.created_pages
 

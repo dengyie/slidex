@@ -1,7 +1,7 @@
 import asyncio, json, os, re, socket, threading, time, random, shutil, psutil, uuid
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List, Callable
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote
 import urllib.request
 from loguru import logger
 from playwright.async_api import async_playwright
@@ -1517,11 +1517,46 @@ class SliderSolver(ProviderSolverMixin):
             "1", "true", "yes", "on",
         }
 
+    @staticmethod
+    def _cdp_probe_frozen_enabled() -> bool:
+        """连接前冻结标签探针(0.6.37)—— 默认关闭,须显式 SLIDEX_CDP_PROBE_FROZEN=1。
+
+        与 `SLIDEX_CDP_PRE_ACTIVATE` 的分工:后者是"连接前把所有 page 标签逐个切到
+        前台",切得越多、隧道 RTT 越大,用户看到的抖动越明显。本探针反过来 —— 先用
+        裸 WebSocket 对每个标签做一次 Runtime.evaluate 短超时探活,只对**确实无响应**
+        的标签做 /json/activate 解冻。探针只读、不动标签顺序,因此可以安全地跑在
+        connect **之前**:这正是 0.6.32 那把"默认关闭、只在吃满 45s 超时后才兜底"所缺
+        的一环 —— 前置自愈,不白等一个完整握手超时。
+        """
+        return os.environ.get("SLIDEX_CDP_PROBE_FROZEN", "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+
+    @staticmethod
+    def _cdp_rebuild_frozen_enabled() -> bool:
+        """激活解冻后仍无响应的标签改用「关闭 + 重建」自愈 —— 默认关闭。
+
+        重建会**关掉用户的标签页**(再以原 URL 新开一个),是有损操作,必须显式
+        SLIDEX_CDP_REBUILD_FROZEN=1 才启用;且只对"激活解冻后仍探活失败"的目标动手,
+        绝不因为探针一次判负就关标签。
+        """
+        return os.environ.get("SLIDEX_CDP_REBUILD_FROZEN", "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+
     # /json/activate 兜底的预算:单请求 1s、最多 4 路并发、整体 3s。超出整体预算
     # 就不再等剩余结果(线程池收尾时各任务最多再各耗 1s)。
     _WAKE_REQUEST_TIMEOUT_S = 1.0
     _WAKE_TOTAL_BUDGET_S = 3.0
     _WAKE_MAX_WORKERS = 4
+
+    # 冻结探针(0.6.37)预算:单个 Runtime.evaluate 往返 2s、最多 8 路并发。
+    # 2s 是按"活标签毫秒级返回、冻结标签必然超时"取的:即使所有标签都判超时,
+    # 8 路并发下整体也只需 2s 上下,远小于一次 45s 的握手超时。重建后留 0.5s
+    # 让新标签的渲染进程起来,再复探一次确认自愈是否真的生效。
+    _PROBE_TIMEOUT_S = 2.0
+    _PROBE_MAX_CONCURRENCY = 8
+    _REBUILD_SETTLE_S = 0.5
 
     @staticmethod
     def _cdp_connect_timeout_s() -> float:
@@ -1541,6 +1576,78 @@ class SliderSolver(ProviderSolverMixin):
                     return value
                 logger.warning(f"SLIDEX_CDP_CONNECT_TIMEOUT={raw!r} 非正数,按默认 45s 处理")
         return 45.0
+
+    @staticmethod
+    def _cdp_http_base(cdp_endpoint: str) -> Optional[str]:
+        """从 CDP endpoint 推出 DevTools HTTP 根地址(ws(s) 同源映射到 http(s))。
+
+        Playwright 的 endpoint 既可能是 ws://host:port/devtools/browser/<id>,也可能是
+        裸 host:port 或 http://host:port;而 /json 一族只挂在 http(s)://host:port 上。
+        """
+        parsed = urlparse(cdp_endpoint)
+        scheme = "https" if parsed.scheme in ("wss", "https") else "http"
+        netloc = parsed.netloc or parsed.path
+        if not netloc:
+            return None
+        return f"{scheme}://{netloc}"
+
+    @staticmethod
+    def _fetch_cdp_json(cdp_endpoint: str, timeout_s: float = 3.0) -> Optional[List[Dict[str, Any]]]:
+        """GET {base}/json 返回 target 列表;端点不可达或返回非列表时返回 None。"""
+        base_url = SliderSolver._cdp_http_base(cdp_endpoint)
+        if not base_url:
+            return None
+        req = urllib.request.Request(f"{base_url}/json", headers={"User-Agent": "slidex-cdp-probe"})
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            targets = json.loads(resp.read().decode("utf-8"))
+        return targets if isinstance(targets, list) else None
+
+    @staticmethod
+    def _page_targets(targets: Optional[List[Dict[str, Any]]], require_ws: bool = False) -> List[Dict[str, Any]]:
+        """筛出 type == "page" 且带 id 的目标;require_ws 再要求带 webSocketDebuggerUrl。"""
+        out: List[Dict[str, Any]] = []
+        for t in targets or []:
+            if not isinstance(t, dict) or t.get("type") != "page" or not t.get("id"):
+                continue
+            if require_ws and not t.get("webSocketDebuggerUrl"):
+                continue
+            out.append(t)
+        return out
+
+    @staticmethod
+    def _activate_cdp_target(base_url: str, target_id: str) -> bool:
+        """GET {base}/json/activate/{id};成败以是否抛异常为准(HTTP 无有意义的返回体)。"""
+        try:
+            req = urllib.request.Request(
+                f"{base_url}/json/activate/{target_id}",
+                headers={"User-Agent": "slidex-cdp-wake"},
+            )
+            with urllib.request.urlopen(req, timeout=SliderSolver._WAKE_REQUEST_TIMEOUT_S):
+                pass
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _activate_cdp_targets(base_url: str, target_ids: List[str]) -> int:
+        """并发激活一批目标,返回成功数;整体预算 _WAKE_TOTAL_BUDGET_S 用尽即停。"""
+        if not target_ids:
+            return 0
+        from concurrent.futures import ThreadPoolExecutor
+        woken = 0
+        deadline = time.monotonic() + SliderSolver._WAKE_TOTAL_BUDGET_S
+        with ThreadPoolExecutor(max_workers=min(SliderSolver._WAKE_MAX_WORKERS, len(target_ids))) as pool:
+            futures = [pool.submit(SliderSolver._activate_cdp_target, base_url, tid) for tid in target_ids]
+            for fut in futures:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    if fut.result(timeout=remaining):
+                        woken += 1
+                except Exception:
+                    pass
+        return woken
 
     @staticmethod
     def _wake_cdp_targets(cdp_endpoint: str) -> int:
@@ -1565,62 +1672,177 @@ class SliderSolver(ProviderSolverMixin):
         调用方据此决定是否值得再等一轮握手超时。
         """
         try:
-            parsed = urlparse(cdp_endpoint)
-            scheme = "https" if parsed.scheme in ("wss", "https") else "http"
-            netloc = parsed.netloc or parsed.path
-            if not netloc:
+            base_url = SliderSolver._cdp_http_base(cdp_endpoint)
+            if not base_url:
                 return 0
-            base_url = f"{scheme}://{netloc}"
-            req = urllib.request.Request(f"{base_url}/json", headers={"User-Agent": "slidex-cdp-wake"})
-            with urllib.request.urlopen(req, timeout=3.0) as resp:
-                targets = json.loads(resp.read().decode("utf-8"))
-            if not isinstance(targets, list):
-                return 0
-
-            page_ids = [
-                t["id"]
-                for t in targets
-                if isinstance(t, dict) and t.get("type") == "page" and t.get("id")
-            ]
+            page_ids = [t["id"] for t in SliderSolver._page_targets(SliderSolver._fetch_cdp_json(cdp_endpoint))]
             if not page_ids:
                 return 0
-
-            def _activate(tid: str) -> bool:
-                try:
-                    act_req = urllib.request.Request(
-                        f"{base_url}/json/activate/{tid}",
-                        headers={"User-Agent": "slidex-cdp-wake"},
-                    )
-                    with urllib.request.urlopen(act_req, timeout=SliderSolver._WAKE_REQUEST_TIMEOUT_S):
-                        pass
-                    return True
-                except Exception:
-                    return False
-
-            from concurrent.futures import ThreadPoolExecutor
-            woken = 0
-            deadline = time.monotonic() + SliderSolver._WAKE_TOTAL_BUDGET_S
-            with ThreadPoolExecutor(max_workers=min(SliderSolver._WAKE_MAX_WORKERS, len(page_ids))) as pool:
-                futures = [pool.submit(_activate, tid) for tid in page_ids]
-                for fut in futures:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        break
-                    try:
-                        if fut.result(timeout=remaining):
-                            woken += 1
-                    except Exception:
-                        pass
-            return woken
+            return SliderSolver._activate_cdp_targets(base_url, page_ids)
         except Exception as e:
             logger.debug(f"[wake_cdp_targets] probe failed or not applicable: {e}")
             return 0
+
+    @staticmethod
+    async def _probe_cdp_target_alive(ws_url: str, timeout_s: Optional[float] = None) -> bool:
+        """用裸 WebSocket 探一次目标是否活着:发 Runtime.evaluate,等应答。
+
+        判活标准不是"WebSocket 连得上"而是"能拿到应答":被内存节省冻结的标签,
+        WS 握手常常仍能建立(浏览器进程代答),但渲染进程不处理 RPC,所以只有收到
+        {"id":1,...} 才算活。超时/连不上/协议错一律判死。需要 websockets(remote extra);
+        未安装时返回 False —— 调用方 _probe_frozen_cdp_targets 已提前挡掉,不会误判。
+        """
+        if not ws_url:
+            return False
+        try:
+            import websockets
+        except Exception as e:  # pragma: no cover - 仅在未装 remote extra 时走到
+            logger.debug(f"[probe_cdp_target] websockets unavailable: {e}")
+            return False
+        budget = timeout_s if timeout_s and timeout_s > 0 else SliderSolver._PROBE_TIMEOUT_S
+        try:
+            async with websockets.connect(ws_url, open_timeout=budget, close_timeout=budget) as ws:
+                await ws.send(json.dumps({
+                    "id": 1,
+                    "method": "Runtime.evaluate",
+                    "params": {"expression": "1", "returnByValue": True},
+                }))
+                raw = await asyncio.wait_for(ws.recv(), timeout=budget)
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                return False
+            return isinstance(msg, dict) and msg.get("id") == 1
+        except asyncio.TimeoutError:
+            return False
+        except Exception as e:
+            logger.debug(f"[probe_cdp_target] {ws_url[:60]} unresponsive: {type(e).__name__}: {e}")
+            return False
+
+    @staticmethod
+    async def _probe_frozen_cdp_targets(cdp_endpoint: str) -> List[Dict[str, Any]]:
+        """返回探活失败的 page 目标列表;空列表表示"全活"或"判定不了"。
+
+        判定不了的情况(websockets 未安装、/json 不可达、没有带 ws 地址的 page 目标)
+        一律返回空列表:自愈只应作用于**确证冻结**的标签,判定不了就什么都不做,
+        退回原有"握手超时后兜底唤醒"的路径。
+        """
+        try:
+            import websockets  # noqa: F401
+        except Exception:
+            logger.debug("[probe_frozen] websockets not installed, skip frozen pre-probe")
+            return []
+        try:
+            targets = SliderSolver._fetch_cdp_json(cdp_endpoint)
+        except Exception as e:
+            logger.debug(f"[probe_frozen] /json unreachable: {e}")
+            return []
+        pages = SliderSolver._page_targets(targets, require_ws=True)
+        if not pages:
+            return []
+        sem = asyncio.Semaphore(SliderSolver._PROBE_MAX_CONCURRENCY)
+
+        async def _one(target: Dict[str, Any]):
+            async with sem:
+                alive = await SliderSolver._probe_cdp_target_alive(target.get("webSocketDebuggerUrl") or "")
+            return None if alive else target
+
+        results = await asyncio.gather(*(_one(t) for t in pages), return_exceptions=True)
+        return [r for r in results if isinstance(r, dict)]
+
+    @staticmethod
+    def _rebuild_cdp_target(cdp_endpoint: str, target: Dict[str, Any]) -> bool:
+        """以原 URL 重开一个标签、再关掉那个已冻结的旧标签(先开后关,避免丢 URL)。
+
+        有损操作 —— 会关掉用户的标签页 —— 因此只在 SLIDEX_CDP_REBUILD_FROZEN=1 且该
+        标签**激活解冻后仍探活失败**时才被调用。Chrome 111+ 的 /json/new 只接受 PUT
+        (GET 返回 405),且 URL 必须整段 quote,否则其中的 & / # 会被当成参数分隔符截断。
+        旧标签关不掉不算失败:求解用的是新标签。
+        """
+        base_url = SliderSolver._cdp_http_base(cdp_endpoint)
+        tid = (target or {}).get("id")
+        if not base_url or not tid:
+            return False
+        url = (target.get("url") or "").strip() or "about:blank"
+        try:
+            new_req = urllib.request.Request(
+                f"{base_url}/json/new?{quote(url, safe='')}",
+                method="PUT",
+                headers={"User-Agent": "slidex-cdp-rebuild"},
+            )
+            with urllib.request.urlopen(new_req, timeout=SliderSolver._WAKE_REQUEST_TIMEOUT_S * 2):
+                pass
+        except Exception as e:
+            logger.debug(f"[rebuild_cdp_target] reopen {url[:60]} failed: {e}")
+            return False
+        try:
+            close_req = urllib.request.Request(
+                f"{base_url}/json/close/{tid}",
+                headers={"User-Agent": "slidex-cdp-rebuild"},
+            )
+            with urllib.request.urlopen(close_req, timeout=SliderSolver._WAKE_REQUEST_TIMEOUT_S):
+                pass
+        except Exception as e:
+            logger.debug(f"[rebuild_cdp_target] close {tid} failed (new tab已开): {e}")
+        return True
+
+    async def _self_heal_frozen_cdp_tabs(self, cdp_endpoint: str) -> int:
+        """连接前自愈:探活 → 只解冻确证冻结的标签 →(可选)重建仍冻结的标签。
+
+        与 0.6.32 的兜底唤醒的区别在**时机**与**范围**:这里是 connect 之前先探,
+        只对真冻的标签动手,因此不必白等一个完整握手超时;激活解冻不可避免地会把
+        这些标签切到前台,但数量从"全部 page"收敛到"真冻的那些"。
+
+        返回最终处理(解冻或重建)的目标数。任何一步失败都只记日志、不抛出:
+        自愈是纯优化,失败必须退回"照常握手",绝不能因为自愈本身把连接搞挂。
+        """
+        frozen = await self._probe_frozen_cdp_targets(cdp_endpoint)
+        if not frozen:
+            return 0
+        base_url = self._cdp_http_base(cdp_endpoint)
+        if not base_url:
+            return 0
+        logger.warning(
+            f"[{self.pure_user_id}] detected {len(frozen)} frozen CDP page target(s) before connect; "
+            f"activating only those (SLIDEX_CDP_PROBE_FROZEN=1)"
+        )
+        healed = await asyncio.to_thread(
+            self._activate_cdp_targets, base_url, [t["id"] for t in frozen]
+        )
+        if not self._cdp_rebuild_frozen_enabled():
+            return healed
+        # 激活解冻是异步生效的(标签要重新调度渲染进程),留一点时间再复探,
+        # 只对"复探仍无响应"的标签做有损重建。
+        await asyncio.sleep(self._REBUILD_SETTLE_S)
+        still = await self._probe_frozen_cdp_targets(cdp_endpoint)
+        if not still:
+            return healed
+        rebuilt = 0
+        for target in still:
+            ok = await asyncio.to_thread(self._rebuild_cdp_target, cdp_endpoint, target)
+            rebuilt += 1 if ok else 0
+        logger.info(
+            f"[{self.pure_user_id}] rebuilt {rebuilt}/{len(still)} still-frozen CDP tab(s) "
+            f"(SLIDEX_CDP_REBUILD_FROZEN=1: 用户标签被关闭并以原 URL 重开)"
+        )
+        return healed + rebuilt
 
     async def _connect_existing_browser(self, cdp_endpoint: str, page_url: str = ""):
         """连接已有浏览器(CDP 模式)— 不启动新浏览器"""
         # 连接前唤醒冻结标签会把用户的 tab 逐个切到前台(可见抖动),因此默认
         # 不做;只有显式开启 SLIDEX_CDP_PRE_ACTIVATE=1 时才主动唤醒一次。
-        if self._cdp_pre_activate_enabled():
+        #
+        # 0.6.37 起多一条更省的路径(同样默认关闭):SLIDEX_CDP_PROBE_FROZEN=1 时
+        # 先探活、只解冻真冻的标签,不必等第一次握手吃满超时才发现问题。两者互斥,
+        # 探针优先——它严格是"少切几个 tab"的超集行为。
+        if self._cdp_probe_frozen_enabled():
+            try:
+                healed = await self._self_heal_frozen_cdp_tabs(cdp_endpoint)
+                if healed:
+                    logger.info(f"[{self.pure_user_id}] pre-connect self-heal handled {healed} frozen tab(s)")
+            except Exception as heal_e:
+                logger.debug(f"[{self.pure_user_id}] pre-connect frozen probe failed: {heal_e}")
+        elif self._cdp_pre_activate_enabled():
             try:
                 woken = await asyncio.to_thread(self._wake_cdp_targets, cdp_endpoint)
                 if woken > 0:
