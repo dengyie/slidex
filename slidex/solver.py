@@ -36,6 +36,7 @@ def _resolve_browser_channel() -> Optional[str]:
 
 from slidex._stealth_patch import STEALTH_LAUNCH_ARGS, STEALTH_INIT_SCRIPT, ENV_CONSISTENCY_LAUNCH_ARGS, MEMORY_GUARD_LAUNCH_ARGS
 from slidex._drag import DragDispatchError
+from slidex._env import env_float
 from slidex._gestures import GestureSession, generate_archetype
 from slidex._trajectory import slide_end_hold_range
 from slidex._image_match import SliderImageMatcher
@@ -102,11 +103,12 @@ class SliderSolver(ProviderSolverMixin):
     # solve 全程硬看门狗：须大于内部各段预算之和（profile 锁等待 60 + 页面加载
     # ~60 + provider/legacy 重试 ~120 + remote 人工会话 180）。生产（1GB VPS）
     # 曾在死驱动连接上挂死 16h+，局部预算防不住挂在不同协议调用上的死等。
-    SOLVE_WATCHDOG_TIMEOUT_S = float(os.environ.get("SLIDEX_SOLVE_WATCHDOG", "600"))
+    # 类体（import 期）求值：坏 env 必须回落默认而不是让 import 失败。
+    SOLVE_WATCHDOG_TIMEOUT_S = env_float("SLIDEX_SOLVE_WATCHDOG", 600.0, minimum=1.0)
     SCREENSHOT_BUDGET_S = 10.0
     # CDP 模式人工等待期：自动拖动全部失败后，页面留在用户真实浏览器里，
     # 保持监听等人工拖过（真手通过率远高于合成轨迹）。须小于 solve 看门狗。
-    MANUAL_VOUCHER_WAIT_S = float(os.environ.get("SLIDEX_MANUAL_VOUCHER_WAIT", "300"))
+    MANUAL_VOUCHER_WAIT_S = env_float("SLIDEX_MANUAL_VOUCHER_WAIT", 300.0, minimum=0.0)
 
     # CDP 互斥：同一外部浏览器（同一 endpoint）同时只允许一个 solve。并发管理器
     # 只覆盖容器内浏览器路径（stealth），CDP 并发进入会互抢页面、互注账号 cookie
@@ -762,7 +764,9 @@ class SliderSolver(ProviderSolverMixin):
 
             if page_url:
                 self._emit_step("page", "page_load", "started", page_url=page_url)
-                await self.page.goto(page_url, wait_until="networkidle", timeout=45000)
+                # 走 _goto_page：处罚页后台信标会让 networkidle 假超时，裸 goto 会
+                # 把整个 solve 变成 Playwright page solve error 直接返回失败。
+                await self._goto_page(self.page, page_url)
                 await asyncio.sleep(3)
                 self._emit_step("page", "page_load", "ok", page_url=page_url)
 

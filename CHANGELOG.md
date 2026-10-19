@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.41] - 2026-10-19
+
+健壮性收口：坏 env 不再能让 `import slidex` 崩，剩下两处 `networkidle` 假超时也不再吞掉整次求解。
+
+### Fixed
+- **类体（import 期）裸 `float()` 读 env 会让整个库不可用**（`SliderSolver.SOLVE_WATCHDOG_TIMEOUT_S` / `MANUAL_VOUCHER_WAIT_S`）：这两个常量在类定义时求值，`SLIDEX_SOLVE_WATCHDOG=abc` 会让 `import slidex.solver` 直接抛 `ValueError`，所有依赖 slidex 的进程在启动阶段就死。改为容错解析（非法/非有限/越界回落默认并告警）。`MANUAL_VOUCHER_WAIT` 仍允许 `0`（该值的语义就是「不等」），`SOLVE_WATCHDOG` 下限 1s。
+- **`solve_on_page` 的 page_url 分支被 `networkidle` 假超时打成失败**（`solver.py`）：原实现是裸 `page.goto(..., wait_until="networkidle", timeout=45000)`，Timeout 落到 `solve_on_page` 的兜底 `except` 后直接 `return False, None` —— 处罚页信标让 `networkidle` 永不静默时，一次本可继续的求解整体判负。改为走既有 `self._goto_page(...)`（同文件 `_load_page` 早就在用）：仅 Timeout 降级 `domcontentloaded` 继续，页面是否真的可用交给后续 page_state 探测。
+- **滑块重置回退分支的 `page.reload(wait_until='networkidle', 15000)` 假失败**（`stealth.py`）：同样受处罚页信标影响，导航其实已发起却被判失败，白丢一次 reset 收尾的稳定等待，并在滑块最常出现的页面上持续刷假告警。新增 `_reload_with_fallback` 静态方法：仅 Timeout 降级，其余错误照抛（保留调用点原有兜底）。
+- **`slide_end_hold_range()` 与两处 `int(os.environ...)` 的裸转换**：坏值（`"abc"`、`"inf"`、`"5000.0"`）此前会抛异常或错误解析。统一到新模块 `slidex/_env.py` 的 `env_float` / `env_int`，与 `config.py` 的 `_safe_int` / `_safe_float` 同约定；`env_int` 额外容忍 `"5000.0"` 这类浮点写法并接住 `OverflowError`（`"inf"`）。
+
+### Notes
+- 新增 `slidex/_env.py`：容错解析的唯一实现，带闭区间 `minimum` / `maximum`，告警走 loguru。`_trajectory.slide_end_hold_range()` 保持原有 `lo <= hi` 不变量。
+- 测试 +43：`test_env_parsing.py`（单元层坏值矩阵 + **子进程**验证坏 env 下 import 主要模块成功且常量取默认值）、`test_solve_page_nav.py`（含「假超时后 `_run_solve_loop` 仍被调用」的端到端回归）、`test_reload_fallback.py`。本机 711 passed / 12 skipped。
+
 ## [0.6.40] - 2026-10-19
 
 密码登录页导航不再被 `networkidle` 假超时打断 —— 新增 `_goto_login_page` 降级策略，与 solver 侧既有做法对齐。

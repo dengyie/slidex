@@ -739,6 +739,7 @@ adaptive_strategy_manager = AdaptiveStrategyManager()
 
 # 全局并发控制 — 从共享模块导入
 from slidex._concurrency import SliderConcurrencyManager, concurrency_manager
+from slidex._env import env_int
 
 # 策略统计管理器
 class RetryStrategyStats:
@@ -902,13 +903,11 @@ class XianyuSliderStealth:
         self.page = None
         self.context = None
         self.local_browser_info = {}
-        try:
-            self.browser_cookie_warmup_probe_timeout_ms = max(
-                1000,
-                int(os.environ.get("XY_BROWSER_COOKIE_WARMUP_TIMEOUT_MS", "5000") or 5000),
-            )
-        except Exception:
-            self.browser_cookie_warmup_probe_timeout_ms = 5000
+        # 原实现是 `int(...) or 5000`：0 视同未设置，故下限取 1。
+        self.browser_cookie_warmup_probe_timeout_ms = max(
+            1000,
+            env_int("XY_BROWSER_COOKIE_WARMUP_TIMEOUT_MS", 5000, minimum=1),
+        )
         if not self.browser_channel and not self.executable_path:
             detected_browser = self._detect_local_browser_info()
             if detected_browser:
@@ -5652,9 +5651,14 @@ class XianyuSliderStealth:
             str(verification_type or 'unknown'),
             str(frame_url or ''),
         )
+        # 原实现是 `int(...) or <默认>`：0 视同未设置，故下限取 1。
         dedup_seconds = max(
             30,
-            int(os.environ.get('XY_VERIFICATION_NOTIFY_DEDUP_SECONDS', self._verification_notification_dedup_seconds) or self._verification_notification_dedup_seconds),
+            env_int(
+                'XY_VERIFICATION_NOTIFY_DEDUP_SECONDS',
+                self._verification_notification_dedup_seconds,
+                minimum=1,
+            ),
         )
         now = time.time()
         with self._verification_notification_lock:
@@ -9143,7 +9147,7 @@ class XianyuSliderStealth:
                         # 点击重置失败时才回退到刷新页面
                         logger.warning(f"【{self.pure_user_id}】⚠️ 点击重置失败，回退到刷新页面...")
                         try:
-                            self.page.reload(wait_until='networkidle', timeout=15000)
+                            self._reload_with_fallback(self.page, self.pure_user_id)
                             time.sleep(1.0)
                             logger.info(f"【{self.pure_user_id}】✅ 页面刷新完成，准备重新检测滑块")
                         except Exception as refresh_error:
@@ -10540,6 +10544,30 @@ class XianyuSliderStealth:
                         continue
                 raise
         return 'networkidle'
+
+    @staticmethod
+    def _reload_with_fallback(page, pure_user_id: str = "") -> str:
+        """刷新当前页；networkidle 永不静默时降级 domcontentloaded。
+
+        滑块重置回退分支专用：networkidle 假超时抛错时导航其实已经发起，若按
+        超时判失败，就会白丢一次 reset 收尾等待并在处罚页（恰恰是滑块最常出现
+        的页面）天天刷一条假失败日志。返回实际采用的 wait_until。
+        """
+        try:
+            page.reload(wait_until='networkidle', timeout=15000)
+            return 'networkidle'
+        except Exception as e:
+            if 'Timeout' not in type(e).__name__:
+                raise
+            logger.warning(
+                f"【{pure_user_id}】页面刷新 networkidle 超时（疑似处罚页信标未静默），"
+                "降级 domcontentloaded 继续"
+            )
+            try:
+                page.reload(wait_until='domcontentloaded', timeout=15000)
+            except Exception as fallback_e:
+                logger.warning(f"【{pure_user_id}】降级刷新仍失败: {fallback_e}")
+            return 'domcontentloaded'
 
     def login_with_password_playwright(self, account: str, password: str, show_browser: bool = False,
                                       notification_callback: Optional[Callable] = None,
