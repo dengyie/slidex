@@ -147,3 +147,26 @@ async def test_solve_on_page_continues_after_fake_networkidle_timeout(fast_sleep
     solver._run_solve_loop.assert_awaited_once_with(URL)  # 没有被 Timeout 打断
     assert timeout_page.waits == ["networkidle", "domcontentloaded"]
     assert success is True
+
+
+@pytest.mark.asyncio
+async def test_solve_on_page_fails_on_real_nav_error(fast_sleep):
+    """非 Timeout 的真导航错误照抛：solve 整体判负，status=exception。
+
+    与假超时降级相对的另一面契约——降级只放行 Timeout，真连接/协议错误必须
+    仍走 solve_on_page 的兜底 except 返回 (False, None)，不许被吞成继续求解。
+    """
+    page = _SolvePage(url=URL)
+    page.goto = mock.AsyncMock(side_effect=RuntimeError("net::ERR_ABORTED"))
+    solver = SliderSolver(cookie_id="envtest")
+    solver._run_solve_loop = mock.AsyncMock(return_value=(True, {"session": "abc"}))
+    solver._maybe_record_success = mock.AsyncMock()
+    solver._finalize_telemetry = mock.Mock()
+
+    success, cookies = await solver.solve_on_page(page, page_url=URL)
+
+    assert success is False
+    assert cookies is None
+    solver._run_solve_loop.assert_not_awaited()
+    solver._finalize_telemetry.assert_called_once()
+    assert solver._finalize_telemetry.call_args.kwargs["status"] == "exception"

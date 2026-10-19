@@ -17,7 +17,7 @@ import sys
 
 import pytest
 
-from slidex._env import env_float, env_int
+from slidex._env import env_float, env_int, parse_float, parse_int
 
 FLOAT_KEY = "SLIDEX_TEST_ENV_FLOAT"
 INT_KEY = "SLIDEX_TEST_ENV_INT"
@@ -78,6 +78,62 @@ class TestEnvInt:
         monkeypatch.setenv(INT_KEY, "-5")
         assert env_int(INT_KEY, 30, minimum=0) == 30
 
+    def test_above_maximum_falls_back(self, monkeypatch):
+        monkeypatch.setenv(INT_KEY, "99")
+        assert env_int(INT_KEY, 7, maximum=10) == 7
+
+
+class TestParsePrimitives:
+    """parse_float / parse_int：按原始字符串解析的原语（config._safe_* 的底层）。"""
+
+    def test_empty_is_silent_default(self):
+        # 空串视同未设置：静默回落，不打告警（config.from_env 未设 env 时传 ""）。
+        assert parse_float("", 1.5) == 1.5
+        assert parse_float("   ", 1.5) == 1.5
+        assert parse_int("", 11) == 11
+
+    def test_bad_values_fall_back(self):
+        assert parse_float("abc", 2.5) == 2.5
+        assert parse_float("inf", 2.5) == 2.5
+        assert parse_int("5000.0", 7) == 5000
+        assert parse_int("12abc", 7) == 7
+
+    def test_exclusive_minimum_rejects_zero_keeps_positive(self):
+        assert parse_float("0", 45.0, exclusive_minimum=0.0) == 45.0
+        assert parse_float("-3", 45.0, exclusive_minimum=0.0) == 45.0
+        assert parse_float("7.5", 45.0, exclusive_minimum=0.0) == 7.5
+
+
+class TestConfigSafeDelegation:
+    """config._safe_int/_safe_float 委托 _env 后，旧语义保持 + 统一容错。"""
+
+    def test_safe_int_keeps_plain_semantics(self):
+        from slidex.config import SlidexConfig
+
+        assert SlidexConfig._safe_int("3", 3) == 3
+        assert SlidexConfig._safe_int("", 3) == 3
+        assert SlidexConfig._safe_int("abc", 3) == 3
+
+    def test_safe_int_tolerates_float_formatted(self):
+        # 统一后的行为：config 与 _env 同契约，"5000.0" 不再判坏值。
+        from slidex.config import SlidexConfig
+
+        assert SlidexConfig._safe_int("5000.0", 3) == 5000
+
+    def test_safe_float_keeps_positive_rule(self):
+        from slidex.config import SlidexConfig
+
+        assert SlidexConfig._safe_float("6.5", 6.0) == 6.5
+        assert SlidexConfig._safe_float("0", 6.0) == 6.0  # 非正数回落（非钳制）
+        assert SlidexConfig._safe_float("-1", 6.0) == 6.0
+        assert SlidexConfig._safe_float("", 180.0) == 180.0
+
+    def test_safe_float_rejects_inf(self):
+        # 根因修复：旧实现 float("inf") > 0 会放行 inf 造成挂死风险，现在回落。
+        from slidex.config import SlidexConfig
+
+        assert SlidexConfig._safe_float("inf", 180.0) == 180.0
+
 
 class TestSlideEndHoldRangeToleratesBadEnv:
     def test_bad_values_fall_back_to_defaults(self, monkeypatch):
@@ -126,6 +182,7 @@ _BAD_ENV_CASES = [
     {"SLIDEX_SOLVE_WATCHDOG": "abc", "SLIDEX_MANUAL_VOUCHER_WAIT": "inf"},
     {"SLIDEX_SOLVE_WATCHDOG": "", "SLIDEX_MANUAL_VOUCHER_WAIT": "-1"},
     {"SLIDEX_SOLVE_WATCHDOG": "nan", "SLIDEX_MANUAL_VOUCHER_WAIT": "1e9999"},
+    {"SLIDEX_SOLVE_WATCHDOG": "1e9"},  # 高于上限 3600 → 回落 600（防事实关闭看门狗）
     {"SLIDEX_SLIDE_END_HOLD_MIN": "abc", "SLIDEX_SLIDE_END_HOLD_MAX": "1.2.3"},
     {"XY_BROWSER_COOKIE_WARMUP_TIMEOUT_MS": "abc"},
     {"XY_VERIFICATION_NOTIFY_DEDUP_SECONDS": "oops"},

@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Tuple
 
+from slidex._env import parse_float, parse_int
+
 
 @dataclass
 class SlidexConfig:
@@ -81,18 +83,14 @@ class SlidexConfig:
 
     @classmethod
     def _safe_int(cls, value: str, default: int) -> int:
-        try:
-            return int(value)
-        except (ValueError, TypeError):
-            return default
+        # 委托 _env.parse_int（0.6.42 收口为全库唯一容错契约）：非法/非有限回落。
+        return parse_int(value, default)
 
     @classmethod
     def _safe_float(cls, value: str, default: float) -> float:
-        try:
-            result = float(value)
-        except (ValueError, TypeError):
-            return default
-        return result if result > 0 else default
+        # 委托 _env.parse_float 并保留原「非正数回落」规则（开下限 0）；
+        # "inf" 由 _env 拒绝回落 —— 旧实现会让 float("inf") 通过并造成挂死风险。
+        return parse_float(value, default, exclusive_minimum=0.0)
 
     @classmethod
     def _safe_delay_pair(cls, raw: str, default: Tuple[int, int]) -> Tuple[int, int]:

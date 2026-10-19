@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.6.42] - 2026-10-19
+
+代码评审收口：容错解析收敛为 `_env` 单一契约，超时降级判定收敛为 `_nav` 单一谓词，并堵上两处评审发现的退化值漏洞。
+
+### Fixed
+- **`config._safe_float` 会放行 `inf`**：旧实现 `float("inf") > 0` 为真，`SLIDEX_VISION_TIMEOUT=inf` 会得到一个无限大的超时（挂死风险）。委托 `_env.parse_float(exclusive_minimum=0.0)` 后非有限值一律回落默认。`_safe_int` 委托 `parse_int` 后与 `_env` 同契约（`"5000.0"` 这类浮点写法不再判坏值）。
+- **`SLIDEX_SOLVE_WATCHDOG` 无上限**：`1e9` 这类值等于把看门狗事实关闭——而看门狗的存在理由正是生产曾在死驱动连接上挂死 16h+。加 `maximum=3600.0`（内部各段预算之和约 420s，8 倍余量），越界回落 600s。
+- **`XY_VERIFICATION_WAIT_TIMEOUT` 的裸 try/except 收口到 `env_int`**：保留原 clamp 语义（`max(5, v)`——`"3"` 钳到 5 而不是回落 450；只有未设/非法才回落 450），`"5.0"` 这类浮点写法顺带获得容忍。
+
+### Changed
+- **`slidex/_env.py` 新增 `parse_float` / `parse_int` 原语**（空串视同未设置、静默回落）：`config._safe_int` / `_safe_float` 与 solver 的 `_cdp_connect_timeout_s` / `_cdp_probe_timeout_s`（新增 `exclusive_minimum` 开下限，表达「非正数回落」）全部委托到 `_env` —— 全库容错解析契约单一来源，消除「同形 env 值在不同入口行为不同」。
+- **新增 `slidex/_nav.py` 的 `is_nav_timeout` 谓词**：`solver._goto_page`、`stealth._goto_login_page`、`stealth._reload_with_fallback` 三处降级点共享同一判定，消除判定标准漂移隐患（stealth 两处此前缺 `TimeoutError` 限定名兜底判据，实际异常无差别）。
+
+### Notes
+- 测试 +22：`TestParsePrimitives` / `TestConfigSafeDelegation`（`_safe_float` 拒 `inf`、`_safe_int` 容忍 `"5000.0"`）、`test_nav_timeout.py`（谓词只看类型不看消息）、`test_verification_wait_timeout.py`（clamp 语义锁死：`"3"`→5、`"-10"`→5、非法→450）、`solve_on_page` 非 Timeout 导航错误判负路径端到端、watchdog `1e9` 上限子进程用例。本机 731 passed / 12 skipped。
+
 ## [0.6.41] - 2026-10-19
 
 健壮性收口：坏 env 不再能让 `import slidex` 崩，剩下两处 `networkidle` 假超时也不再吞掉整次求解。

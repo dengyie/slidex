@@ -37,6 +37,7 @@ def _resolve_browser_channel() -> Optional[str]:
 from slidex._stealth_patch import STEALTH_LAUNCH_ARGS, STEALTH_INIT_SCRIPT, ENV_CONSISTENCY_LAUNCH_ARGS, MEMORY_GUARD_LAUNCH_ARGS
 from slidex._drag import DragDispatchError
 from slidex._env import env_float
+from slidex._nav import is_nav_timeout
 from slidex._gestures import GestureSession, generate_archetype
 from slidex._trajectory import slide_end_hold_range
 from slidex._image_match import SliderImageMatcher
@@ -103,8 +104,10 @@ class SliderSolver(ProviderSolverMixin):
     # solve 全程硬看门狗：须大于内部各段预算之和（profile 锁等待 60 + 页面加载
     # ~60 + provider/legacy 重试 ~120 + remote 人工会话 180）。生产（1GB VPS）
     # 曾在死驱动连接上挂死 16h+，局部预算防不住挂在不同协议调用上的死等。
-    # 类体（import 期）求值：坏 env 必须回落默认而不是让 import 失败。
-    SOLVE_WATCHDOG_TIMEOUT_S = env_float("SLIDEX_SOLVE_WATCHDOG", 600.0, minimum=1.0)
+    # 类体（import 期）求值：坏 env 必须回落默认而不是让 import 失败；上限 3600s
+    # 挡住 1e9 这类把看门狗事实关掉的值（那等于回到 16h 挂死的世界）。
+    SOLVE_WATCHDOG_TIMEOUT_S = env_float("SLIDEX_SOLVE_WATCHDOG", 600.0,
+                                         minimum=1.0, maximum=3600.0)
     SCREENSHOT_BUDGET_S = 10.0
     # CDP 模式人工等待期：自动拖动全部失败后，页面留在用户真实浏览器里，
     # 保持监听等人工拖过（真手通过率远高于合成轨迹）。须小于 solve 看门狗。
@@ -1571,19 +1574,10 @@ class SliderSolver(ProviderSolverMixin):
         """CDP 握手超时(秒),默认 45s;空值/非数字/非正数一律回落默认值。
 
         环境变量写错(如 SLIDEX_CDP_CONNECT_TIMEOUT= 或 =abc)不该让整条求解链路
-        抛 ValueError——那属于最难排查的一类失败。
+        抛 ValueError——那属于最难排查的一类失败。0.6.42 起解析委托 _env.env_float
+        （exclusive_minimum=0 表达「非正数回落」），契约不变。
         """
-        raw = (os.environ.get("SLIDEX_CDP_CONNECT_TIMEOUT") or "").strip()
-        if raw:
-            try:
-                value = float(raw)
-            except ValueError:
-                logger.warning(f"SLIDEX_CDP_CONNECT_TIMEOUT={raw!r} 不是数字,按默认 45s 处理")
-            else:
-                if value > 0:
-                    return value
-                logger.warning(f"SLIDEX_CDP_CONNECT_TIMEOUT={raw!r} 非正数,按默认 45s 处理")
-        return 45.0
+        return env_float("SLIDEX_CDP_CONNECT_TIMEOUT", 45.0, exclusive_minimum=0.0)
 
     @staticmethod
     def _cdp_probe_timeout_s() -> float:
@@ -1596,19 +1590,10 @@ class SliderSolver(ProviderSolverMixin):
         把整次探测降级为"无法判定"—— 功能静默失效。给了 env 就能按实际链路调,
         而不用为了改一个常数发版。
 
-        与 _cdp_connect_timeout_s 同样的容错:写错的值不该让求解链路抛 ValueError。
+        与 _cdp_connect_timeout_s 同样的容错,解析同样委托 _env.env_float。
         """
-        raw = (os.environ.get("SLIDEX_CDP_PROBE_TIMEOUT") or "").strip()
-        if raw:
-            try:
-                value = float(raw)
-            except ValueError:
-                logger.warning(f"SLIDEX_CDP_PROBE_TIMEOUT={raw!r} 不是数字,按默认 6s 处理")
-            else:
-                if value > 0:
-                    return value
-                logger.warning(f"SLIDEX_CDP_PROBE_TIMEOUT={raw!r} 非正数,按默认 6s 处理")
-        return SliderSolver._PROBE_TIMEOUT_S
+        return env_float("SLIDEX_CDP_PROBE_TIMEOUT", SliderSolver._PROBE_TIMEOUT_S,
+                         exclusive_minimum=0.0)
 
     @staticmethod
     def _cdp_http_base(cdp_endpoint: str) -> Optional[str]:
@@ -2030,7 +2015,7 @@ class SliderSolver(ProviderSolverMixin):
         try:
             await page.goto(url, wait_until="networkidle", timeout=45000)
         except Exception as nav_exc:
-            if "Timeout" not in type(nav_exc).__name__ and "TimeoutError" not in str(type(nav_exc)):
+            if not is_nav_timeout(nav_exc):
                 raise
             logger.warning(f"goto networkidle timeout, falling back to domcontentloaded: {url[:80]}")
             try:

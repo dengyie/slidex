@@ -740,6 +740,7 @@ adaptive_strategy_manager = AdaptiveStrategyManager()
 # 全局并发控制 — 从共享模块导入
 from slidex._concurrency import SliderConcurrencyManager, concurrency_manager
 from slidex._env import env_int
+from slidex._nav import is_nav_timeout
 
 # 策略统计管理器
 class RetryStrategyStats:
@@ -881,11 +882,12 @@ class XianyuSliderStealth:
             os.environ.get("XY_DOWNLOAD_PROXY", "").strip() or
             default_download_proxy
         )
-        verification_wait_timeout_text = os.environ.get("XY_VERIFICATION_WAIT_TIMEOUT", "").strip()
-        try:
-            self.verification_wait_timeout = max(5, int(verification_wait_timeout_text)) if verification_wait_timeout_text else 450
-        except ValueError:
-            self.verification_wait_timeout = 450
+        # 保留原 clamp 语义：设了值就 max(5, v)（"3" 也给 5s），只有未设/非法才回落 450。
+        # 不能用 env_int(minimum=5) —— 那会把 "3" 回落成 450 而不是钳到 5。
+        self.verification_wait_timeout = max(
+            5,
+            env_int("XY_VERIFICATION_WAIT_TIMEOUT", 450),
+        )
         self.keep_verification_screenshots = (
             os.environ.get("XY_KEEP_VERIFICATION_SCREENSHOT", "").strip().lower() in {"1", "true", "yes", "on"}
         )
@@ -10522,7 +10524,7 @@ class XianyuSliderStealth:
                 return 'networkidle'
             except Exception as e:
                 error_msg = str(e)
-                if 'Timeout' in type(e).__name__:
+                if is_nav_timeout(e):
                     logger.warning(
                         f"【{pure_user_id}】登录页 networkidle 超时（疑似处罚页信标未静默），"
                         "降级 domcontentloaded 继续"
@@ -10557,7 +10559,7 @@ class XianyuSliderStealth:
             page.reload(wait_until='networkidle', timeout=15000)
             return 'networkidle'
         except Exception as e:
-            if 'Timeout' not in type(e).__name__:
+            if not is_nav_timeout(e):
                 raise
             logger.warning(
                 f"【{pure_user_id}】页面刷新 networkidle 超时（疑似处罚页信标未静默），"
