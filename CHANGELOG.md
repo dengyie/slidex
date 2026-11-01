@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.45] - 2026-11-02
+
+`AliyunJigsawMatcher` 性能向量化与鲁棒性收口，行为逐值等价（6 场景锚点回归）。
+
+### Changed
+- **缺口检测向量化（2.4×）**：`find_gap_contour_contrast` 的逐 dx Python 循环（245 次 × 多次花式索引/临时数组）收敛为一次 2D gather（`_shifted_mean`：点集沿 x 平移 → 掩码有效计数 → 一次求和）。实测 18.6 → 7.9 ms/call；以 6 个合成场景（imprint 20/80/150/220/242 + 无压痕）建立优化前输出锚点，优化后 gap 逐个相等、conf 一致到 1e-6、gated/bx0 逐值相同。
+
+### Fixed
+- **拼图条高于背景不再 IndexError**：原实现对 `fy >= h` 的点直接索引越界崩溃；`_shifted_mean` 将 y 越界点一次性剔除（对合法素材 ph == h 无行为差异）。
+
+### Notes
+- 尝试并回退：内容信号（掩码 SQDIFF，全函数热点 7.4ms/占 40%）改半分辨率（INTER_AREA）可降至 ~2ms，但半分辨率模板混合形状边界、与全分辨率压痕失配，内容信号反投错误峰（imprint_220 偏 43px）——检测正确性优先，已回退并在代码注释留档，防止未来再踩。CCORR 三项分解实测无收益（7.5ms ≈ masked TM）。
+- 测试 +1：`test_piece_taller_than_bg_no_crash`（异常素材不崩溃）。全量 758 passed / 9 skipped。
+
 ## [0.6.44] - 2026-11-02
 
 0.6.43 code review 的根因修复：两个 P2（observer 生命周期、全不透明 alpha 误判）与全部 P3（手势一致性、acquire 异常防护、双引擎漂移钩子、文档数字）。

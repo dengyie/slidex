@@ -452,3 +452,16 @@ class TestOpaquePieceGuard:
         assert gap is not None
         assert gap == pytest.approx(122, abs=2)
         assert "reason" not in debug
+
+    def test_piece_taller_than_bg_no_crash(self):
+        """异常素材（拼图条高于背景）不再 IndexError：y 越界点一次性剔除。
+
+        向量化前的逐 dx 实现在 fy >= h 时会直接索引越界崩溃（0.6.45 顺带
+        修复）；行为约定为"剔除越界点后正常检测或低置信判失败"。"""
+        tall_piece = np.zeros((260, 52, 4), np.uint8)
+        tall_piece[40:88, 2:46, :3] = 90
+        tall_piece[40:88, 2:46, 3] = 255
+        bg = _bg_with_imprint(imprint_x=120, piece=_piece_rgba())
+        gap, conf, debug = AliyunJigsawMatcher.find_gap_contour_contrast(bg, tall_piece)
+        # 不崩溃即可：有效点足够则给定位，否则低置信判失败
+        assert gap is None or gap >= 0

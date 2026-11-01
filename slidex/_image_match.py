@@ -210,22 +210,37 @@ class AliyunJigsawMatcher:
                 return None, 0.0, debug
 
             max_dx = w - pw
-            edge = np.zeros(max_dx + 1, np.float32)
-            contrast = np.zeros(max_dx + 1, np.float32)
-            for dx in range(max_dx + 1):
-                xs = cx + dx
-                ok = (xs >= 0) & (xs < w)
-                edge[dx] = float(mag[cy[ok], xs[ok]].mean()) if bool(ok.any()) else 0.0
-                fxs = fx + dx
-                fok = (fxs >= 0) & (fxs < w)
-                rxs = rx + dx
-                rok = (rxs >= 0) & (rxs < w)
-                if bool(fok.any()) and bool(rok.any()):
-                    contrast[dx] = float(
-                        bg_gray[fy[fok], fxs[fok]].mean() - bg_gray[ry[rok], rxs[rok]].mean()
-                    )
+            dxs = np.arange(max_dx + 1, dtype=np.int64)
 
-            # 信号 3：内容一致（掩码 SQDIFF，取逆 → 相似度）
+            def _shifted_mean(ys: np.ndarray, xs_pts: np.ndarray, plane: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+                """点集沿 x 平移 dx 后在 plane 上取均值：(max_dx+1,) 均值与有效计数。
+
+                向量化替代逐 dx 循环（0.6.45：245 次 × 多次花式索引 → 一次 2D
+                gather）；y 越界的点（拼图条高于背景的异常素材）一次性剔除，
+                原实现对这种情况会直接 IndexError。
+                """
+                keep = (ys >= 0) & (ys < h)
+                ys_k, xs_k = ys[keep], xs_pts[keep]
+                shifted = xs_k[:, None] + dxs[None, :]
+                valid = (shifted >= 0) & (shifted < w)
+                np.clip(shifted, 0, w - 1, out=shifted)
+                acc = np.where(valid, plane[ys_k[:, None], shifted], 0.0)
+                counts = valid.sum(axis=0)
+                means = acc.sum(axis=0) / np.maximum(counts, 1)
+                means[counts == 0] = 0.0
+                return means.astype(np.float32), counts
+
+            edge, _ = _shifted_mean(cy, cx, mag)
+            fill_mean, fill_counts = _shifted_mean(fy, fx, bg_gray)
+            ring_mean, ring_counts = _shifted_mean(ry, rx, bg_gray)
+            contrast = np.where(
+                (fill_counts > 0) & (ring_counts > 0), fill_mean - ring_mean, 0.0
+            ).astype(np.float32)
+
+            # 信号 3：内容一致（掩码 SQDIFF，取逆 → 相似度）。保持全分辨率：
+            # 实测半分辨率（INTER_AREA）会混合形状边界，模板与压痕失配，
+            # 内容信号反投错误峰（imprint_220 偏 43px）——检测正确性优先，
+            # 该信号的 7.4ms 开销不省（0.6.45 尝试后回退）。
             content = np.zeros(max_dx + 1, np.float32)
             if ph == h and int(mask.sum()) >= 30:
                 mask3 = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR).astype(np.float32) / 255.0
