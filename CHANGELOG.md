@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.6.44] - 2026-11-02
+
+0.6.43 code review 的根因修复：两个 P2（observer 生命周期、全不透明 alpha 误判）与全部 P3（手势一致性、acquire 异常防护、双引擎漂移钩子、文档数字）。
+
+### Fixed
+- **observer 生命周期绑定"当前 DOM"（P2）**：0.6.43 的 `_OBSERVER_JS` 用粘性 installed 标志，而 SDK 每轮重试都销毁重建弹窗 DOM（verifyRefresh / `_ARM_JS`），observer 会指向脱离文档的旧节点——重试路径的瞬态文案判定静默失效，真实失败被降级为超时（code -1），污染手势会话的换家族重采样语义；`acquire_verify_param` 的 real 路径则从未装过 observer。现以"正在观察的节点"为幂等键（`__slidexCaptchaObsFor`/`__slidexCaptchaObsInst`）：节点没变直接返回，变了断开旧的、重挂新的；`acquire_verify_param` 在每轮 ARM 成功后显式调用 `_ensure_observer`。
+- **全不透明 alpha 守卫（P2）**：截图兜底（playwright 元素截图默认不透明）会产出 alpha 全 255 的拼图条，mask 退化为整条矩形，三信号检测器在背景纹理上给出"高置信"的错误峰而非检测失败（比失败更糟：伪装成功）。`AliyunJigsawMatcher` 加守卫 `mask.mean() > 0.9 → (None, 0.0, {reason: opaque_piece})`，provider `find_gap` 如设计意图回落经典模板匹配。
+- **`_drag_real` 手势对齐成功样本（P3）**：过冲默认关闭（端到端唯一成功样本是纯前进无回拉；带过冲的多次尝试均 F001，风险未定案前不引入未证变量），增加 `overshoot: bool = False`；mouseup 后回读滑块 computed left 返回 `{target, sl}`——轨道被禁用/元素被重建时的"静默拖空"只有回读能发现。
+- **`acquire_verify_param` 异常防护（P3）**：单轮内任何异常（SDK 结构变化 / mouse 不可用）吸收为该轮失败并继续重试，不再穿出循环丢失 `attempts`/`fail_code`（`CancelledError` 照常上抛）；ARM 返回缺键判为 `ARM_SHAPE` 而非 KeyError。
+- **双引擎漂移钩子（P3）**：`perform_slide_synthetic` 新增 `points` 点表参数（`[[dx, dy, delay_ms], ...]` 相对按下点）——传入时 JS 退化为按点回放，点表可由 `_trajectory.generate_trajectory` 生成，两条手势路径共享同一套 Python 生成逻辑；缺省内置拟人节奏不变（对齐成功样本）。
+
+### Changed
+- **`acquire_verify_param` 新增 `deadline_s` 整体预算**：超时后不再开新尝试（进行中的尝试不中断），`fail_code="DEADLINE"`；docstring 写明仅主文档（arm/拖拽不进 iframe）与 fail_code 枚举。
+- CHANGELOG 0.6.43 实测数字订正为最终运行值（745 passed / 9 skipped）。
+
+### Notes
+- 测试 +12（29 总）：全不透明守卫（数组/bytes/路由到经典匹配含 −piece_w//2 语义锁死/带 alpha 不误伤）、`_knob_target` 轨道夹紧（g(260)=260 两端点固定，用 L=280 才触夹紧）、acquire 决策循环（FakePage 按 JS 内容分发：首轮成功/ARM_SHAPE 消耗轮次/arm 异常吸收/拖拽异常续跑/预算拦在首轮前/预算拦在轮间/上游 F 码透传）、`_OBSERVER_JS`/`_SYNTHETIC_DRAG_JS` token 锁定扩展（ObsFor/ObsInst/disconnect/points）。全量 757 passed / 9 skipped。
+
 ## [0.6.43] - 2026-11-02
 
 新增新一代 AliyunCaptcha.js 2.0 弹窗拼图 provider（z.ai 系登录实测驱动，本地真 Chromium 端到端验证），含四项可复用资产：二次几何定律、三信号共识检测器、一站式取参 API、合成事件拟人手势。
@@ -17,7 +35,7 @@
 - 运行时红线写入 provider docstring（同一批实测教训）：控件会话分钟级过期（陈旧弹窗拖准也 F014/Timed out；fresh 15-30s 正常——尽快拖）；失败（F015 位置 / F001 风控）会换 cert 并重置/关闭弹窗，重试前必须重新武装、重新定位；拖动中途不可刷新/中断；判定发生在 mouseup，释放前要终点 dwell。
 - **F001 是环境/风险判定，不是位置错误**：本地 playwright Chromium 里两次拖拽落点与模型分毫不差（g(212)=175.872、g(234)=212.4）且 edge/contrast 双信号互相印证（174-177、207-212 聚类），仍 F001；同一浏览器里更早的成功尝试证明位置正确时可过。合成手势过冲默认关闭——端到端唯一成功样本是纯前进无回拉手势。
 - 几何换算链内化到 provider：背景 296px 原图拉伸到 300 CSS 宽（k≈1.0135）而拼图条 52px 1:1，`imprint_x·k − bx0·piece_k` 先换 CSS 再二次反解，行程上限按 `track − knob`（实测 260）夹紧。
-- 新增 `tests/test_aliyun_captcha_js.py` +17（确定性 RNG fixture）：几何定律（标定点/反解往返/单调性/正根唯一）、三信号检测器（合成压痕精确定位 ±2px / 无压痕低置信 / bytes 带 alpha 与无 alpha 拒绝）、**重定标死区回归**（213→235 陷阱复现与修复）、换算链端到端（bg px 213 → knob 235 实测样本回放 + float 精度）、注册表、三段页内 JS 的规则 token 锁定。全量 734 passed / 16 skipped。
+- 新增 `tests/test_aliyun_captcha_js.py` +17（确定性 RNG fixture）：几何定律（标定点/反解往返/单调性/正根唯一）、三信号检测器（合成压痕精确定位 ±2px / 无压痕低置信 / bytes 带 alpha 与无 alpha 拒绝）、**重定标死区回归**（213→235 陷阱复现与修复）、换算链端到端（bg px 213 → knob 235 实测样本回放 + float 精度）、注册表、三段页内 JS 的规则 token 锁定。全量 745 passed / 9 skipped。
 
 ## [0.6.42] - 2026-10-19
 

@@ -190,6 +190,20 @@ class TestAliyunCaptchaJsProvider:
         # ΔT = ΔL·k·(dg/dL)|₂₁₄ ≈ 0.5 × 1.0135 × 0.573 ≈ 0.29
         assert t_float - t_int == pytest.approx(0.29, abs=0.05)
 
+    def test_knob_target_clamped_to_track(self):
+        """缺口越出轨道右缘时行程必须夹紧（260 = track 300 − knob 40）。
+
+        注意 g(260)=260（标定常数两端点固定），所以要用 L>260 才会触夹紧。"""
+        from unittest.mock import MagicMock
+        from slidex.providers.aliyun_captcha_js import AliyunCaptchaJsProvider
+
+        provider = AliyunCaptchaJsProvider()
+        provider._last_bx0 = 0
+        elements = MagicMock()
+        elements.metadata = {"bg_nat_w": 296, "bg_box_w": 296.0, "piece_nat_w": 52, "piece_box_w": 52.0}
+        elements.track_width_px = 260
+        assert provider._knob_target(280, elements) == 260.0
+
     def test_rescale_targets_exact(self):
         """review 关键回归：缺口 213 → 行程 235 相对差 9.4% < 10%，
         带死区的缩放器会静默跳过 → 终点差 39px 必挂 F015。必须显式重定标。"""
@@ -214,16 +228,227 @@ class TestAliyunCaptchaJsProvider:
             assert token in _ARM_JS
 
     def test_observer_js_tokens(self):
-        """瞬态文案必须用 MutationObserver 捕获（成功后弹窗即关）。"""
+        """瞬态文案必须用 MutationObserver 捕获（成功后弹窗即关）；
+        生命周期绑定被观察节点（SDK 重建 DOM 后自愈重挂）。"""
         from slidex.providers.aliyun_captcha_js import _OBSERVER_JS
 
-        for token in ("MutationObserver", "__slidexCaptchaVerdict", "aliyunCaptcha-sliding-text-box"):
+        for token in ("MutationObserver", "__slidexCaptchaVerdict", "aliyunCaptcha-sliding-text-box",
+                      "__slidexCaptchaObsFor", "__slidexCaptchaObsInst", "disconnect"):
             assert token in _OBSERVER_JS
 
     def test_synthetic_drag_js_rules(self):
-        """合成手势红线：可信形态字段、相对位移换算、终点 dwell、落点回读。"""
+        """合成手势红线：可信形态字段、相对位移换算、终点 dwell、落点回读、点表回放。"""
         from slidex.providers.aliyun_captcha_js import _SYNTHETIC_DRAG_JS
 
         for token in ("pointerdown", "mousedown", "pointermove", "mousemove", "pointerup", "mouseup",
-                      "targetLeft", "getComputedStyle", "isPrimary"):
+                      "targetLeft", "getComputedStyle", "isPrimary", "points"):
             assert token in _SYNTHETIC_DRAG_JS
+
+
+# ── acquire 决策循环（FakePage 驱动）────────────────────────────────────────
+
+class _FakePage:
+    """acquire 决策循环的驱动 mock：evaluate 按 JS 内容分发脚本化响应。
+
+    分发键：ARM（slidex-cap-btn）/ 合成拖拽（knobSel）/ param 轮询
+    （__slidexCaptchaParam）/ 其余（observer 等）→ {}。
+    """
+
+    def __init__(self, geo=None, drag_results=None, poll_results=None,
+                 arm_error=None, drag_error=None):
+        self.geo = geo
+        self.drag_results = list(drag_results or [])
+        self.poll_results = list(poll_results or [])
+        self.arm_error = arm_error
+        self.drag_error = drag_error
+        self.kinds = []
+
+    async def evaluate(self, js, arg=None):
+        if "slidex-cap-btn" in js:
+            self.kinds.append("arm")
+            if self.arm_error:
+                raise self.arm_error
+            return self.geo
+        if "knobSel" in js:
+            self.kinds.append("drag")
+            if self.drag_error:
+                err, self.drag_error = self.drag_error, None  # 一次性异常
+                raise err
+            return self.drag_results.pop(0) if self.drag_results else {"ok": True}
+        if "__slidexCaptchaParam" in js:
+            self.kinds.append("poll")
+            if len(self.poll_results) > 1:
+                return self.poll_results.pop(0)
+            return self.poll_results[0] if self.poll_results else {"p": None, "f": None, "v": None}
+        self.kinds.append("other")
+        return {}
+
+    async def wait_for_timeout(self, ms):
+        return None
+
+    class mouse:  # real 路径不会被 synthetic 测试触达；占位防误用
+        @staticmethod
+        async def move(*a, **k):
+            raise AssertionError("real mouse path not expected in synthetic tests")
+
+        @staticmethod
+        async def down():
+            raise AssertionError("real mouse path not expected in synthetic tests")
+
+        up = down
+
+
+def _arm_geo():
+    """构造 ARM 成功响应：真实 fixture 图（matcher 能在其中找到缺口）。"""
+    import base64
+    piece = _piece_rgba()
+    bg = _bg_with_imprint(imprint_x=150, piece=piece)
+    _, bg_png = cv2.imencode(".png", bg)
+    _, piece_png = cv2.imencode(".png", piece)
+    b64 = lambda b: "data:image/png;base64," + base64.b64encode(b).decode()
+    return {
+        "ok": True, "cert": "CERT",
+        "bgData": b64(bg_png.tobytes()), "bgNat": [296, 200], "bgBox": [0, 0, 300.0, 200.0],
+        "pieceData": b64(piece_png.tobytes()), "pieceNat": [52, 200], "pieceBox": [0, 0, 52.0, 200.0],
+        "knobBox": [490, 424, 40, 40], "trackBox": [490, 424, 300, 40],
+    }
+
+
+class TestAcquireDecisionLoop:
+    """acquire_verify_param 的重试/失败分类/预算控制（不依赖真浏览器）。"""
+
+    def _run(self, page, **kw):
+        import asyncio
+        from slidex.providers.aliyun_captcha_js import AliyunCaptchaJsProvider
+
+        provider = AliyunCaptchaJsProvider()
+        return asyncio.run(
+            provider.acquire_verify_param(page, "1nl1cfkp", drag="synthetic", **kw)
+        )
+
+    def test_success_first_attempt(self):
+        page = _FakePage(
+            geo=_arm_geo(),
+            drag_results=[{"ok": True, "sl": "212px", "pz": "175px"}],
+            poll_results=[{"p": "Q" * 100, "f": None, "v": None}],
+        )
+        res = self._run(page, max_attempts=2, verdict_timeout_ms=200)
+        assert res["param"] == "Q" * 100 and res["verdict"] == "success"
+        assert res["attempts"] == 1 and res["fail_code"] is None
+        assert "arm" in page.kinds and "drag" in page.kinds
+        assert res["target"] and 0 < res["target"] <= 260
+
+    def test_arm_shape_failure_consumes_attempts(self):
+        page = _FakePage(geo={"ok": True, "cert": "X"})  # 缺 bgData/pieceData
+        res = self._run(page, max_attempts=2, verdict_timeout_ms=200)
+        assert res["attempts"] == 2 and res["fail_code"] == "ARM_SHAPE"
+        assert res["param"] is None
+        assert page.kinds.count("arm") == 2  # 每轮都重新武装
+
+    def test_arm_error_absorbed(self):
+        page = _FakePage(geo=_arm_geo(), arm_error=RuntimeError("page closed"))
+        res = self._run(page, max_attempts=2, verdict_timeout_ms=200)
+        assert res["attempts"] == 2 and res["fail_code"] == "ARM"
+        assert res["param"] is None
+
+    def test_drag_exception_continues_to_next_attempt(self):
+        page = _FakePage(
+            geo=_arm_geo(),
+            drag_results=[{"ok": True}],
+            poll_results=[{"p": "P" * 280, "f": None, "v": None}],
+            drag_error=RuntimeError("mouse gone"),
+        )
+        res = self._run(page, max_attempts=2, verdict_timeout_ms=200)
+        assert res["param"] == "P" * 280 and res["attempts"] == 2
+        assert res["fail_code"] == "EXC"  # 第 1 轮的失败码保留
+        assert res["verdict"] == "success"
+
+    def test_deadline_blocks_before_first_attempt(self):
+        page = _FakePage(geo=_arm_geo())
+        res = self._run(page, max_attempts=3, verdict_timeout_ms=50, deadline_s=0.0)
+        assert res["attempts"] == 0 and res["fail_code"] == "DEADLINE"
+        assert "arm" not in page.kinds  # 预算耗尽，一次都没开拖
+
+    def test_deadline_stops_between_attempts(self):
+        # 第 1 轮的 verdict 轮询耗 250ms（无 fail 回调 → 轮询到超时），
+        # 200ms 预算在第 2 轮入口被拦下
+        page = _FakePage(
+            geo=_arm_geo(),
+            drag_results=[{"ok": True}],
+            poll_results=[{"p": None, "f": None, "v": None}],
+        )
+        res = self._run(page, max_attempts=3, verdict_timeout_ms=250, deadline_s=0.2)
+        assert res["attempts"] == 1 and res["fail_code"] == "DEADLINE"
+        assert res["param"] is None
+
+    def test_upstream_fail_code_surfaced(self):
+        page = _FakePage(
+            geo=_arm_geo(),
+            drag_results=[{"ok": True}, {"ok": True}],
+            poll_results=[
+                {"p": None, "f": {"code": "F015"}, "v": None},
+                {"p": None, "f": {"code": "F001"}, "v": None},
+            ],
+        )
+        res = self._run(page, max_attempts=2, verdict_timeout_ms=100)
+        assert res["attempts"] == 2 and res["fail_code"] == "F001"
+        assert res["param"] is None and res["verdict"] == "fail"
+
+
+class TestOpaquePieceGuard:
+    """全不透明 alpha（截图兜底）必须判失败，而不是给出高置信错误答案。"""
+
+    def test_opaque_piece_rejected(self):
+        piece = np.zeros((200, 52, 4), np.uint8)
+        piece[:, :, :3] = 120
+        piece[:, :, 3] = 255  # 全不透明
+        bg = _bg_with_imprint(imprint_x=150, piece=piece)
+        gap, conf, debug = AliyunJigsawMatcher.find_gap_contour_contrast(bg, piece)
+        assert gap is None and debug.get("reason") == "opaque_piece"
+
+    def test_opaque_piece_bytes_rejected(self):
+        piece = np.zeros((200, 52, 4), np.uint8)
+        piece[:, :, :3] = 120
+        piece[:, :, 3] = 255
+        bg = _bg_with_imprint(imprint_x=150, piece=piece)
+        _, bg_png = cv2.imencode(".png", bg)
+        _, piece_png = cv2.imencode(".png", piece)
+        gap, conf, debug = AliyunJigsawMatcher.find_gap_from_bytes(
+            bg_png.tobytes(), piece_png.tobytes()
+        )
+        assert gap is None and debug.get("reason") == "opaque_piece"
+
+    def test_provider_routes_opaque_to_classic_matcher(self, monkeypatch):
+        """无形状信息 → provider 回落经典模板匹配（含中心→左缘语义修正）。"""
+        import asyncio
+        from unittest.mock import MagicMock
+        from slidex.providers import aliyun_captcha_js as m
+
+        captured = {}
+
+        def fake_matcher(bg_bytes, piece_bytes, offset_correction=0):
+            captured["offset"] = offset_correction
+            return 137, 0.42
+
+        monkeypatch.setattr(
+            m.SliderImageMatcher, "find_gap_with_confidence", staticmethod(fake_matcher)
+        )
+        provider = m.AliyunCaptchaJsProvider()
+        piece = np.zeros((200, 52, 4), np.uint8)
+        piece[:, :, :3] = 120
+        piece[:, :, 3] = 255
+        bg = _bg_with_imprint(imprint_x=150, piece=piece)
+        _, bg_png = cv2.imencode(".png", bg)
+        _, piece_png = cv2.imencode(".png", piece)
+        gap, conf = asyncio.run(provider.find_gap(bg_png.tobytes(), piece_png.tobytes()))
+        assert (gap, conf) == (137, 0.42)
+        assert captured["offset"] == -26  # 52//2：模板中心 → 条左缘
+
+    def test_alpha_carrier_still_detected(self):
+        """守卫不误伤正常带 alpha 拼图（覆盖率 ~20% 远低于 0.9 阈值）。"""
+        piece = _piece_rgba()
+        bg = _bg_with_imprint(imprint_x=120, piece=piece)
+        gap, conf, debug = AliyunJigsawMatcher.find_gap_contour_contrast(bg, piece)
+        assert gap is not None
+        assert gap == pytest.approx(122, abs=2)
+        assert "reason" not in debug

@@ -179,6 +179,17 @@ class AliyunJigsawMatcher:
             mask = (alpha > AliyunJigsawMatcher.ALPHA_THRESHOLD).astype(np.uint8)
             if int(mask.sum()) < 30:
                 return None, 0.0, debug
+            # 全不透明守卫：截图兜底（omit_background 未开）会产出 alpha 全 255
+            # 的拼图条，mask 退化为整条矩形——三信号会在背景纹理上给出"高置信"
+            # 的错误峰而非检测失败（0.6.44 review P2）。alpha 无形状信息时直接
+            # 判失败，交由 provider 回落经典模板匹配。
+            if float(mask.mean()) > 0.9:
+                debug["reason"] = "opaque_piece"
+                logger.warning(
+                    "AliyunJigsawMatcher: piece alpha 全不透明（截图兜底？），"
+                    "无形状信息，拒绝轮廓检测"
+                )
+                return None, 0.0, debug
             # 形状最小 x（拼图条内形状起点，实测恒为 2）
             cols = np.where(mask.any(axis=0))[0]
             bx0 = int(cols[0])

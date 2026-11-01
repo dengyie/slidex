@@ -122,9 +122,18 @@ async ({ sceneId, mode, region, prefix }) => {
 
 # 瞬态成功/失败文案的 MutationObserver：必须在拖拽前挂好（成功后弹窗随即
 # 关闭，事后轮询什么都读不到——实测教训）。
+# 生命周期绑定"当前 DOM"而非"首次安装"：SDK 每轮重试都会销毁重建弹窗
+# （verifyRefresh / _ARM_JS），粘性 installed 标志会让 observer 指向已脱离
+# 文档的旧节点——0.6.43 review 的 P2。这里以"正在观察的节点"为幂等键：
+# 节点没变直接返回，变了就断开旧的、重挂新的。
 _OBSERVER_JS = """
 () => {
-  if (window.__slidexCaptchaObs) return true;
+  const box = document.getElementById('aliyunCaptcha-sliding-text-box');
+  if (window.__slidexCaptchaObsFor === box && window.__slidexCaptchaObsInst) return true;
+  try { window.__slidexCaptchaObsInst && window.__slidexCaptchaObsInst.disconnect(); } catch (e) {}
+  window.__slidexCaptchaObsFor = box || null;
+  window.__slidexCaptchaObsInst = null;
+  if (!box) return true;
   const classify = t => {
     const s = (t || '').trim().toLowerCase(); if (!s) return null;
     const SUCC = ['验证通过', '验证成功', 'verification success', 'verified'];
@@ -133,17 +142,14 @@ _OBSERVER_JS = """
     if (FAIL.some(p => s.includes(p))) return 'fail';
     return null;
   };
-  const box = document.getElementById('aliyunCaptcha-sliding-text-box');
-  if (box) {
-    const obs = new MutationObserver(() => {
-      const v = classify(box.textContent);
-      if (v && !(window.__slidexCaptchaVerdict && window.__slidexCaptchaVerdict.verdict === 'success')) {
-        window.__slidexCaptchaVerdict = { verdict: v, text: String(box.textContent).slice(0, 80), at: Date.now() };
-      }
-    });
-    obs.observe(box, { childList: true, characterData: true, subtree: true });
-  }
-  window.__slidexCaptchaObs = true;
+  const obs = new MutationObserver(() => {
+    const v = classify(box.textContent);
+    if (v && !(window.__slidexCaptchaVerdict && window.__slidexCaptchaVerdict.verdict === 'success')) {
+      window.__slidexCaptchaVerdict = { verdict: v, text: String(box.textContent).slice(0, 80), at: Date.now() };
+    }
+  });
+  obs.observe(box, { childList: true, characterData: true, subtree: true });
+  window.__slidexCaptchaObsInst = obs;
   return true;
 }
 """
@@ -154,8 +160,10 @@ _OBSERVER_JS = """
 # dwell、每次 move 重查元素（SDK 可能重建 DOM）、结束回读落点。
 # 过冲默认关闭：唯一一次端到端成功（param 280 字符）的手势是纯前进无回拉，
 # 带过冲的多次尝试均 F001——不排除风控对回拉敏感，故按成功样本对齐。
+# points 点表模式：传入相对位移点表时 JS 退化为按点回放（点表可由 Python 手势
+# 库 generate_trajectory 生成），避免与 _gestures/_trajectory 形成双引擎漂移。
 _SYNTHETIC_DRAG_JS = """
-async ({ knobSel, targetLeft, stepPx, stepMs, overshoot }) => {
+async ({ knobSel, targetLeft, stepPx, stepMs, overshoot, points }) => {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const q = s => document.querySelector(s);
   const knob = q(knobSel);
@@ -177,21 +185,28 @@ async ({ knobSel, targetLeft, stepPx, stepMs, overshoot }) => {
   fire(knob, 'mousedown', X0, Y0);
   await sleep(100 + Math.random() * 60);
   const T = cur + disp;
-  let d = cur; const pts = [];
-  const phases = [[0.35, stepPx * 0.75], [0.75, stepPx * 1.25], [1, stepPx]];
-  for (const [frac, step] of phases) {
-    const upto = cur + Math.round(disp * frac);
-    while (d < upto) { d = Math.min(d + step, T); pts.push(d); }
+  let seq;
+  if (points && points.length) {
+    // 点表回放：[[dx, dy, delayMs], ...] 相对按下点
+    seq = points.map(([dx, dyOff, delay]) => [dx, dyOff || 0, delay]);
+  } else {
+    let d = cur; const pts = [];
+    const phases = [[0.35, stepPx * 0.75], [0.75, stepPx * 1.25], [1, stepPx]];
+    for (const [frac, step] of phases) {
+      const upto = cur + Math.round(disp * frac);
+      while (d < upto) { d = Math.min(d + step, T); pts.push(d); }
+    }
+    if (overshoot > 0) pts.push(T + overshoot, T - 1);
+    pts.push(T, T, T);  // 终点 dwell（判定发生在 mouseup）
+    seq = pts.map(dd => [dd - cur, 0, null]);
   }
-  if (overshoot > 0) pts.push(T + overshoot, T - 1);
-  pts.push(T, T, T);  // 终点 dwell（判定发生在 mouseup）
-  for (const dd of pts) {
+  for (const [dx, dyOff, delay] of seq) {
     const live = q(knobSel);
-    if (!live || !document.contains(live)) return { err: 'knob gone mid-drag', at: dd };
-    const jy = Y0 + (Math.random() - 0.5) * 2.2;
-    fire(document, 'pointermove', X0 + (dd - cur), jy);
-    fire(document, 'mousemove', X0 + (dd - cur), jy);
-    await sleep(stepMs[0] + Math.random() * (stepMs[1] - stepMs[0]));
+    if (!live || !document.contains(live)) return { err: 'knob gone mid-drag', at: dx };
+    const jy = Y0 + dyOff + (Math.random() - 0.5) * 2.2;
+    fire(document, 'pointermove', X0 + dx, jy);
+    fire(document, 'mousemove', X0 + dx, jy);
+    await sleep(delay || (stepMs[0] + Math.random() * (stepMs[1] - stepMs[0])));
   }
   await sleep(110 + Math.random() * 60);
   fire(document, 'pointerup', X0 + disp, Y0, { buttons: 0 });
@@ -401,7 +416,12 @@ class AliyunCaptchaJsProvider(CaptchaProvider):
     # ── 拖动 ───────────────────────────────────────────────────────────────
 
     async def _ensure_observer(self, page: Page) -> None:
-        """挂瞬态文案 observer（成功后弹窗即关，事后轮询读不到）。"""
+        """挂/重挂瞬态文案 observer（幂等键 = 被观察节点，可安全反复调用）。
+
+        SDK 每轮重试都会销毁重建弹窗 DOM（verifyRefresh / _ARM_JS），粘性
+        installed 标志会让 observer 指向脱离文档的旧节点——0.6.43 review 的
+        P2；_OBSERVER_JS 以节点身份为键自愈，因此每次拖拽前调用都是必要的。
+        """
         try:
             await self._targets(page)[0].evaluate(_OBSERVER_JS)
         except Exception as e:
@@ -504,13 +524,18 @@ class AliyunCaptchaJsProvider(CaptchaProvider):
         step_px: float = 5.0,
         step_ms: Tuple[float, float] = (16.0, 30.0),
         overshoot: float = 0.0,
+        points: Optional[List[Tuple[float, float, float]]] = None,
     ) -> Dict:
         """页面内合成 PointerEvent/MouseEvent 手势（无 CDP 真鼠标时的兜底）。
 
         仅适用于**真渲染浏览器**（嵌入式 webview 等只放行 evaluate 的宿主）；
         纯 DOM 伪造环境会被风控判 bot（happy-dom 路线 2026-09 起全拒）。
         过冲默认关闭——端到端唯一成功样本是纯前进手势（见 _SYNTHETIC_DRAG_JS）。
-        返回 {ok, target, sl, pz} 供调用方核对落点。
+
+        points: 显式相对位移点表 [[dx, dy, delay_ms], ...]（相对按下点）。传入时
+            JS 退化为按点回放——点表可由 `slidex._trajectory.generate_trajectory`
+            生成，让两条手势路径共享同一套 Python 生成逻辑，消除双引擎漂移；
+            缺省走内置拟人节奏。返回 {ok, target, sl, pz} 供调用方核对落点。
         """
         await self._ensure_observer(page)
         return await page.evaluate(
@@ -521,6 +546,10 @@ class AliyunCaptchaJsProvider(CaptchaProvider):
                 "stepPx": float(step_px),
                 "stepMs": [float(step_ms[0]), float(step_ms[1])],
                 "overshoot": float(overshoot),
+                "points": (
+                    [[float(x), float(y), float(d)] for (x, y, d) in points]
+                    if points else None
+                ),
             },
         )
 
@@ -537,6 +566,7 @@ class AliyunCaptchaJsProvider(CaptchaProvider):
         drag: str = "real",
         max_attempts: int = 2,
         verdict_timeout_ms: int = 10000,
+        deadline_s: Optional[float] = None,
     ) -> Dict:
         """全链路：武装全新控件 → 提图 → 检测 → 二次反解 → 拖拽 → 捕获 param。
 
@@ -545,65 +575,108 @@ class AliyunCaptchaJsProvider(CaptchaProvider):
         位置 / F001 风控）会换 cert 并重置弹窗——每轮重试都重新武装、重新
         定位（红线：陈旧控件拖准也挂）。
 
+        仅主文档：arm / 合成 / 真鼠标拖拽都在主文档执行（detect/locate 支持
+        iframe，但本 API 不支持）；iframe 内的挑战请走 mixin 通用链路。
+
         Args:
             drag: "real" 走 page.mouse（CDP 可信事件）；"synthetic" 走页面内
                 合成手势（嵌入式 webview 宿主）。
+            deadline_s: 整体预算（秒），超时后不再开新尝试（进行中的尝试不中断）。
+
+        单轮内的任何异常（SDK 结构变化 / mouse 不可用等）都吸收为该轮失败并
+        继续重试，不会穿出循环；CancelledError 照常上抛。
 
         Returns:
             {"param", "verdict", "fail_code", "attempts", "target"} — param
-            为 captchaVerifyParam；verdict ∈ success/fail/None。
+            为 captchaVerifyParam；verdict ∈ success/fail/None；fail_code ∈
+            ARM/ARM_SHAPE/NO_GAP/DRAG/EXC/DEADLINE 或上游 F 码。
         """
         result: Dict[str, Any] = {
             "param": None, "verdict": None, "fail_code": None, "attempts": 0, "target": None,
         }
+        loop = asyncio.get_event_loop()
+        deadline = (loop.time() + deadline_s) if deadline_s is not None else None
         for attempt in range(1, max(1, max_attempts) + 1):
+            if deadline is not None and loop.time() >= deadline:
+                result["fail_code"] = result["fail_code"] or "DEADLINE"
+                logger.warning(
+                    f"[aliyun-captcha-js] deadline {deadline_s}s reached after "
+                    f"{result['attempts']} attempt(s)"
+                )
+                break
             result["attempts"] = attempt
-            geo = await page.evaluate(
-                _ARM_JS, {"sceneId": scene_id, "mode": mode, "region": region, "prefix": prefix}
-            )
-            if not geo.get("ok"):
-                logger.warning(f"[aliyun-captcha-js] arm attempt {attempt} failed: {geo.get('err')}")
+            try:
+                geo = await page.evaluate(
+                    _ARM_JS, {"sceneId": scene_id, "mode": mode, "region": region, "prefix": prefix}
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(
+                    f"[aliyun-captcha-js] arm attempt {attempt} error: {type(e).__name__}: {e}"
+                )
                 result["fail_code"] = result["fail_code"] or "ARM"
                 continue
-            bg_bytes = base64.b64decode(geo["bgData"].split(",", 1)[1])
-            piece_bytes = base64.b64decode(geo["pieceData"].split(",", 1)[1])
-
-            gap_x, confidence, debug = AliyunJigsawMatcher.find_gap_from_bytes(bg_bytes, piece_bytes)
-            self._last_gap_debug = debug
-            self._last_bx0 = int(debug.get("bx0") or 0)
-            if gap_x is None:
-                logger.warning(
-                    f"[aliyun-captcha-js] attempt {attempt}: gap not found (conf={confidence:.2f})"
-                )
-                result["fail_code"] = "NO_GAP"
+            if not isinstance(geo, dict) or not geo.get("ok"):
+                logger.warning(f"[aliyun-captcha-js] arm attempt {attempt} failed: {geo.get('err') if isinstance(geo, dict) else geo}")
+                result["fail_code"] = result["fail_code"] or "ARM"
                 continue
-            self._last_gap_x = float(gap_x)
+            bg_data, piece_data = geo.get("bgData"), geo.get("pieceData")
+            if not bg_data or not piece_data or not geo.get("bgNat") or not geo.get("pieceNat"):
+                logger.warning(f"[aliyun-captcha-js] attempt {attempt}: arm payload incomplete")
+                result["fail_code"] = "ARM_SHAPE"
+                continue
+            await self._ensure_observer(page)
+            try:
+                bg_bytes = base64.b64decode(bg_data.split(",", 1)[1])
+                piece_bytes = base64.b64decode(piece_data.split(",", 1)[1])
 
-            track_w = float(geo["trackBox"][2]) if geo.get("trackBox") else 300.0
-            knob_w = float(geo["knobBox"][2]) if geo.get("knobBox") else 40.0
-            elements = ProviderElements(
-                slider_btn=None, slider_track=None, bg_img=None, piece_img=None,
-                track_width_px=max(1, int(track_w - knob_w)),
-                metadata={
-                    "bg_box_w": geo["bgBox"][2], "bg_nat_w": geo["bgNat"][0],
-                    "piece_box_w": geo["pieceBox"][2], "piece_nat_w": geo["pieceNat"][0],
-                },
-            )
-            target = self._knob_target(float(gap_x), elements)
-            result["target"] = round(target, 1)
-            logger.info(
-                f"[aliyun-captcha-js] attempt {attempt}: gap={gap_x}px (conf={confidence:.2f}, "
-                f"bx0={self._last_bx0}) → knob target={target:.1f}px, drag={drag}"
-            )
-
-            if drag == "synthetic":
-                drag_res = await self.perform_slide_synthetic(page, elements, target)
-                if drag_res.get("err"):
-                    logger.warning(f"[aliyun-captcha-js] synthetic drag error: {drag_res}")
-                    result["fail_code"] = "DRAG"
+                gap_x, confidence, debug = AliyunJigsawMatcher.find_gap_from_bytes(bg_bytes, piece_bytes)
+                self._last_gap_debug = debug
+                self._last_bx0 = int(debug.get("bx0") or 0)
+                if gap_x is None:
+                    logger.warning(
+                        f"[aliyun-captcha-js] attempt {attempt}: gap not found "
+                        f"(conf={confidence:.2f}, reason={debug.get('reason')})"
+                    )
+                    result["fail_code"] = "NO_GAP"
                     continue
-            else:
-                await self._drag_real(page, geo, target)
+                self._last_gap_x = float(gap_x)
+
+                track_w = float(geo["trackBox"][2]) if geo.get("trackBox") else 300.0
+                knob_w = float(geo["knobBox"][2]) if geo.get("knobBox") else 40.0
+                elements = ProviderElements(
+                    slider_btn=None, slider_track=None, bg_img=None, piece_img=None,
+                    track_width_px=max(1, int(track_w - knob_w)),
+                    metadata={
+                        "bg_box_w": geo["bgBox"][2], "bg_nat_w": geo["bgNat"][0],
+                        "piece_box_w": geo["pieceBox"][2], "piece_nat_w": geo["pieceNat"][0],
+                    },
+                )
+                target = self._knob_target(float(gap_x), elements)
+                result["target"] = round(target, 1)
+                logger.info(
+                    f"[aliyun-captcha-js] attempt {attempt}: gap={gap_x}px (conf={confidence:.2f}, "
+                    f"bx0={self._last_bx0}) → knob target={target:.1f}px, drag={drag}"
+                )
+
+                if drag == "synthetic":
+                    drag_res = await self.perform_slide_synthetic(page, elements, target)
+                    if drag_res.get("err"):
+                        logger.warning(f"[aliyun-captcha-js] synthetic drag error: {drag_res}")
+                        result["fail_code"] = "DRAG"
+                        continue
+                else:
+                    drag_res = await self._drag_real(page, geo, target)
+                    logger.debug(f"[aliyun-captcha-js] real drag readback: {drag_res}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(
+                    f"[aliyun-captcha-js] attempt {attempt} error: {type(e).__name__}: {e}"
+                )
+                result["fail_code"] = "EXC"
+                continue
 
             verdict = await self._wait_param_or_fail(page, verdict_timeout_ms)
             result["verdict"] = verdict.get("verdict")
@@ -622,8 +695,16 @@ class AliyunCaptchaJsProvider(CaptchaProvider):
             )
         return result
 
-    async def _drag_real(self, page: Page, geo: Dict, target: float) -> None:
-        """真鼠标拖拽（CDP 可信事件）：按下→拟人轨迹→过冲回拉→dwell→释放。"""
+    async def _drag_real(
+        self, page: Page, geo: Dict, target: float, *, overshoot: bool = False
+    ) -> Dict:
+        """真鼠标拖拽（CDP 可信事件）：按下→拟人轨迹→dwell→释放→落点回读。
+
+        过冲默认关闭：端到端唯一成功样本（synthetic，纯前进无回拉）之外，
+        多次带过冲的尝试均 F001——风险未定案前对齐成功样本。返回
+        {target, sl}（滑块 computed left 回读）供调用方核对：轨道被禁用或
+        元素被重建时会静默拖空，只有回读能发现。
+        """
         kb = geo["knobBox"]
         start_x = kb[0] + kb[2] / 2
         start_y = kb[1] + kb[3] / 2
@@ -633,7 +714,7 @@ class AliyunCaptchaJsProvider(CaptchaProvider):
         await page.wait_for_timeout(random.randint(20, 60))
         await page.mouse.down()
         await page.wait_for_timeout(int(random.uniform(600, 1200)))
-        # 慢-快-慢 + 过冲回拉，总时长 ~2s（过快会 F001）
+        # 慢-快-慢，总时长 ~2s（过快会 F001）
         phases = [(0.35, target * 0.75, 3.0), (0.75, target, 5.0), (1.0, target, 4.0)]
         done = 0.0
         for frac_lo, upto, step in phases:
@@ -643,13 +724,19 @@ class AliyunCaptchaJsProvider(CaptchaProvider):
                     start_x + done, start_y + random.uniform(-1.1, 1.1)
                 )
                 await page.wait_for_timeout(int(random.uniform(13, 37)))
-        await page.mouse.move(start_x + target + 2.0, start_y + random.uniform(-1.0, 1.0))
-        await page.wait_for_timeout(random.randint(60, 110))
-        await page.mouse.move(start_x + target - 1.0, start_y)
-        await page.wait_for_timeout(random.randint(50, 90))
+        if overshoot:
+            await page.mouse.move(start_x + target + 2.0, start_y + random.uniform(-1.0, 1.0))
+            await page.wait_for_timeout(random.randint(60, 110))
+            await page.mouse.move(start_x + target - 1.0, start_y)
+            await page.wait_for_timeout(random.randint(50, 90))
         await page.mouse.move(start_x + target, start_y)
         await page.wait_for_timeout(int(random.uniform(500, 800)))
         await page.mouse.up()
+        sl = await page.evaluate(
+            "() => { const k = document.getElementById('aliyunCaptcha-sliding-slider');"
+            " return k ? getComputedStyle(k).left : null; }"
+        )
+        return {"target": round(float(target), 1), "sl": sl}
 
     async def _wait_param_or_fail(self, page: Page, timeout_ms: int) -> Dict:
         """轮询 param / fail / observer 判定，先到先得。"""
