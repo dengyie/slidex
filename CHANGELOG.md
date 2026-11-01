@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.6.43] - 2026-11-02
+
+新增新一代 AliyunCaptcha.js 2.0 弹窗拼图 provider（z.ai 系登录实测驱动，本地真 Chromium 端到端验证），含四项可复用资产：二次几何定律、三信号共识检测器、一站式取参 API、合成事件拟人手势。
+
+### Added
+- **`slidex/providers/aliyun_captcha_js.py` 新 provider `aliyun-captcha-js`**：面向 `AliyunCaptcha.js` SDK 弹窗拼图（DOM 前缀 `aliyunCaptcha-*`，成功产物为回调里的 `captchaVerifyParam`），与经典 AWSC nc 滑块（`nc_1_*` DOM / `/slide` 校验包）是两个不同产品，互不误检。`acquire_verify_param()` 一站式 API：武装全新控件（清旧 DOM → 注入 holder/button → initAliyunCaptcha → show）→ 提图 → 缺口检测 → 二次反解 → 拖拽 → param/fail 捕获 → 失败自动重试（每轮重新武装重新定位）。mixin 通用链路同样接入：`validate_response` 尽力解析 aliyuncs 校验包，`get_result` 三通道判定（observer / 校验包 / 文案条，iframe 感知）；`perform_slide_synthetic` 页面内合成 PointerEvent/MouseEvent 兜底（供只放行 evaluate 的嵌入式 webview 宿主）；`wait_for_verify_param` 供 API 登录类集成读取 `window.__slidexCaptchaParam`。
+- **`slidex/_slide_geometry.py` 二次几何定律**：AliyunCaptcha.js 2.0 拼图块 CSS left 不是滑块位移的 1:1 投影，而是 `piece_left = A·knob² + B·knob`（zchat.z.ai 2026-11-02 两次独立标定一致：g(200)=157.396，并经 5 组观测 + 一次成功验证 knob=235→214.142 复核）。新增 `aliyun_jigsaw_piece_left` / `aliyun_jigsaw_knob_for_piece` 正反解——缺口位置换算滑块行程必须走反函数，1:1 拖必差 60px+。
+- **`slidex/_image_match.py` 新增 `AliyunJigsawMatcher`**：轮廓-边缘 × 填充-对比度 × 内容一致 三信号共识检测器。带 alpha 的整条拼图素材（52×200）上模板匹配会出扁平/伪峰（实测原始亮度均值被照片亮区污染，候选区面积只有真实缺口的 1/4）。信号 1：拼图块 alpha 轮廓沿 x 平移对 Sobel 幅值积分（形状对齐时孤立尖峰 174 vs 次高 111）；信号 2：缺口内部亮度减外环的局部对比度（对"照片本身亮"鲁棒）；信号 3：掩码 SQDIFF 内容相似度（区分度门控——真实生成是"压痕叠白"而非纹理拷贝，信号常平坦，平坦时归一化即纯噪声，只在存在真实凹点时纳入）。置信度取峰-中位差，<0.2 判失败回落经典模板匹配（补 −piece_w//2 中心→左缘语义修正）。
+
+### Fixed（review 发现）
+- **轨迹重定标死区陷阱（致命）**：`scale_recorded_points` 默认 tolerance=0.10，而缺口 bg px 与二次反解行程的相对差常落在 10% 以内（z.ai 典型 213→235 = 9.4%）——带死区的缩放器静默跳过，终点差 39px 必挂 F015。provider 改用 `tolerance=0` 显式重定标（`_rescale_points`），并以 `self._last_gap_x` 保留 find_gap 的 float 精度（mixin 会把 travel 截成 int）。
+- **瞬态成功文案丢失**：成功后弹窗随即关闭，事后轮询什么都读不到。新增 `_OBSERVER_JS`（MutationObserver）在拖拽**前**挂好，把文案条变化捕获进 `window.__slidexCaptchaVerdict`。
+
+### Notes
+- 运行时红线写入 provider docstring（同一批实测教训）：控件会话分钟级过期（陈旧弹窗拖准也 F014/Timed out；fresh 15-30s 正常——尽快拖）；失败（F015 位置 / F001 风控）会换 cert 并重置/关闭弹窗，重试前必须重新武装、重新定位；拖动中途不可刷新/中断；判定发生在 mouseup，释放前要终点 dwell。
+- **F001 是环境/风险判定，不是位置错误**：本地 playwright Chromium 里两次拖拽落点与模型分毫不差（g(212)=175.872、g(234)=212.4）且 edge/contrast 双信号互相印证（174-177、207-212 聚类），仍 F001；同一浏览器里更早的成功尝试证明位置正确时可过。合成手势过冲默认关闭——端到端唯一成功样本是纯前进无回拉手势。
+- 几何换算链内化到 provider：背景 296px 原图拉伸到 300 CSS 宽（k≈1.0135）而拼图条 52px 1:1，`imprint_x·k − bx0·piece_k` 先换 CSS 再二次反解，行程上限按 `track − knob`（实测 260）夹紧。
+- 新增 `tests/test_aliyun_captcha_js.py` +17（确定性 RNG fixture）：几何定律（标定点/反解往返/单调性/正根唯一）、三信号检测器（合成压痕精确定位 ±2px / 无压痕低置信 / bytes 带 alpha 与无 alpha 拒绝）、**重定标死区回归**（213→235 陷阱复现与修复）、换算链端到端（bg px 213 → knob 235 实测样本回放 + float 精度）、注册表、三段页内 JS 的规则 token 锁定。全量 734 passed / 16 skipped。
+
 ## [0.6.42] - 2026-10-19
 
 代码评审收口：容错解析收敛为 `_env` 单一契约，超时降级判定收敛为 `_nav` 单一谓词，并堵上两处评审发现的退化值漏洞。
