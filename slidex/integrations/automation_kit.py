@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
@@ -233,4 +234,139 @@ class SlidexVisualCapability:
                 "capability_version": self.manifest.version,
                 "visual_provider": visual_result.provider,
             },
+        )
+
+
+class SlidexManualCapability:
+    """Expose the manual fallback flow as a second ``visual.challenge`` provider.
+
+    Wraps :class:`~slidex.vision.manual.ManualFallbackSession`: ``execute``
+    opens a manual session for the challenge and hands it to an injected
+    async ``completer`` (a human or agent driver) whose returned metadata is
+    converted into the visual result. Without a completer — unattended runs —
+    the provider returns a typed ``manual_fallback_pending`` failure so the
+    kit failover walk and retry policies see a deterministic outcome instead
+    of hanging. Manifest priority stays below the auto solver; the kit
+    resolver therefore prefers ``SlidexVisualCapability`` and only routes
+    here when the auto provider fails or its breaker opens.
+    """
+
+    def __init__(self, *, completer=None, default_timeout_s: int = 300):
+        (
+            CapabilityManifest,
+            _,
+            _,
+            _,
+            _,
+        ) = _import_automation_kit_types()
+        if completer is not None and not callable(completer):
+            raise TypeError("completer must be a callable or None")
+        if isinstance(default_timeout_s, bool) or not isinstance(
+            default_timeout_s, int
+        ) or default_timeout_s <= 0:
+            raise ValueError("default_timeout_s must be a positive integer")
+        self.manifest = CapabilityManifest(
+            name="visual.challenge",
+            version="1.0.0",
+            operations=("solve",),
+            platforms=("web", "android", "image"),
+            default_cancellation="cooperative",
+            priority=-10,
+            metadata={"implementation": "slidex-manual"},
+        )
+        self.completer = completer
+        self.default_timeout_s = default_timeout_s
+
+    def execution_profile(self, request):
+        (
+            _,
+            _,
+            _,
+            _,
+            CapabilityExecutionProfile,
+        ) = _import_automation_kit_types()
+        # With a completer the call blocks on human/agent input and may take
+        # arbitrarily long; without one it returns immediately.
+        return CapabilityExecutionProfile(
+            cancellation="cooperative",
+            blocking=self.completer is not None,
+        )
+
+    async def execute(self, request, context):
+        (
+            _,
+            CapabilityProtocolError,
+            CapabilityResult,
+            _,
+            _,
+        ) = _import_automation_kit_types()
+        from uuid import uuid4
+
+        from slidex.vision.manual import ManualFallbackSession
+
+        if request.capability != self.manifest.name:
+            raise CapabilityProtocolError(
+                f"unsupported capability: {request.capability}"
+            )
+        if request.operation != "solve":
+            raise CapabilityProtocolError(
+                f"unsupported operation: {request.operation}"
+            )
+
+        parameters = dict(request.parameters)
+        challenge_type = _enum_parameter(
+            ChallengeType,
+            parameters,
+            "challenge_type",
+            CapabilityProtocolError,
+        )
+        session_id = parameters.get("session_id")
+        if session_id is not None:
+            session_id = _non_blank_string(
+                session_id, "session_id", CapabilityProtocolError
+            )
+        else:
+            session_id = uuid4().hex
+        token = parameters.get("token", "")
+        if not isinstance(token, str):
+            raise CapabilityProtocolError("token must be a string")
+        timeout_s = parameters.get("timeout_s", self.default_timeout_s)
+        if isinstance(timeout_s, bool) or not isinstance(timeout_s, int) or timeout_s <= 0:
+            raise CapabilityProtocolError("timeout_s must be a positive integer")
+
+        session = ManualFallbackSession(
+            session_id=session_id,
+            challenge_type=challenge_type,
+            token=token,
+            timeout_s=timeout_s,
+        )
+        common_metadata = {
+            "capability_version": self.manifest.version,
+            "session_id": session_id,
+        }
+        if self.completer is None:
+            return CapabilityResult(
+                success=False,
+                provider="slidex-manual",
+                error_code="manual_fallback_pending",
+                retryable=True,
+                data=session.to_dict(),
+                metadata=common_metadata,
+            )
+
+        completion = self.completer(session)
+        if inspect.isawaitable(completion):
+            completion = await completion
+        if not isinstance(completion, dict):
+            raise CapabilityProtocolError(
+                "manual completer must return a metadata dictionary"
+            )
+        visual_result = session.complete_metadata(completion)
+        return CapabilityResult(
+            success=visual_result.success,
+            provider="slidex-manual",
+            data=visual_result.to_dict(),
+            error_code=visual_result.error_code,
+            retryable=visual_result.retryable,
+            metadata={**common_metadata, "visual_provider": "manual"},
         )

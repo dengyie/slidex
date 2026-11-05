@@ -214,3 +214,154 @@ def test_slidex_visual_capability_rejects_invalid_requests(parameters, message):
                 _context(),
             )
         )
+
+
+# --- SlidexManualCapability (second visual.challenge provider) ---------------
+
+
+def _manual(**parameters):
+    pytest.importorskip("automation_core")
+    from automation_core import capabilities
+    from slidex.integrations.automation_kit import SlidexManualCapability
+
+    return capabilities, SlidexManualCapability(**parameters)
+
+
+def test_manual_capability_manifest_ranks_below_auto_solver():
+    pytest.importorskip("automation_core")
+    from slidex.integrations.automation_kit import (
+        SlidexManualCapability,
+        SlidexVisualCapability,
+    )
+
+    manual = SlidexManualCapability()
+    auto = SlidexVisualCapability()
+
+    assert manual.manifest.name == "visual.challenge"
+    assert manual.manifest.priority == -10
+    assert auto.manifest.priority == 0
+    assert manual.manifest.metadata == {"implementation": "slidex-manual"}
+
+
+def test_manual_capability_without_completer_returns_pending_failure():
+    capabilities, provider = _manual()
+    result = asyncio.run(
+        provider.execute(
+            _request(
+                capabilities,
+                challenge_type="slider_captcha",
+                session_id="session-1",
+            ),
+            _context(),
+        )
+    )
+
+    assert result.success is False
+    assert result.provider == "slidex-manual"
+    assert result.error_code == "manual_fallback_pending"
+    assert result.retryable is True
+    assert result.data["session_id"] == "session-1"
+    assert result.data["token"] == "[redacted]"
+
+
+def test_manual_capability_completer_metadata_becomes_success():
+    async def completer(session):
+        assert session.session_id == "session-2"
+        return {"text": "1234"}
+
+    capabilities, provider = _manual(completer=completer)
+    result = asyncio.run(
+        provider.execute(
+            _request(
+                capabilities,
+                challenge_type="slider_captcha",
+                session_id="session-2",
+            ),
+            _context(),
+        )
+    )
+
+    assert result.success is True
+    assert result.provider == "slidex-manual"
+    assert result.data["metadata"]["text"] == "1234"
+    assert result.data["metadata"]["session_id"] == "session-2"
+    assert result.metadata["visual_provider"] == "manual"
+
+
+def test_manual_capability_rejects_invalid_requests():
+    capabilities, provider = _manual()
+
+    with pytest.raises(capabilities.CapabilityProtocolError, match="challenge_type"):
+        asyncio.run(
+            provider.execute(_request(capabilities), _context())
+        )
+    with pytest.raises(capabilities.CapabilityProtocolError, match="timeout_s"):
+        asyncio.run(
+            provider.execute(
+                _request(capabilities, challenge_type="slider_captcha", timeout_s=0),
+                _context(),
+            )
+        )
+
+
+def test_manual_capability_sync_completer_supported():
+    capabilities, provider = _manual(completer=lambda session: {"text": "ok"})
+
+    result = asyncio.run(
+        provider.execute(
+            _request(capabilities, challenge_type="ocr_text", session_id="s3"),
+            _context(),
+        )
+    )
+
+    assert result.success is True
+    assert result.data["metadata"]["text"] == "ok"
+
+
+def test_two_provider_failover_auto_failure_routes_to_manual():
+    """The governance gate proof: auto solver fails -> manual fallback wins."""
+    pytest.importorskip("automation_core")
+    from automation_core import capabilities
+    from automation_core.capabilities import (
+        CapabilityExecutor,
+        CapabilityRegistry,
+        CapabilityResolver,
+    )
+    from slidex.integrations.automation_kit import (
+        SlidexManualCapability,
+        SlidexVisualCapability,
+    )
+
+    class FailingSolver:
+        async def solve(self, request):
+            return VisualChallengeResult(
+                success=False,
+                challenge_type=request.challenge_type,
+                provider="fake-ocr",
+                error_code="slider_not_solved",
+                retryable=False,
+            )
+
+    registry = CapabilityRegistry()
+    registry.register(SlidexVisualCapability(visual_solver=FailingSolver()), name="slidex")
+    registry.register(
+        SlidexManualCapability(completer=lambda session: {"text": "human"}),
+        name="slidex-manual",
+    )
+    executor = CapabilityExecutor(CapabilityResolver(registry))
+
+    result = asyncio.run(
+        executor.execute(
+            _request(
+                capabilities,
+                challenge_type="slider_captcha",
+                context="image_bytes",
+                image_bytes=b"fake-png",
+            ),
+            _context(),
+        )
+    )
+
+    assert result.success is True
+    assert result.provider == "slidex-manual"
+    assert result.data["metadata"]["text"] == "human"
