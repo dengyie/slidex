@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.7.0] - 2026-11-06
+
+provider 治理波（配合 automation-kit 0.6.0）：`visual.challenge` 迎来第二个真实同类 provider。
+
+### Added
+- **`SlidexManualCapability`**（`slidex/integrations/automation_kit.py`）：把公开的
+  `ManualFallbackSession` 完成句柄包装为 kit capability provider（provider 名
+  `slidex-manual`，manifest `priority=-10` 低于自动求解）。`execute` 打开 manual
+  session 并交给注入的异步 completer（人工/Agent 驱动）产出结果；无 completer
+  （无人值守）时返回 typed `manual_fallback_pending` 可重试失败，kit 侧走查式
+  故障转移与重试策略据此确定性决策。集成测试含双 provider failover 门控证明。
+
+### Changed
+- `automation-kit` extra 兼容范围扩展至 `>=0.5.0,<0.7.0`（kit 0.6.0 的多 provider
+  registry / manifest priority / 健康账本为本依赖的前置）。
+
 ## [0.6.42] - 2026-10-19
 
 代码评审收口：容错解析收敛为 `_env` 单一契约，超时降级判定收敛为 `_nav` 单一谓词，并堵上两处评审发现的退化值漏洞。
