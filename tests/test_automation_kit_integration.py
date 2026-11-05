@@ -259,7 +259,9 @@ def test_manual_capability_without_completer_returns_pending_failure():
     assert result.success is False
     assert result.provider == "slidex-manual"
     assert result.error_code == "manual_fallback_pending"
-    assert result.retryable is True
+    # Non-retryable on purpose: unattended retries cannot complete a manual
+    # session and would churn session ids.
+    assert result.retryable is False
     assert result.data["session_id"] == "session-1"
     assert result.data["token"] == "[redacted]"
 
@@ -365,3 +367,59 @@ def test_two_provider_failover_auto_failure_routes_to_manual():
     assert result.success is True
     assert result.provider == "slidex-manual"
     assert result.data["metadata"]["text"] == "human"
+
+
+# --- review fixes 2026-11: typed failures for runtime-injected completers ---
+
+
+def test_manual_capability_completer_returning_non_dict_is_typed_failure():
+    """A broken completer is a runtime failure: typed result, no protocol raise."""
+    capabilities, provider = _manual(completer=lambda session: ["not", "a", "dict"])
+
+    result = asyncio.run(
+        provider.execute(
+            _request(capabilities, challenge_type="ocr_text", session_id="s4"),
+            _context(),
+        )
+    )
+
+    assert result.success is False
+    assert result.provider == "slidex-manual"
+    assert result.error_code == "manual_completer_invalid"
+    assert result.retryable is False
+    assert result.data["session_id"] == "s4"
+    assert "metadata dictionary" in result.metadata["reason"]
+
+
+def test_manual_capability_completer_raising_propagates_for_executor_normalization():
+    """A raising completer is a generic runtime failure the kit executor folds
+    into provider_exception + a health-ledger failure."""
+
+    def broken_completer(session):
+        raise RuntimeError("operator queue down")
+
+    capabilities, provider = _manual(completer=broken_completer)
+
+    with pytest.raises(RuntimeError, match="operator queue down"):
+        asyncio.run(
+            provider.execute(
+                _request(capabilities, challenge_type="ocr_text", session_id="s5"),
+                _context(),
+            )
+        )
+
+
+def test_manual_capability_pending_is_not_retryable():
+    """Unattended pending must not trigger runtime retries (session churn)."""
+    capabilities, provider = _manual()
+
+    result = asyncio.run(
+        provider.execute(
+            _request(capabilities, challenge_type="slider_captcha"),
+            _context(),
+        )
+    )
+
+    assert result.success is False
+    assert result.error_code == "manual_fallback_pending"
+    assert result.retryable is False
