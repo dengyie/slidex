@@ -19,7 +19,7 @@ Slidex has evolved from a slider CAPTCHA solver into the visual capability platf
 > Ecosystem development baseline: see [`automation-kit/docs/development.md`](https://github.com/dengyie/automation-kit/blob/main/docs/development.md).
 
 **Features**:
-- 🎯 **Multi-provider support** — Built-in Aliyun NoCaptcha, GeeTest adapters with auto-detection
+- 🎯 **Multi-provider support** — Built-in Aliyun NoCaptcha, AliyunCaptcha.js 2.0, GeeTest adapters with auto-detection
 - 🔎 **Unified vision API** — `slidex.vision` models slider, OCR, and manual fallback challenges
 - 🧾 **Built-in OCR surface** — `slidex.ocr` exposes `OcrTextExtractor`, `OcrResult`, and `FakeOcrExtractor`
 - 🔌 **Plugin-based extension** — Implement custom providers in 10 minutes
@@ -136,6 +136,7 @@ result = await executor.aexecute(
 | Provider | Name | Status |
 |----------|------|--------|
 | Aliyun NoCaptcha | `aliyun-nocaptcha` | ✅ Built-in |
+| Aliyun Captcha.js 2.0 jigsaw (z.ai logins) | `aliyun-captcha-js` | ✅ Built-in |
 | GeeTest v3/v4 | `geetest` | ✅ Built-in |
 | Shumei | `shumei` | 📝 TODO |
 | Dingxiang | `dingxiang` | 📝 TODO |
@@ -164,6 +165,23 @@ When you know which provider the site uses:
 solver = SliderSolver(provider="geetest")
 solver = SliderSolver(provider="aliyun-nocaptcha")
 ```
+
+#### z.ai-style logins (AliyunCaptcha.js 2.0): one-shot verify-param
+
+```python
+from slidex.providers.aliyun_captcha_js import AliyunCaptchaJsProvider
+
+provider = AliyunCaptchaJsProvider()
+# arm a fresh widget -> gap detection -> quadratic inverse -> drag -> capture captchaVerifyParam
+result = await provider.acquire_verify_param(page, "1nl1cfkp")   # z.ai login scene
+if result["param"]:
+    # POST the param to your business endpoint (e.g. z.ai /auths/signin)
+    ...
+```
+
+Runtime rules are internalized (the widget session expires in minutes — drag
+promptly; failures rotate the cert and reset the popup, so each retry re-arms
+and re-detects).
 
 ### 3. CDP Mode (Connect to Existing Browser)
 

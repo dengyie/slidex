@@ -19,7 +19,7 @@ Slidex 已从滑块验证码求解库升级为 `automation-kit` 生态的视觉�
 > 生态开发基线：见 [`automation-kit/docs/development.md`](https://github.com/dengyie/automation-kit/blob/main/docs/development.md)。
 
 **特性**：
-- 🎯 **多供应商支持** — 内置 Aliyun NoCaptcha、GeeTest 适配器，自动检测
+- 🎯 **多供应商支持** — 内置 Aliyun NoCaptcha、AliyunCaptcha.js 2.0、GeeTest 适配器，自动检测
 - 🔎 **统一视觉接口** — `slidex.vision` 统一描述 slider、OCR、manual fallback
 - 🖼️ **纯图片滑块识别** — `SliderImageSolver` 只给图片即可定位缺口，无需浏览器/网络
 - 🧾 **OCR 能力内建** — `slidex.ocr` 提供 `OcrTextExtractor` / `OcrResult` / `FakeOcrExtractor`
@@ -230,6 +230,7 @@ success, cookies = await solver.solve("https://...verification_url...")
 | 供应商 | Provider 名称 | 状态 |
 |--------|--------------|------|
 | 阿里云 NoCaptcha | `aliyun-nocaptcha` | ✅ 内置 |
+| 阿里云 Captcha.js 2.0 拼图（z.ai 系登录） | `aliyun-captcha-js` | ✅ 内置 |
 | 极验 GeeTest v3/v4 | `geetest` | ✅ 内置 |
 | 数美 Shumei | `shumei` | 📝 待实现 |
 | 顶象 Dingxiang | `dingxiang` | 📝 待实现 |
@@ -261,6 +262,24 @@ solver = SliderSolver(provider="geetest")
 # Aliyun NoCaptcha
 solver = SliderSolver(provider="aliyun-nocaptcha")
 ```
+
+#### z.ai 系登录（AliyunCaptcha.js 2.0）：一站式取参
+
+```python
+from slidex.providers.aliyun_captcha_js import AliyunCaptchaJsProvider
+
+provider = AliyunCaptchaJsProvider()
+# 武装全新控件 → 缺口检测 → 二次反解 → 拖拽 → 捕获 captchaVerifyParam（失败自动重试）
+result = await provider.acquire_verify_param(page, "1nl1cfkp")   # z.ai 登录场景
+if result["param"]:
+    # 拿 param 后由调用方 POST 业务端点（如 z.ai /auths/signin 的 captcha_verify_param）
+    ...
+```
+
+适用 API 登录类集成（z.ai 登录只放行手机号 + 滑块，param 由本 provider 注入的
+success 回调写入 `window.__slidexCaptchaParam`）。注意运行时红线：控件会话分钟级
+过期（尽快拖）；失败会换 cert 并重置弹窗，重试前必须重新定位——这些已内化在
+`acquire_verify_param` 的重试循环里。
 
 适用于已有 Playwright/浏览器会话的场景（如 TypeScript 项目）。不启动新浏览器，通过 CDP 协议连接：
 
