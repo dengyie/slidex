@@ -345,11 +345,17 @@ class SlidexManualCapability:
             "session_id": session_id,
         }
         if self.completer is None:
+            # Unattended runs cannot complete a manual session. A typed
+            # non-retryable failure keeps the runtime from pointless retries
+            # (and session_id churn); it intentionally counts toward the kit
+            # health threshold so unattended deployments stop probing the
+            # manual path — the breaker re-probes after its cooldown, so an
+            # attended configuration recovers automatically.
             return CapabilityResult(
                 success=False,
                 provider="slidex-manual",
                 error_code="manual_fallback_pending",
-                retryable=True,
+                retryable=False,
                 data=session.to_dict(),
                 metadata=common_metadata,
             )
@@ -358,8 +364,22 @@ class SlidexManualCapability:
         if inspect.isawaitable(completion):
             completion = await completion
         if not isinstance(completion, dict):
-            raise CapabilityProtocolError(
-                "manual completer must return a metadata dictionary"
+            # The completer is runtime-injected code: a wrong return shape is
+            # a provider runtime failure, not a wiring/contract violation —
+            # return a typed failure so the kit health ledger records it (a
+            # broken completer trips the breaker instead of re-running every
+            # walk) and the auto provider's business failure stays visible.
+            return CapabilityResult(
+                success=False,
+                provider="slidex-manual",
+                error_code="manual_completer_invalid",
+                retryable=False,
+                data=session.to_dict(),
+                metadata={
+                    **common_metadata,
+                    "reason": "completer must return a metadata dictionary",
+                    "completer_type": type(self.completer).__name__,
+                },
             )
         visual_result = session.complete_metadata(completion)
         return CapabilityResult(
