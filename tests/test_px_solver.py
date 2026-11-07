@@ -289,6 +289,31 @@ async def test_stealth_init_script_injected_with_locale():
     assert "__pxParentProbe" in joined
 
 
+async def test_stealth_chrome_script_does_not_self_reference():
+    """stealth 的 window.chrome getter 不得自引用（线上 S3 断层根因）。
+
+    ``{get: () => window.chrome || {...}}`` 里 getter 读 window.chrome 会
+    再次触发自身 → 无限递归 → 栈溢出，任何碰 window.chrome 的页面脚本
+    （含 PX 传感器）静默死亡，collector beacon 一个都发不出。回归断言：
+    脚本里不得出现 getter 内自引用模式；真实浏览器语义用 node 式单测
+    难覆盖，线上实验已单独实证（B2 组种出 _pxvid/_px3/_pxde、0 errors）。
+    """
+    import re
+
+    from slidex.px.solver import _STEALTH_INIT_SCRIPT
+
+    script = _STEALTH_INIT_SCRIPT % {"locale": "en-US"}
+    # getter 箭头函数体内不得再读 window.chrome / globalThis.chrome
+    getter_bodies = re.findall(r"get:\s*\(\)\s*=>\s*\((.*?)\)\}\)", script, re.S)
+    assert getter_bodies, "window.chrome getter not found"
+    body = getter_bodies[0]
+    assert "window.chrome" not in body
+    assert "globalThis.chrome" not in body
+    # 关键子形状在（PX/页面脚本会探测 chrome.app / runtime / csi / loadTimes）
+    assert "app:" in body and "runtime:" in body
+    assert "csi:" in body and "loadTimes:" in body
+
+
 async def test_px_cookies_injected_on_both_domains():
     context = _FakeContext([_pass_cookies()])
     solver = PxPressSolver(context_factory=lambda opts: _resolve(context))

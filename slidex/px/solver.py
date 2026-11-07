@@ -168,12 +168,24 @@ class _BrowserFarm:
 
 # 反自动化探针的最小集合：隐藏 webdriver 标记 + 固定语言。深指纹对抗
 # （canvas/WebGL/音效）属 stealth 层选题，明确不在本版范围内。
+#
+# window.chrome 的形状有讲究：playwright 的 headless Chromium 里它是
+# undefined，0.9.2 之前这里写 ``{get: () => window.chrome || {runtime: {}}}``
+# ——getter 内引用 window.chrome 会再次触发同一个 getter，无限递归，任何
+# 碰 window.chrome 的页面脚本（含 PX 传感器）直接栈溢出静默死亡，collector
+# beacon 一个都发不出（线上 S3 断层的根因，bisect 实证：裸跑能种出
+# _pxvid/_px3/_pxde，二分到 chrome 行是唯一杀手）。改为无自引用的完整形状。
 _STEALTH_INIT_SCRIPT = """
 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
 Object.defineProperty(navigator, 'languages', {get: () => ['%(locale)s']});
 Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
 Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
-Object.defineProperty(window, 'chrome', {get: () => window.chrome || {runtime: {}}});
+Object.defineProperty(window, 'chrome', {get: () => ({
+  app: {isInstalled: false, InstallState: {DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed'}, RunningState: {CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running'}},
+  runtime: {OnInstalledReason: {CHROME_UPDATE: 'chrome_update', INSTALL: 'install', SHARED_MODULE_UPDATE: 'shared_module_update', UPDATE: 'update'}, OnRestartRequiredReason: {APP_UPDATE: 'app_update', OS_UPDATE: 'os_update', PERIODIC: 'periodic'}, PlatformArch: {ARM: 'arm', ARM64: 'arm64', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64'}, PlatformNaclArch: {ARM: 'arm', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64'}, PlatformOs: {ANDROID: 'android', CROS: 'cros', LINUX: 'linux', MAC: 'mac', OPENBSD: 'openbsd', WIN: 'win'}, RequestUpdateCheckStatus: {NO_UPDATE: 'no_update', THROTTLED: 'throttled', UPDATE_AVAILABLE: 'update_available'}, connect: function() {}, sendMessage: function() {}},
+  csi: function() { return {startE: Date.now(), onloadT: Date.now(), pageT: 100, tran: 15}; },
+  loadTimes: function() { return {}; },
+})});
 """
 
 

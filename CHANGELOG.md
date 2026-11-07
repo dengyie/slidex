@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.9.3] - 2026-11-08
+
+S3 断层根因修复：0.9.2 的 `sensor_console` 抓到传感器静默退出（19 条
+pageerror + 零 collector beacon），二分实验锁定 `_STEALTH_INIT_SCRIPT` 的
+`window.chrome` getter 自引用是唯一杀手。
+
+### Fixed
+- **window.chrome getter 无限递归（P0，线上 S3 断层根因）**：playwright
+  headless Chromium 里 `window.chrome` 是 undefined，旧脚本
+  `{get: () => window.chrome || {runtime: {}}}` 的 getter 读
+  `window.chrome` 会再次触发自身 → Maximum call stack size exceeded →
+  任何碰 `window.chrome` 的页面脚本（含 PX 传感器、微软 oneds analytics）
+  静默死亡，collector beacon 一个都发不出。实验证据链：
+  1. 裸 playwright（无 stealth）跑 signup.live.com：`_pxvid/_px3/_pxde`
+     全部种出——网络/代理/脚本源全排除；
+  2. 逐条二分 stealth 脚本 5 行：只有 chrome 行复现失败；
+  3. `defineProperty` 自引用直接复现 `Maximum call stack size exceeded`；
+  4. 修复后（完整 chrome 形状：app/runtime/csi/loadTimes，无自引用）：
+     PX cookie 种出 + 0 pageerror（连带 oneds 的错误也消失）。
+- 新增回归测试：getter 体内不得自引用 + 关键子形状存在；变异验证
+  （改回自引用 → 测试失败）。
+
+### Verified
+- 全量 993 passed / 18 skipped；线上 S3 重跑验收见 0.9.3 部署后报告。
+
 ## [0.9.2] - 2026-11-08
 
 冒烟报告（grok-register §4.1 live，2026-11-08 05:22–05:37）后续：双页结构
