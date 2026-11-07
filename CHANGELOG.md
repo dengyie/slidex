@@ -62,6 +62,22 @@ provider 治理波（配合 automation-kit 0.6.0）：`visual.challenge` 迎来�
   `extract_images` 拿 None；弹窗 id 同时兼容 `-window-popup` 与 `-window-float`。
   选择器改为并集，两种形态都命中。
 
+### Fixed（线上首日 review 实测发现）
+- **silent 模式推断被打死**：`captchaType=PxCaptcha2` 在 `validate()` 里被无条件
+  判成 press，导致「调用方 press 失败后走 silent 回退」的请求（只有 `websiteURL`，
+  没有 `challengeUrl`）直接 422 `challengeUrl is required for press tasks`。改为只
+  认 `silent/px_silent` 别名为 silent，其余交给 `from_payload` 按 URL 推断
+  （有 `challengeUrl` → press，否则有 `websiteURL` → silent）。
+- **`/health` 计数只算 v2 任务**：`/v1/solve` 的成败从不进 24h 计数，线上
+  `fail_24h` 恒 0（实测同步链路已连挂 3 次仍报 0），运维看板会漏掉同步调用方的
+  全部失败。`TaskStore.record_outcome()` 现在同时被 v1 路由调用。
+- **Chromium 崩了不会自愈**：农场缓存 `_browser` 后只判 `is not None`，进程被
+  OOM 杀掉（1.9G 小机器上很现实）后每个任务都挂在 `TargetClosed`，只能重启服务。
+  现在复用前检查 `is_connected()`，断连即重置重拉；`new_context` 因断连失败时
+  重置农场（仅在确认真断连时，避免参数错误连坐杀其它在跑任务的 context）。
+- **启动失败泄漏 playwright driver**：`launch()` 抛错时 `_pw` 已赋值但没关，
+  每次重试叠一个 node 子进程。现在失败路径统一 `_close_browser()`。
+
 ### Notes
 - **同 IP 铁律**：payload 带 `proxy` 时，浏览器 context 与全部出站请求共用该
   sticky proxy；出口不一致 token 即作废。空 proxy 仅限本机调试。
@@ -69,10 +85,14 @@ provider 治理波（配合 automation-kit 0.6.0）：`visual.challenge` 迎来�
 - **成功判据**：只认 `px3` 含 `:1000:`；非通过级 token 不冒充成功。
 - **能力边界**：只做协议/浏览器层，不逆向 PX 的 wasm/JS 指纹算法，不做 IP 信誉
   对抗；未在真实 signup.live.com 做回归（仅本地 Chromium 仿真）。
-- 测试 +119：请求模型 34、cookie 逻辑 33、求解器（假 context）19、服务路由 30、
+- 测试 +127：请求模型 34、cookie 逻辑 33、求解器（假 context）22、服务路由 35、
   本地 Chromium 仿真 3（本地 HTTP 页写 cookie，验证真实链路；浏览器不可用时跳过）。
-  全量 951 passed / 18 skipped（基线 832 + 119，零回归；skipped 为 automation_core
+  全量 959 passed / 18 skipped（基线 832 + 127，零回归；skipped 为 automation_core
   未装时的 kit 集成用例）。
+- **线上部署**（gz-cvm，`10.144.144.8:8077`，仅网格监听，systemd
+  `slidex-captcha.service`，`MemoryMax=1200M`，`SLIDEX_PX_CONCURRENCY=3`）：
+  17 项线上验收全绿（health/鉴权/两套协议/合成页 `:1000:`/低分拦截/403 fail-fast/
+  proxy 真的生效（死代理必失败）/日志脱敏/无落盘/TTL/并发上限与串行化）。
 
 ## [0.7.1] - 2026-11-07
 

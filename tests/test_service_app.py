@@ -149,6 +149,63 @@ def test_type_aliases_resolve_to_same_handler():
         assert response.status_code == 200, (type_name, response.text)
 
 
+def test_pxcaptcha2_with_only_website_url_infers_silent():
+    """调用方 silent 回退的形状：captchaType=PxCaptcha2 + 只有 websiteURL。
+
+    线上实测过这个 422：按类型名硬判 press 会把 silent 回退直接打死。
+    """
+    solver = _FakePxSolver()
+    client = _client(solver)
+    response = client.post(
+        "/v1/solve",
+        json={"type": "PxCaptcha2", "appId": "a", "websiteURL": "https://signup.live.com/"},
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert response.status_code == 200, response.text
+    assert solver.requests[0].mode == "silent"
+
+
+def test_pxcaptcha2_with_both_urls_stays_press():
+    solver = _FakePxSolver()
+    client = _client(solver)
+    client.post(
+        "/v1/solve",
+        json={
+            "type": "PxCaptcha2",
+            "appId": "a",
+            "websiteURL": "https://signup.live.com/",
+            "challengeUrl": "https://iframe.hsprotect.net/c",
+        },
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert solver.requests[0].mode == "press"
+
+
+def test_pxcaptcha2_without_any_url_is_422():
+    client = _client()
+    response = client.post(
+        "/v1/solve",
+        json={"type": "PxCaptcha2", "appId": "a"},
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert response.status_code == 422
+    assert response.json()["data"]["kind"] == "invalid_request"
+
+
+def test_v2_silent_variant_accepts_website_url_only():
+    """v2 协议同样要容忍 PxCaptcha2 + 仅 websiteURL（press 失败后的回退）。"""
+    solver = _FakePxSolver()
+    client = _client(solver)
+    response = client.post(
+        "/v2/tasks/",
+        json={"captchaType": "PxCaptcha2", "appId": "a", "websiteURL": "https://signup.live.com/"},
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["taskId"]
+    assert solver.requests[0].mode == "silent"
+
+
 def test_missing_type_is_422():
     client = _client()
     response = client.post(
@@ -395,6 +452,21 @@ def test_health_counts_finished_tasks():
     body = client.get("/health").json()
     assert body["done_24h"] == 1
     assert body["fail_24h"] == 0
+
+
+def test_health_counts_v1_solve_outcomes():
+    """线上发现的洞：/v1/solve 成败不进计数 → fail_24h 恒 0，看板骗人。"""
+    client = _client()
+    headers = {"Authorization": "Bearer secret"}
+    client.post("/v1/solve", json=_PX_BODY, headers=headers)
+    ok = client.get("/health").json()
+    assert ok["done_24h"] == 1
+
+    solver = _FakePxSolver(result=PxPressResult(False, error_kind="px_token_timeout"))
+    failing = _client(solver)
+    failing.post("/v1/solve", json=_PX_BODY, headers=headers)
+    bad = failing.get("/health").json()
+    assert bad["fail_24h"] == 1
 
 
 # ────────────────────── geetest_v3 兼容 ──────────────────────

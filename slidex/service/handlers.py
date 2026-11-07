@@ -52,8 +52,9 @@ class PxPressHandler:
             type_name = normalize_type(body.get("type") or body.get("captchaType"))
             if type_name in {"silent", "px_silent"}:
                 body["mode"] = "silent"
-            elif type_name in {"press", "px_press", "pxcaptcha2", "px_captcha2"}:
-                body["mode"] = "press"
+            # 其余（含 captchaType=PxCaptcha2）交给 from_payload 按 URL 推断：
+            # 有 challengeUrl → press，否则有 websiteURL → silent。不能按类型名
+            # 硬判 press —— 调用方 silent 回退就是 PxCaptcha2 + 仅 websiteURL。
         try:
             return PxPressRequest.from_payload(body)
         except PxRequestError as exc:

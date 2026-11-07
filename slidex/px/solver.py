@@ -104,21 +104,39 @@ class _BrowserFarm:
         self._guard = asyncio.Lock()
 
     async def browser(self) -> Any:
-        if self._browser is not None:
-            return self._browser
+        browser = self._browser
+        if browser is not None:
+            # Chromium 进程可能已被外部杀掉（OOM/Manually/OOM-killer）：这
+            # 时对象还在但已断连，复用只会让每个任务都挂在 TargetClosed 上。
+            try:
+                if not browser.is_connected():
+                    logger.warning("px: chromium disconnected, relaunching")
+                    await self._close_browser()
+                    browser = None
+            except Exception:  # pragma: no cover
+                await self._close_browser()
+                browser = None
+        if browser is not None:
+            return browser
         async with self._guard:
             if self._browser is not None:
                 return self._browser
-            self._pw = await self._playwright_factory()
-            launch_args = _default_launch_args(is_root=_is_root()) + self._extra_args
-            self._browser = await self._pw.chromium.launch(
-                headless=self._headless,
-                args=launch_args,
-            )
+            try:
+                self._pw = await self._playwright_factory()
+                launch_args = _default_launch_args(is_root=_is_root()) + self._extra_args
+                self._browser = await self._pw.chromium.launch(
+                    headless=self._headless,
+                    args=launch_args,
+                )
+            except Exception:
+                # 启动失败要把 playwright driver（node 进程）也清掉，否则
+                # 下次 launch 会叠加泄漏 node 子进程
+                await self._close_browser()
+                raise
             logger.info("px: chromium farm ready (headless={})", self._headless)
             return self._browser
 
-    async def close(self) -> None:
+    async def _close_browser(self) -> None:
         browser, self._browser = self._browser, None
         pw, self._pw = self._pw, None
         if browser is not None:
@@ -131,6 +149,9 @@ class _BrowserFarm:
                 await pw.stop()
             except Exception:  # pragma: no cover
                 pass
+
+    async def close(self) -> None:
+        await self._close_browser()
 
 
 # 反自动化探针的最小集合：隐藏 webdriver 标记 + 固定语言。深指纹对抗
@@ -244,7 +265,21 @@ class PxPressSolver:
             else:
                 if browser is None:  # pragma: no cover
                     raise RuntimeError("no browser")
-                context = await browser.new_context(**context_options)
+                try:
+                    context = await browser.new_context(**context_options)
+                except Exception:
+                    # 只有「浏览器真的断了」才重置农场：new_context 参数错误
+                    # 不能连坐杀掉其它在跑任务的 context
+                    connected = True
+                    try:
+                        connected = bool(browser.is_connected())
+                    except Exception:  # pragma: no cover
+                        connected = False
+                    if not connected and self._farm is not None:
+                        logger.warning("px: chromium gone mid-task, resetting farm")
+                        await self._farm.close()
+                        self._farm = None
+                    raise
             add_init_script = getattr(context, "add_init_script", None)
             if callable(add_init_script):
                 try:

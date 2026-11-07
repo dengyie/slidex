@@ -25,7 +25,12 @@ from slidex.px.models import (
     ERR_TOKEN_TIMEOUT,
     PxPressRequest,
 )
-from slidex.px.solver import PxPressSlots, PxPressSolver, _default_launch_args
+from slidex.px.solver import (
+    PxPressSlots,
+    PxPressSolver,
+    _BrowserFarm,
+    _default_launch_args,
+)
 
 _PASS_PX3 = "1:a:1000:abcdef::"
 
@@ -386,3 +391,97 @@ def test_non_root_keeps_sandbox():
     args = _default_launch_args(is_root=False)
     assert "--no-sandbox" not in args
     assert "--disable-dev-shm-usage" in args
+
+
+# ────────────────────── Chromium 崩溃自愈 ──────────────────────
+
+
+class _FakeBrowserObj:
+    def __init__(self, *, connected: bool = True) -> None:
+        self._connected = connected
+        self.close_calls = 0
+
+    def is_connected(self) -> bool:
+        return self._connected
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        self._connected = False
+
+
+class _FakeChromium:
+    def __init__(self, browsers) -> None:
+        self._browsers = list(browsers)
+        self.launches = 0
+
+    async def launch(self, **kwargs):
+        self.launches += 1
+        item = self._browsers.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+class _FakePw:
+    def __init__(self, browsers) -> None:
+        self.chromium = _FakeChromium(browsers)
+        self.stopped = 0
+
+    async def stop(self) -> None:
+        self.stopped += 1
+
+
+async def test_dead_browser_is_relaunched():
+    """OOM 杀掉 Chromium 后，下一次求解必须拿到新进程而不是永久失败。"""
+    first = _FakeBrowserObj()
+    second = _FakeBrowserObj()
+    pw = _FakePw([first, second])
+    farm = _BrowserFarm(lambda: _resolve(pw), headless=True, extra_args=[])
+
+    got = await farm.browser()
+    assert got is first
+    first._connected = False  # 被外部杀掉
+
+    got2 = await farm.browser()
+    assert got2 is second
+    assert first.close_calls == 1
+    assert pw.chromium.launches == 2
+
+
+async def test_launch_failure_does_not_leak_driver():
+    """首发失败要把 playwright driver 一起关掉，否则 node 进程逐个泄漏。"""
+    pw_bad = _FakePw([RuntimeError("no chromium")])
+    pw_good = _FakePw([_FakeBrowserObj()])
+    made = [pw_bad, pw_good]
+
+    async def _factory():
+        return made.pop(0)
+
+    farm = _BrowserFarm(_factory, headless=True, extra_args=[])
+
+    with pytest.raises(RuntimeError):
+        await farm.browser()
+    assert farm._pw is None and farm._browser is None
+    assert pw_bad.stopped == 1
+
+    browser = await farm.browser()
+    assert browser is not None
+    assert pw_bad.chromium.launches == 1
+
+
+async def test_browser_gone_mid_task_resets_farm_and_is_retryable():
+    class _DeadOnContext(_FakeBrowserObj):
+        async def new_context(self, **kwargs):
+            self._connected = False
+            raise RuntimeError("Target page, context or browser has been closed")
+
+    dead = _DeadOnContext()
+    pw = _FakePw([dead])
+    solver = PxPressSolver(playwright_factory=lambda: _resolve(pw))
+
+    result = await solver.solve(_request())
+
+    assert result.success is False
+    assert result.retryable_error is True
+    # 农场必须被重置，否则后续任务全挂在断连的 browser 上
+    assert solver._farm is None

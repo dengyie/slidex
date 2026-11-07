@@ -165,6 +165,10 @@ class TaskStore:
         (self._done if ok else self._fail).append(now)
         self._trim_locked(now)
 
+    def record_outcome(self, ok: bool) -> None:
+        """同步接口（/v1/solve）的成败同样计入 24h 看板。"""
+        self._record_outcome(ok)
+
     def _trim_locked(self, now: float) -> None:
         cutoff = now - _COUNTER_WINDOW_S
         for bucket in (self._done, self._fail):
@@ -321,6 +325,7 @@ def create_app(
                 handler.solve(body), timeout=_HARD_SOLVE_BUDGET_S
             )
         except asyncio.TimeoutError:
+            store.record_outcome(False)
             raise HandlerFailure(
                 kind="solve_timeout",
                 message="solve exceeded service budget",
@@ -328,11 +333,15 @@ def create_app(
                 code=codes.SOLVE_TIMEOUT,
             ) from None
         except HandlerFailure:
+            # 同步接口的成败也要进 24h 计数，否则 /health 的 fail_24h 永远
+            # 只算 v2 任务，运维看板会把同步链路的失败全吞掉。
+            store.record_outcome(False)
             raise
         except Exception as exc:
             # handler 把 HanderFailure 之外的异常吞成 500 信封，而不是让
             # traceback 泄漏到响应里；solver 内部异常一律按可重试处理
             logger.warning(f"service: /v1/solve internal error: {exc}")
+            store.record_outcome(False)
             raise HandlerFailure(
                 kind="solver_internal_error",
                 message="unexpected solver error",
@@ -340,6 +349,7 @@ def create_app(
                 code=codes.INTERNAL,
                 status_code=500,
             ) from None
+        store.record_outcome(True)
         return _response(200, code=codes.OK, msg="ok", data=data)
 
     @app.post("/v2/tasks/")
