@@ -511,26 +511,25 @@ class PxPressSolver:
                     page, request.website_url, host_kwargs
                 )
                 if not nav_kind:
-                    status = self._pick_status(page_status)
-                    if status in (403, 429, 404):
-                        return self._fail(
-                            started, mode, diag, ERR_CHALLENGE_HTTP,
-                            f"host page status={status}", retryable=False,
-                        )
-                    if status == 407:
-                        return self._fail(
-                            started, mode, diag, ERR_PROXY_AUTH,
-                            "proxy requires authentication (407)", retryable=False,
-                        )
-                    if status is not None and status >= 500:
-                        return self._fail(
-                            started, mode, diag, ERR_CHALLENGE_HTTP,
-                            f"upstream responded {status}", retryable=True,
-                        )
+                    # 首屏状态判死不分模式（0.9.1 修：silent 丢判死是线上
+                    # deep_check C5 回归的根因，407/404 烧满预算变可重试超时）
+                    fatal = self._first_paint_kill(
+                        started=started, mode=mode, diag=diag,
+                        status=self._pick_status(page_status),
+                    )
+                    if fatal is not None:
+                        return fatal
                     nav_kind, nav_reason = await self._attach_iframe(request, page, diag)
             else:
                 nav = await self._navigate_silent(request, page, page_status, diag)
                 nav_kind, nav_reason = nav
+                if not nav_kind:
+                    fatal = self._first_paint_kill(
+                        started=started, mode=mode, diag=diag,
+                        status=self._pick_status(page_status),
+                    )
+                    if fatal is not None:
+                        return fatal
             # 导航失败按「超时 / 连不上」分两类上报；首屏判死已在上面做过。
             if nav_kind == ERR_CHALLENGE_TIMEOUT:
                 return self._fail(
@@ -762,6 +761,37 @@ class PxPressSolver:
         if not page_status:
             return None
         return page_status.get("last")
+
+    def _first_paint_kill(
+        self,
+        *,
+        started: float,
+        mode: str,
+        diag: _Diagnostics,
+        status: Optional[int],
+    ) -> Optional[PxPressResult]:
+        """首屏状态判死，press/silent 共用（与模式无关的页面层事实）。
+
+        返回 ``None`` 表示页面健康，继续求解；否则给出确定性失败结果：
+        403/429/404 是拦截/写错 URL（不重试），407 是代理要认证（不重试，
+        同 payload 重试永远不会好），>=500 是上游故障（可重试）。
+        """
+        if status in (403, 429, 404):
+            return self._fail(
+                started, mode, diag, ERR_CHALLENGE_HTTP,
+                f"host page status={status}", retryable=False,
+            )
+        if status == 407:
+            return self._fail(
+                started, mode, diag, ERR_PROXY_AUTH,
+                "proxy requires authentication (407)", retryable=False,
+            )
+        if status is not None and status >= 500:
+            return self._fail(
+                started, mode, diag, ERR_CHALLENGE_HTTP,
+                f"upstream responded {status}", retryable=True,
+            )
+        return None
 
     async def _read_cookies(
         self, context: Any, *, log_failure: bool = True

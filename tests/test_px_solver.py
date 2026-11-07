@@ -731,6 +731,42 @@ async def test_proxy_407_fails_fast_not_retryable():
     assert time.monotonic() - started < 2.0
 
 
+async def test_silent_proxy_407_fails_fast_not_retryable():
+    """silent 模式的 407 同样秒死（线上 deep_check C5 回归的根因）。
+
+    0.9.0 重构把首屏判死挪进 press 分支后，silent 分支丢了判死——407 被
+    当文档渲染，任务一路轮询到预算耗尽，返回误导性的可重试 px_token_timeout。
+    首屏状态判死与模式无关：silent 的主帧文档就是 challenge 宿主。
+    """
+    page = _SubresourcePage(407, [])
+    context = _FakeContext([[]], page=page)
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
+
+    started = time.monotonic()
+    result = await solver.solve(_request(mode="silent"))
+
+    assert result.success is False
+    assert result.error_kind == ERR_PROXY_AUTH
+    assert result.retryable_error is False
+    assert "407" in result.error
+    assert time.monotonic() - started < 2.0
+
+
+async def test_silent_404_document_fails_fast_not_retryable():
+    """silent 模式主帧 404：确定性终止，不烧预算（同一判死覆盖 silent）。"""
+    page = _SubresourcePage(404, [])
+    context = _FakeContext([[]], page=page)
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
+
+    started = time.monotonic()
+    result = await solver.solve(_request(mode="silent"))
+
+    assert result.success is False
+    assert result.error_kind == ERR_CHALLENGE_HTTP
+    assert result.retryable_error is False
+    assert time.monotonic() - started < 2.0
+
+
 # ------------------------------------------------------ 0.9.0 双页/补种/诊断
 
 async def test_press_navigates_host_then_injects_iframe():

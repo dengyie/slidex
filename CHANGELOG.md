@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.9.1] - 2026-11-08
+
+0.9.0 部署后线上 deep_check 回归抓到的问题（21/23 → 修复目标 23/23）。
+
+### Fixed
+- **silent 模式丢失首屏状态判死（P0，deep_check C5 回归）**：0.9.0 重构把
+  403/404/407/5xx 判死挪进了 press 分支，silent 分支整个没了——代理 407 被
+  当文档渲染后一路轮询到预算耗尽，返回误导性的可重试 `px_token_timeout`
+  （1002）。修复：判死提成 `_first_paint_kill` 共享方法，press/silent 两个
+  分支都过同一道门。变异验证：删掉 silent 判死 → 两个新测试（silent 407、
+  silent 404）都失败；恢复后全绿。本地单测此前没抓到是因为 407/403/404
+  用例全是 press 路径，silent 分支零覆盖。
+- deep_check B5 跟进 v2 契约（非 solver 缺陷）：v2 下无 vid 的 press 会先
+  自动补种子（合成站种不出 `_pxvid` → `caller_vid_required`，pxcts 为空），
+  且双页结构会真导航 `websiteURL`——用例改为合成宿主页 + 带 vid + 断言
+  challenge iframe 的 `document.referrer` 等于宿主 origin（跨源
+  strict-origin-when-cross-origin 只保留 origin）。
+
+### Verified
+- 全量 989 passed / 18 skipped（+2 silent 判死测试）。
+
 ## [0.9.0] - 2026-11-08
 
 需求单 v2（px_press 真实挑战求解修复）：live 联调证明直接导航 hsprotect
