@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.8.4] - 2026-11-08
+
+失败类别收口：把「根本没到达挑战页」从「页面加载了但没出 token」里拆出来，
+让调用方能按真实原因处置（换 IP 降风控 vs 先查代理链路）。
+
+### Changed
+- **新增 kind `challenge_load_failed`**：导航阶段抛异常（代理拒绝、
+  DNS、TLS、`ERR_UNSAFE_PORT` 等）不再一律报成 `challenge_load_timeout`。
+  `challenge_load_timeout` 现在**只**表示导航真的超时（黑洞代理 / 慢站）。
+- **业务码拆分**：新增 `SOLVE_LOAD_FAILED = 1005`。
+  - `1005` = 连不上挑战页（`challenge_load_failed` + `challenge_load_timeout`）
+  - `1002` = 页面已加载，但预算内没出通过级 token（`px_token_timeout`）
+  两者都是 `retryable=true`，区别在处置方向：1005 先查代理链路，1002 换 IP/降风控。
+- 失败消息带上底层原因（截断 300 字符），例如
+  `challenge page unreachable: Error: net::ERR_PROXY_CONNECTION_FAILED at ...`，
+  排障时不用再去翻服务日志。
+
+### Verified
+- 变异验证：把超时判定改成恒 `False` → `test_navigate_timeout_is_load_timeout`
+  失败；把 codes 映射改回 1002 → `test_load_failure_maps_to_1005_not_1002` 失败。
+- 全量 976 passed / 18 skipped（新增 2 条：导航异常 vs 导航超时、业务码拆分）。
+
 ## [0.8.3] - 2026-11-08
 
 深度验收新增 C4/D5 项时顺带抓到的第五个失败模式：代理 407 吃满整个预算。

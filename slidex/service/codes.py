@@ -24,6 +24,10 @@ SOLVE_FAILED = 1001
 SOLVE_TIMEOUT = 1002
 SOLVE_BLOCKED = 1003
 SOLVE_BUSY = 1004
+# 连不上挑战页（DNS / 代理拒绝 / TLS / 不安全端口 / 导航超时）：
+# 与 1002 区分开——1002 现在是「页面已加载但预算内没出 token」，
+# 1005 是「根本没到达页面」，前者要换 IP/降风控，后者先查代理链路。
+SOLVE_LOAD_FAILED = 1005
 
 # 服务内部错误（HTTP 500 + code）
 INTERNAL = 500
@@ -32,7 +36,8 @@ INTERNAL = 500
 _KIND_TO_CODE = {
     "solver_busy": SOLVE_BUSY,
     "px_token_timeout": SOLVE_TIMEOUT,
-    "challenge_load_timeout": SOLVE_TIMEOUT,
+    "challenge_load_timeout": SOLVE_LOAD_FAILED,
+    "challenge_load_failed": SOLVE_LOAD_FAILED,
     "px_token_blocked": SOLVE_BLOCKED,
     "px_blocked": SOLVE_BLOCKED,
     "solver_internal_error": INTERNAL,

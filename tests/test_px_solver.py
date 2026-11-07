@@ -19,6 +19,8 @@ import pytest
 from slidex.px.models import (
     ERR_BROWSER_LAUNCH,
     ERR_CHALLENGE_HTTP,
+    ERR_CHALLENGE_LOAD,
+    ERR_CHALLENGE_TIMEOUT,
     ERR_INTERNAL,
     ERR_SOLVER_BUSY,
     ERR_TOKEN_BLOCKED,
@@ -291,7 +293,12 @@ async def test_navigate_403_maps_to_challenge_http_error():
     assert result.retryable_error is False
 
 
-async def test_navigate_failure_without_status_is_timeout():
+async def test_navigate_connection_failure_is_load_failed():
+    """导航异常（代理拒绝/DNS/证书/不安全端口）→ challenge_load_failed。
+
+    与「页面加载了但没出 token」（px_token_timeout）区分：错误要从 kind 可辨，
+    不能一律吞成 load_timeout。
+    """
     page = _FakePage(goto_exc=RuntimeError("net::ERR_PROXY_CONNECTION_FAILED"))
     context = _FakeContext([[]], page=page)
     solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
@@ -299,7 +306,20 @@ async def test_navigate_failure_without_status_is_timeout():
     result = await solver.solve(_request())
 
     assert result.success is False
-    assert result.error_kind == "challenge_load_timeout"
+    assert result.error_kind == ERR_CHALLENGE_LOAD
+    assert result.retryable_error is True
+
+
+async def test_navigate_timeout_is_load_timeout():
+    """导航真的超时（黑洞代理/慢站）→ challenge_load_timeout，仍可重试。"""
+    page = _FakePage(goto_exc=asyncio.TimeoutError())
+    context = _FakeContext([[]], page=page)
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
+
+    result = await solver.solve(_request())
+
+    assert result.success is False
+    assert result.error_kind == ERR_CHALLENGE_TIMEOUT
     assert result.retryable_error is True
 
 

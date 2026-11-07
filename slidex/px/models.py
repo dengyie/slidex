@@ -96,6 +96,7 @@ ERR_UNSUPPORTED_TYPE = "unsupported_type"
 ERR_SOLVER_BUSY = "solver_busy"
 ERR_BROWSER_LAUNCH = "browser_launch_failed"
 ERR_CHALLENGE_HTTP = "challenge_http_error"
+ERR_CHALLENGE_LOAD = "challenge_load_failed"
 ERR_CHALLENGE_TIMEOUT = "challenge_load_timeout"
 ERR_TOKEN_TIMEOUT = "px_token_timeout"
 ERR_TOKEN_BLOCKED = "px_token_blocked"
@@ -106,6 +107,7 @@ RETRYABLE_KINDS = frozenset(
     {
         ERR_SOLVER_BUSY,
         ERR_BROWSER_LAUNCH,
+        ERR_CHALLENGE_LOAD,
         ERR_CHALLENGE_TIMEOUT,
         ERR_TOKEN_TIMEOUT,
         ERR_INTERNAL,

@@ -293,6 +293,24 @@ def test_solve_timeout_maps_to_1002():
     assert body["data"]["retryable"] is True
 
 
+def test_load_failure_maps_to_1005_not_1002():
+    """连不上挑战页 → 1005，与「页面加载了但没出 token」的 1002 分开。
+
+    1002 告诉调用方换 IP / 降风控；1005 告诉它先查代理链路，两者处置不同。
+    """
+    for kind in ("challenge_load_failed", "challenge_load_timeout"):
+        failed = PxPressResult(
+            False, error_kind=kind, error="challenge page unreachable", retryable=True
+        )
+        client = _client(_FakePxSolver(failed))
+        body = client.post(
+            "/v1/solve", json=_PX_BODY, headers={"Authorization": "Bearer secret"}
+        ).json()
+        assert body["code"] == 1005, kind
+        assert body["data"]["kind"] == kind
+        assert body["data"]["retryable"] is True
+
+
 def test_solver_busy_is_http_429():
     busy = PxPressResult(
         False, error_kind="solver_busy", error="slots exhausted", retryable=True

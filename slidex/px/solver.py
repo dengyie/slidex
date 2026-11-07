@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -24,6 +24,7 @@ from .cookies import extract_px_tokens, is_pass_token, redact_token
 from .models import (
     ERR_BROWSER_LAUNCH,
     ERR_CHALLENGE_HTTP,
+    ERR_CHALLENGE_LOAD,
     ERR_CHALLENGE_TIMEOUT,
     ERR_INTERNAL,
     ERR_SOLVER_BUSY,
@@ -188,6 +189,18 @@ def _is_document_response(response: Any) -> bool:
     if not isinstance(resource_type, str):
         return True
     return resource_type == "document"
+
+
+def _is_timeout_exc(exc: BaseException) -> bool:
+    """异常是否为「超时」而非「连不上」。
+
+    Playwright 的 ``TimeoutError`` 与 ``asyncio.TimeoutError`` 不是同一个类，
+    用一个基类判断会漏；按类名后缀识别对两者都成立，且不会误吞别的东西。
+    """
+    for klass in type(exc).__mro__:
+        if klass.__name__.endswith("TimeoutError"):
+            return True
+    return False
 
 
 class PxPressSolver:
@@ -357,10 +370,10 @@ class PxPressSolver:
 
             page.on("response", _on_response)
 
-            nav_ok = await self._navigate(request, page)
+            nav_kind, nav_reason = await self._navigate(request, page)
             # 首屏状态码本身就能判死：403/429/404 是确定性终止（PX 拦截 /
             # challengeUrl 写错），>=500 是上游故障（可重试）。这些都不该再
-            # 耗满预算去轮询 cookie；导航失败一律按可重试超时处理。
+            # 耗满预算去轮询 cookie；导航失败按「超时 / 连不上」分两类上报。
             status = self._pick_status(page_status)
             if status in (403, 429, 404):
                 return PxPressResult(
@@ -383,10 +396,16 @@ class PxPressSolver:
                     error=f"upstream responded {status}",
                     retryable=True, duration_ms=self._ms(started),
                 )
-            if not nav_ok:
+            if nav_kind == ERR_CHALLENGE_TIMEOUT:
                 return PxPressResult(
                     False, mode=mode, error_kind=ERR_CHALLENGE_TIMEOUT,
-                    error="challenge page did not load",
+                    error=f"challenge page did not load within budget: {nav_reason}",
+                    retryable=True, duration_ms=self._ms(started),
+                )
+            if nav_kind:
+                return PxPressResult(
+                    False, mode=mode, error_kind=ERR_CHALLENGE_LOAD,
+                    error=f"challenge page unreachable: {nav_reason}",
                     retryable=True, duration_ms=self._ms(started),
                 )
 
@@ -464,7 +483,13 @@ class PxPressSolver:
                 except Exception:  # pragma: no cover
                     pass
 
-    async def _navigate(self, request: PxPressRequest, page: Any) -> bool:
+    async def _navigate(self, request: PxPressRequest, page: Any) -> Tuple[str, str]:
+        """导航到挑战页。
+
+        返回 ``(kind, reason)``：``kind == ""`` 表示成功。失败时把「是否超时」
+        和「其它网络层失败」分开——调用方要知道是自己代理连不上（load_failed）
+        还是站点慢到超时（load_timeout），这两件事的处置完全不同。
+        """
         target = request.target_url
         nav_timeout_ms = int(min(_NAV_TIMEOUT_S, request.solve_timeout_s) * 1000)
         try:
@@ -475,11 +500,13 @@ class PxPressSolver:
             if request.referer:
                 kwargs["referer"] = request.referer
             await page.goto(target, **kwargs)
-            return True
+            return "", ""
         except Exception as exc:
-            # proxy CONNECT / DNS / 证书失败都会落到这里；统一按可重试超时处理
-            logger.warning(f"px: navigate {target!r:.80} failed: {exc}")
-            return False
+            reason = f"{type(exc).__name__}: {exc}"[:300]
+            kind = ERR_CHALLENGE_TIMEOUT if _is_timeout_exc(exc) else ERR_CHALLENGE_LOAD
+            # proxy CONNECT 失败 / DNS / 证书 / 不安全端口都落到这里
+            logger.warning(f"px: navigate {target!r:.80} failed ({kind}): {reason}")
+            return kind, reason
 
     @staticmethod
     def _pick_status(page_status: Dict[str, int]) -> Optional[int]:
