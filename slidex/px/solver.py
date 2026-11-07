@@ -368,6 +368,15 @@ class PxPressSolver:
                     error=f"challenge page status={status}",
                     retryable=False, duration_ms=self._ms(started),
                 )
+            if status == 407:
+                # 代理要认证。这既不是页面的问题，也不是"还没种上 token"——
+                # 浏览器把 407 当文档渲染了，轮询到预算耗尽只会得到一个
+                # 误导性的 px_token_timeout，而同一个 payload 重试永远一样。
+                return PxPressResult(
+                    False, mode=mode, error_kind=ERR_CHALLENGE_HTTP,
+                    error="proxy requires authentication (407)",
+                    retryable=False, duration_ms=self._ms(started),
+                )
             if status is not None and status >= 500:
                 return PxPressResult(
                     False, mode=mode, error_kind=ERR_CHALLENGE_HTTP,

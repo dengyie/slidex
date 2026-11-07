@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.8.3] - 2026-11-08
+
+深度验收新增 C4/D5 项时顺带抓到的第五个失败模式：代理 407 吃满整个预算。
+
+### Fixed
+- **代理 407（要认证）不再耗满预算**：Chromium 把代理响应 407 当主帧文档渲染
+  （实测 `status=407, resource_type=document`），旧逻辑只把 403/429/404 当
+  确定性终止，407 于是进入轮询直到 `px_token_timeout`（可重试）——而代理密码
+  配错时，同一个 payload 重试永远不会好。现在 407 按确定性失败早退：
+  `challenge_http_error` / `retryable=false` / 错误信息点名
+  `proxy requires authentication (407)`。
+  502 保持可重试（代理可能瞬时故障）；403 已是确定性失败。
+
+### Verified (live, gz-cvm 10.144.144.8:8077)
+- 目标页合法、代理回 407：修复前 12.2s `px_token_timeout`（吃预算 + 误导）；
+  修复后 ~0.1s `challenge_http_error` `retryable=false`。
+- 代理回 502：0.1s `challenge_http_error` `retryable=true`；回 403：0.1s
+  `retryable=false`（回归不变）。
+- 新增回归测试 `test_proxy_407_fails_fast_not_retryable`；变异验证：去掉 407
+  分支后该测试如预期失败（`px_token_timeout`），证明测试真的把得住。
+- 深度验收 22/22 全绿（契约 7 · 卫生 6 · 代理 4 · 负载 5）。
+
 ## [0.8.2] - 2026-11-08
 
 线上深度验收（第二轮）抓到的回归：0.8.1 引入的「主帧最后一条状态码」在

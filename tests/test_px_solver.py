@@ -659,3 +659,24 @@ async def test_200_subresource_does_not_mask_real_404_document():
     assert result.error_kind == ERR_CHALLENGE_HTTP
     assert result.retryable_error is False
     assert time.monotonic() - started < 2.0
+
+
+async def test_proxy_407_fails_fast_not_retryable():
+    """代理回 407（要认证）：确定性终止，不许把预算耗成 px_token_timeout。
+
+    Chromium 把 407 当文档渲染（status=407、resource_type=document），旧逻辑
+    只认 403/429/404，于是它一路轮询到预算耗尽，返回误导性的可重试超时——
+    而同一个 payload 配错的代理密码重试永远不会好。
+    """
+    page = _SubresourcePage(407, [])
+    context = _FakeContext([[]], page=page)
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
+
+    started = time.monotonic()
+    result = await solver.solve(_request())
+
+    assert result.success is False
+    assert result.error_kind == ERR_CHALLENGE_HTTP
+    assert result.retryable_error is False
+    assert "407" in result.error
+    assert time.monotonic() - started < 2.0
