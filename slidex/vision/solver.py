@@ -28,6 +28,7 @@ from slidex.vision.graph_captcha import (
     is_punish_graph_code,
     plan_graph_chars,
 )
+from slidex.vision.hcaptcha import HcaptchaExecutor
 from slidex.vision.point_select import (
     PointSelectExecutor,
     is_punish_point_code,
@@ -46,6 +47,23 @@ _IMAGE_SLIDER_CONTEXTS = {
 _VISION_WORKER_CAP = max(2, min(8, (os.cpu_count() or 4)))
 _VISION_QUEUE_CAP = _VISION_WORKER_CAP * 2
 _VISION_CLOSE_BUDGET_S = 2.0
+# hCaptcha 失败里只有「尚未触碰页面交互」的两种允许调用方安全重来：
+# 挑战还没出现（等超时）或截图没拿到。提交之后的任何失败都会成为一份
+# 风控样本，重复 solve 等于反复撞风控（同点选/字符型 0.6.28 重试纪律）。
+_HCAPTCHA_SAFE_RETRY_CODES = {"hcaptcha_challenge_timeout", "screenshot_failed"}
+
+
+def _hcaptcha_int(value: Any, default: Optional[int]) -> Optional[int]:
+    """容错解析轮次覆盖：非法值回落默认，1 以下视为默认。"""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed < 1:
+        return default
+    return min(parsed, 5)
+
+
 _vision_executor: Optional[ThreadPoolExecutor] = None
 _vision_executor_guard = threading.Lock()
 # 视觉识别引擎缓存（_default_vision_extractor 使用）；测试可置 _cached_vision_extractor
@@ -119,6 +137,7 @@ class VisualChallengeSolver:
         vision_extractor: Optional[Any] = None,
         point_select_executor: Optional[PointSelectExecutor] = None,
         graph_captcha_executor: Optional[GraphCaptchaExecutor] = None,
+        hcaptcha_executor: Optional[HcaptchaExecutor] = None,
     ):
         self.ocr_extractor = ocr_extractor or FakeOcrExtractor()
         self.slider_solver_factory = slider_solver_factory or SliderSolver
@@ -129,6 +148,10 @@ class VisualChallengeSolver:
         self.vision_extractor = vision_extractor
         self.point_select_executor = point_select_executor or PointSelectExecutor()
         self.graph_captcha_executor = graph_captcha_executor or GraphCaptchaExecutor()
+        # hCaptcha 执行器同样可注入（测试整体替换，零网络）。默认延迟到首次
+        # 使用时构造，避免构造 VisualChallengeSolver 就解析 SLIDEX_VISION_*。
+        self._hcaptcha_executor = hcaptcha_executor
+        self._hcaptcha_prompt: Optional[str] = None
 
     async def solve(self, request: VisualChallengeRequest) -> VisualChallengeResult:
         started = time.time()
@@ -138,6 +161,14 @@ class VisualChallengeSolver:
             # 自身控制超时。
             return await self._await_with_timeout(
                 self._solve_point_select(request, started),
+                request,
+                started,
+            )
+        if request.challenge_type == ChallengeType.HCAPTCHA:
+            # hCaptcha 全程在活页面上：点 checkbox、截图、点格子/拖拽、提交。
+            # 与点选同理不进 CPU 线程池；一次挑战多 crumb，提交即成判决。
+            return await self._await_with_timeout(
+                self._solve_hcaptcha(request, started),
                 request,
                 started,
             )
@@ -689,6 +720,106 @@ class VisualChallengeSolver:
             cookies=None,
             artifacts=[],
             metadata={"context": request.context.value},
+        )
+
+    async def _solve_hcaptcha(
+        self, request: VisualChallengeRequest, started: float
+    ) -> VisualChallengeResult:
+        """hCaptcha：在活页面上解完一道挑战。
+
+        故意不在编排层重试：与点选/字符型不同，hCaptcha 的「重试」等价于
+        重启整道挑战（checkbox 重新出现），并且一次错误提交就是一份风控
+        样本。是否重来交由调用方按轮次决策——这里只解一次，把判决与
+        error_code 原样带回。
+        """
+        if (
+            request.context not in {VisionContext.PLAYWRIGHT_PAGE, VisionContext.CDP}
+            or request.page is None
+        ):
+            return self._hcaptcha_error(
+                request, started, "unsupported_hcaptcha_context", retryable=False
+            )
+
+        overrides = dict(request.hcaptcha or {})
+        prompt = overrides.get("prompt") or self._hcaptcha_prompt
+        executor = overrides.get("executor") or self._hcaptcha_executor
+        if executor is None:
+            # 首次使用时才读 env：构造 solver 不解析 SLIDEX_VISION_*，
+            # 也让测试可以事后注入 SLIDEX_* 而不必重建 solver。
+            from slidex.config import SlidexConfig
+
+            config = SlidexConfig.from_env()
+            executor = HcaptchaExecutor(
+                max_rounds=_hcaptcha_int(
+                    overrides.get("max_rounds"), config.hcaptcha_max_rounds
+                ),
+                tile_padding_px=config.hcaptcha_tile_padding_px,
+            )
+            self._hcaptcha_executor = executor
+            self._hcaptcha_prompt = config.hcaptcha_label_prompt
+            prompt = prompt or self._hcaptcha_prompt
+
+        try:
+            outcome = await executor.solve(
+                request.page,
+                question_language=request.question_language,
+                max_rounds=_hcaptcha_int(overrides.get("max_rounds"), None),
+                prompt=prompt,
+                challenge_iframe=request.challenge_iframe,
+            )
+        except Exception as exc:
+            logger.warning(f"hcaptcha: executor failed: {exc}")
+            return self._hcaptcha_error(
+                request, started, "hcaptcha_executor_error", retryable=False
+            )
+
+        outcome = outcome if isinstance(outcome, dict) else {}
+        success = bool(outcome.get("success"))
+        error_code = None if success else str(outcome.get("error_code") or "hcaptcha_failed")
+        return VisualChallengeResult(
+            success=success,
+            challenge_type=ChallengeType.HCAPTCHA,
+            provider="hcaptcha",
+            confidence=float(outcome.get("confidence") or 0.0),
+            duration_ms=self._duration_ms(started),
+            error_code=error_code,
+            # 只有「还没碰页面交互」的失败才允许安全重来；其余（判错、提交后
+            # 无判决）一律不可重试，避免把重复提交变成二次判罚。
+            retryable=error_code in _HCAPTCHA_SAFE_RETRY_CODES,
+            cookies=None,
+            artifacts=[],
+            metadata={
+                "context": request.context.value,
+                "mode": outcome.get("mode", ""),
+                "question": outcome.get("question", ""),
+                "crumbs": outcome.get("crumbs", 0),
+                "rounds": outcome.get("rounds", 0),
+                "clicked": outcome.get("clicked", []),
+                "verdict": outcome.get("verdict", {}),
+                "pass_token": bool(outcome.get("pass_token")),
+                "engine_provider": outcome.get("engine_provider", ""),
+            },
+        )
+
+    @staticmethod
+    def _hcaptcha_error(
+        request: VisualChallengeRequest,
+        started: float,
+        error_code: str,
+        *,
+        retryable: bool,
+        metadata: Optional[dict] = None,
+    ) -> VisualChallengeResult:
+        return VisualChallengeResult(
+            success=False,
+            challenge_type=ChallengeType.HCAPTCHA,
+            provider="hcaptcha",
+            duration_ms=VisualChallengeSolver._duration_ms(started),
+            error_code=error_code,
+            retryable=retryable,
+            cookies=None,
+            artifacts=[],
+            metadata={"context": request.context.value, **(metadata or {})},
         )
 
     async def _await_cpu_with_timeout(

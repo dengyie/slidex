@@ -30,6 +30,12 @@ class ChallengeType(str, Enum):
     # 与 IMAGE_TEXT 的区别在于**必须提交并读判决**——IMAGE_TEXT 只要读到字就
     # 算成功（纯读取），GRAPH_CHARS 读到字只是中间态，不提交等于没解。
     GRAPH_CHARS = "graph_chars"
+    # 0.7.0: hCaptcha。与滑块族完全不同：挑战在
+    # `iframe[src^="https://newassets.hcaptcha.com/captcha/v1/"]` 内，
+    # 三种交互形态（9 宫格二选 / 区域点选 / 拖放），判决走 /checkcaptcha/
+    # 的 {"pass": bool}，成功产物是 h-captcha-response token 而非 cookie。
+    # 只在 PLAYWRIGHT_PAGE / CDP（且调用方提供 page）有意义。
+    HCAPTCHA = "hcaptcha"
     VISUAL_ELEMENT = "visual_element"
     MANUAL_FALLBACK = "manual_fallback"
     # HOLD — a "press-and-hold" human-presence challenge (e.g. Outlook
@@ -153,6 +159,16 @@ class VisualChallengeRequest:
     submit_element: Optional[Any] = None
     #: 期望字符数。给定时严格校验长度，不符即拒判；留空则接受 4~6 位。
     expected_char_count: Optional[int] = None
+
+    # ── hcaptcha 专用（0.7.0）────────────────────────────────────────
+    #: 挑战 iframe / 承载元素。留空则由执行器按
+    #: `iframe[src*="newassets.hcaptcha.com/captcha/v1/"]` 自行查找。
+    challenge_iframe: Optional[Any] = None
+    #: requester_question 的语言键。`auto` 时中文优先（zh/zh-cn），
+    #: 否则回退 en；显式给 `en`/`zh` 时只取该键，缺失再回退。
+    question_language: str = "auto"
+    #: 执行参数覆盖：{"max_rounds": int, "prompt": str, "engine": obj}。
+    hcaptcha: Optional[Dict[str, Any]] = None
 
 
 @dataclass

@@ -417,6 +417,73 @@ class LlmVisionExtractor:
             },
         )
 
+    def ask(
+        self,
+        *,
+        image_bytes: Optional[bytes] = None,
+        image_path: Optional[Path] = None,
+        prompt: str,
+    ) -> OcrResult:
+        """通用视觉问答：返回模型的**原始回答文本**，不做任何解析。
+
+        刻意只做一件事——把「一张图 + 一段提示词」送进同一条传输管道。题型
+        语义（判格 / 判点 / 判拖拽）全部留给调用方（``slidex.vision.hcaptcha``），
+        这样引擎层不会随验证码形态增加而膨胀，也便于换模型/换网关时行为一致。
+
+        与 ``read_chars`` 一样：截断时 ``confidence=0.0`` 但保留正文，让上层
+        能区分「没认清」与「没说完」。
+        """
+        if not self.config.configured:
+            return OcrResult(
+                text="",
+                confidence=0.0,
+                provider="llm-vision",
+                metadata={"error_code": "vision_not_configured"},
+            )
+
+        data = _load_image_bytes(image_bytes, image_path)
+        if not data:
+            return OcrResult(
+                text="",
+                confidence=0.0,
+                provider="llm-vision",
+                metadata={"error_code": "missing_image_input"},
+            )
+
+        started = time.monotonic()
+        try:
+            body = self._post(self._payload_for(data, prompt))
+        except urllib.error.HTTPError as exc:
+            logger.warning(f"llm vision: HTTP {exc.code} from vision endpoint")
+            return OcrResult(
+                text="", confidence=0.0, provider="llm-vision",
+                metadata={"error_code": f"vision_http_{exc.code}"},
+            )
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            logger.warning(f"llm vision: request failed: {exc}")
+            return OcrResult(
+                text="", confidence=0.0, provider="llm-vision",
+                metadata={"error_code": "vision_request_failed"},
+            )
+
+        raw = self._extract_message_text(body)
+        truncated = _was_truncated(body)
+        usage = _extract_usage(body)
+        metadata: Dict[str, Any] = {
+            "model": self.config.model,
+            "truncated": truncated,
+            "latency_ms": round((time.monotonic() - started) * 1000, 1),
+            "usage": usage,
+        }
+        if not raw.strip():
+            metadata["error_code"] = "vision_empty_response"
+        return OcrResult(
+            text=raw.strip(),
+            confidence=0.0 if truncated or not raw.strip() else 1.0,
+            provider="llm-vision",
+            metadata=metadata,
+        )
+
     def locate_targets(
         self,
         *,

@@ -44,6 +44,14 @@ class SlidexConfig:
     #: 点击半径（页面像素）与点击间隔区间（毫秒），用于人工化点击节奏。
     point_click_radius_px: float = 6.0
     point_inter_click_delay_ms: Tuple[int, int] = (350, 900)
+    # ── hCaptcha (0.7.0) ──
+    # 一道挑战最多重解几轮。刻意小而保守：hCaptcha 判错只会提高后续难度，
+    # 反复重解等于在风控前暴露劣质样本，宁可失败交给调用方按轮次决策。
+    hcaptcha_max_rounds: int = 3
+    # 9 宫格点击让位：点在格中心，此值只用于抖动上限（页面上格子弹跳感更强）。
+    hcaptcha_tile_padding_px: float = 3.0
+    # 空则用内置提示词；给了则整体替换（题面仍会注入到末尾）。
+    hcaptcha_label_prompt: Optional[str] = None
 
     # ── paths ──
     browser_data_dir: Optional[str] = None
@@ -136,6 +144,13 @@ class SlidexConfig:
             point_inter_click_delay_ms=cls._safe_delay_pair(
                 os.environ.get("SLIDEX_POINT_INTER_DELAY_MS", ""), (350, 900)
             ),
+            hcaptcha_max_rounds=cls._safe_int(
+                os.environ.get("SLIDEX_HCAPTCHA_MAX_ROUNDS", ""), 3
+            ),
+            hcaptcha_tile_padding_px=cls._safe_float(
+                os.environ.get("SLIDEX_HCAPTCHA_TILE_PADDING", ""), 3.0
+            ),
+            hcaptcha_label_prompt=os.environ.get("SLIDEX_HCAPTCHA_PROMPT") or None,
             browser_data_dir=os.environ.get("SLIDEX_BROWSER_DATA_DIR") or None,
             debug_screenshot_dir=os.environ.get("SLIDEX_DEBUG_SCREENSHOT_DIR") or None,
             calibration_dir=os.environ.get("SLIDEX_CALIBRATION_DIR") or None,
