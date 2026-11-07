@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "slidex"
-version = "0.7.0"
-description = "专业滑块验证码求解库 | Professional Slider CAPTCHA Solver — Multi-provider auto-detection, CDP mode, plugin-extensible"
+version = "0.8.0"
+description = "专业滑块验证码求解库 | Professional CAPTCHA Solver — Multi-provider auto-detection, CDP mode, point-select, hCaptcha, PX press-token service, plugin-extensible"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [{name = "Slidex Authors"}]
-keywords = ["captcha", "slider", "point-select", "graph-chars", "ocr", "llm-vision", "nocaptcha", "playwright", "opencv", "automation"]
+keywords = ["captcha", "slider", "point-select", "graph-chars", "hcaptcha", "perimeterx", "px", "press-token", "captcha-service", "ocr", "llm-vision", "nocaptcha", "playwright", "opencv", "automation"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -50,6 +50,14 @@ remote = [
     "uvicorn[standard]>=0.29.0,<1.0.0",
     "pydantic>=2.7.0,<3.0.0",
 ]
+# 自建打码站（slidex.service）：与 remote 同依赖，单独成 extra 便于只装服务端。
+# 启动：uvicorn slidex.service.app:app --host 0.0.0.0 --port 8000
+server = [
+    "fastapi>=0.111.0,<2.0.0",
+    "starlette<2.0.0",
+    "uvicorn[standard]>=0.29.0,<1.0.0",
+    "pydantic>=2.7.0,<3.0.0",
+]
 dev = [
     "pytest>=8.0,<10.0",
     "pytest-asyncio>=0.24,<2.0",
@@ -59,7 +67,7 @@ dev = [
     "httpx2>=2.0.0,<3.0.0",
 ]
 all = [
-    "slidex[automation-kit,remote,vision,dev]",
+    "slidex[automation-kit,remote,vision,server,dev]",
 ]
 
 [tool.setuptools.packages.find]

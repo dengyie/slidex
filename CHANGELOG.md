@@ -16,6 +16,109 @@ provider 治理波（配合 automation-kit 0.6.0）：`visual.challenge` 迎来�
 - `automation-kit` extra 兼容范围扩展至 `>=0.5.0,<0.7.0`（kit 0.6.0 的多 provider
   registry / manifest priority / 健康账本为本依赖的前置）。
 
+## [0.8.0] - 2026-11-07
+
+新增 PerimeterX（PX）press-token 求解与**可自托管打码站**：headless Chromium
+打开 hsprotect iframe（或站点页），等 PX JS 写入 `_px3`，从 cookie jar 抽出
+四件套 `{"px3","pxde","pxvid","pxcts"}`；成功判据严格按需求单 §3.3——
+**`px3` 必须含 `:1000:`**。同时提供 captcha.run 兼容的异步任务协议与
+`geetest_v3` 兼容层，旧调用方无需改动。
+
+### Added
+- **`slidex/px/` 新包**：
+  - `models.py`：`PxPressRequest` / `PxPressResult` / `PxRequestError`。payload 支持
+    camelCase 与 snake_case；`appId` 必填，press 需 `challengeUrl`、silent 需
+    `websiteURL`；国家→时区/locale 映射（未知回退美东/en-US）；timeout 夹取
+    10–150s、poll 0.25–10s；`proxy` 规范化为 `{host,port,login,password}` 并派生
+    Playwright context proxy；错误 kind 区分可重试与确定性失败。
+  - `cookies.py`：四件套抽取（`_` 前缀/大小写归一化、忽略 `pxhd/pxcts_h/px2`）、
+    `is_pass_token`（`:1000:`）、`redact_token`（只留前缀+长度）、
+    `parse_packed_token`（JSON / base64 JSON / querystring / `~~~` 分段，绝不抛）、
+    `looks_blocked`（403/429 与 PX 拦截文案）。
+  - `solver.py`：`PxPressSolver`（共享 Chromium 农场 + 每任务独立 context，
+    context 级 proxy，UA/时区/locale 对齐，反自动化探针注入，cookie 双域注入）；
+    通过级 token 立即返回，非通过级给 10s 宽限后判 `px_token_blocked`；
+    首屏 403/429/404 直接 fail-fast；并发信号量 + 排队超时返回 `solver_busy`。
+- **`slidex/service/` 打码站**（`slidex[server]`）：
+  - `POST /v1/solve`：同步接口，`{"type": ...}` → `{"code","msg","data"}`；PX 的
+    `data` 即四件套。
+  - `POST /v2/tasks/` + `GET /v2/tasks/{id}`：captcha.run 兼容协议，`taskId` 幂等，
+    内存 TTL 30 分钟，完成即弃。
+  - `GET /health`：`{ok, active_tasks, done_24h, fail_24h, types}`。
+  - 鉴权：`Authorization: Bearer` 或 `X-Api-Key`，key 读 `SLIDEX_CAPTCHA_KEYS` /
+    `CAPTCHA_RUN_KEY`；两者皆空时开放模式并打警告。
+  - handler 注册表支持类型别名（`press` / `PxCaptcha2` / `px_silent` 等），
+    `geetest_v3` 转调 `SliderSolver` 并透传 proxy。
+- **配置**：`SLIDEX_PX_CONCURRENCY`（默认 5）、`SLIDEX_PX_HEADLESS`（默认 1）。
+- **再导出**：`slidex` 顶层新增 `PxPressSolver` / `PxPressRequest` / `PxPressResult`
+  / `is_pass_token` / `extract_px_tokens` 等。
+- **root 部署适配**：`PxPressSolver` 在 root 下自动补 `--no-sandbox`（Chromium 以
+  root 运行否则拒绝启动）；非 root 保持沙箱。
+
+### Fixed
+- **`aliyun-captcha-js` 选择器兼容新 DOM**（2026-11-04 chat.z.ai 实测）：图片元素
+  id 从包裹 div 挪到 `<img>` 自身（`img#aliyunCaptcha-img` /
+  `img#aliyunCaptcha-puzzle`），旧选择器 `#aliyunCaptcha-img img` 命不中导致
+  `extract_images` 拿 None；弹窗 id 同时兼容 `-window-popup` 与 `-window-float`。
+  选择器改为并集，两种形态都命中。
+
+### Notes
+- **同 IP 铁律**：payload 带 `proxy` 时，浏览器 context 与全部出站请求共用该
+  sticky proxy；出口不一致 token 即作废。空 proxy 仅限本机调试。
+- **不落盘**：任务只在内存，日志只打印 token 前缀与长度，不输出完整 cookie/token。
+- **成功判据**：只认 `px3` 含 `:1000:`；非通过级 token 不冒充成功。
+- **能力边界**：只做协议/浏览器层，不逆向 PX 的 wasm/JS 指纹算法，不做 IP 信誉
+  对抗；未在真实 signup.live.com 做回归（仅本地 Chromium 仿真）。
+- 测试 +119：请求模型 34、cookie 逻辑 33、求解器（假 context）19、服务路由 30、
+  本地 Chromium 仿真 3（本地 HTTP 页写 cookie，验证真实链路；浏览器不可用时跳过）。
+  全量 951 passed / 18 skipped（基线 832 + 119，零回归；skipped 为 automation_core
+  未装时的 kit 集成用例）。
+
+## [0.7.1] - 2026-11-07
+
+新增 hCaptcha 兼容（参考 QIN2DIM/hcaptcha-challenger 的**协议形状**，clean-room
+重写）：作为 `ChallengeType.HCAPTCHA` 由 `VisualChallengeSolver` 分派，覆盖
+9 宫格二选 / 区域点选 / 拖放三型，识别复用既有 `SLIDEX_VISION_*` 多模态通道。
+
+### Added
+- **`slidex/vision/hcaptcha.py` 新模块**（两段式解耦，与 `point_select` 同构）：
+  - 纯规划器/解析器：`plan_grid_clicks`（9 真值 → 格子中心，全空兜底点一格）、
+    `plan_drag_gesture`（归一化起止点 → 二次贝塞尔点列，起止缓动 + 确定性微抖动）、
+    `parse_grid_answer` / `parse_points_answer` / `parse_drag_answer`（容错 JSON /
+    markdown fence / 裸文本，1-based 与 0-based 二义按「是否出现 0」判定）。
+  - `LlmHcaptchaEngine`：把三型题面翻译成固定英文键名的 JSON 协议，只依赖
+    `LlmVisionExtractor.ask`，可整体替换（本地 ONNX / 其它多模态）。
+  - `HcaptchaExecutor`：查找 checkbox/challenge iframe → 拟人点击 → 截图 →
+    问引擎 → 点格子/点坐标/拖拽 → 提交 → 读 `/checkcaptcha/` 判决或
+    `h-captcha-response` token。
+- **`ChallengeType.HCAPTCHA`**（`slidex/vision/models.py`），`VisualChallengeRequest`
+  新增 `challenge_iframe` / `question_language` / `hcaptcha` 三个可选字段。
+- **`LlmVisionExtractor.ask`**（`slidex/ocr/llm.py`）：通用「图 + 提示词 → 原始
+  回答」方法，复用同一条传输/截断识别/网关重试管道；不改动既有
+  `read_chars` / `locate_targets` 签名。
+- **配置项**（`SlidexConfig`，均支持 env）：`hcaptcha_max_rounds`
+  （`SLIDEX_HCAPTCHA_MAX_ROUNDS`，默认 3）、`hcaptcha_tile_padding_px`
+  （`SLIDEX_HCAPTCHA_TILE_PADDING`，默认 3.0）、`hcaptcha_label_prompt`
+  （`SLIDEX_HCAPTCHA_PROMPT`，留空用内置提示词）。
+- **再导出**：`slidex.vision` / `slidex` 顶层新增执行器、引擎、规划器与解析器。
+
+### Notes
+- **重试纪律**：提交后不重试。`hcaptcha_failed` / `hcaptcha_verdict_pending`
+  一律 `retryable=False`（同一题重复提交只会追加判罚样本）；仅
+  `hcaptcha_challenge_timeout` / `screenshot_failed`（尚未触碰页面）标为可重试。
+  提交后若题面画面原地不动，执行器直接停手；只有画面刷新（进入下一 crumb）才继续。
+- **GPL 边界**：`hcaptcha-challenger` 是 GPL-3.0，slidex 是 MIT。本次**未**引入其
+  任何代码或提示词，仅参考公开协议（payload 字段、三型交互、判决点）。同理
+  **不逆向** `hsw.js`、不解析 msgpack 密文：优先读 `/getcaptcha/` 明文 JSON，
+  拿不到时截挑战画面 + 读 DOM 题面。
+- **能力边界**：只覆盖视觉/答题层；通过率同时受浏览器指纹与 IP 信誉影响，
+  后者属于 stealth 层，不在本能力职责内。未在真实站点做回归。
+- 不改变 `ProviderRegistry.auto_detect`：hCaptcha 不是滑块 provider，不走
+  `CaptchaProvider` 的 `locate_elements → find_gap → perform_slide` 流水线。
+- 测试 +67：规划器/解析器 30、引擎 10、执行器 14、solver 分派 11、本地 Chromium
+  仿真 2（`page.route` 伪造 hCaptcha iframe，不碰真实站点；浏览器不可用时跳过）。
+  其余用例全部假页面 / 假引擎，零网络。全量 832 passed / 18 skipped。
+
 ## [0.6.45] - 2026-11-02
 
 `AliyunJigsawMatcher` 性能向量化与鲁棒性收口，行为逐值等价（6 场景锚点回归）。

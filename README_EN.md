@@ -21,6 +21,8 @@ Slidex has evolved from a slider CAPTCHA solver into the visual capability platf
 **Features**:
 - 🎯 **Multi-provider support** — Built-in Aliyun NoCaptcha, AliyunCaptcha.js 2.0, GeeTest adapters with auto-detection
 - 🔎 **Unified vision API** — `slidex.vision` models slider, OCR, and manual fallback challenges
+- 🧩 **hCaptcha support** — 9-grid binary select, area select, and drag-drop, on the same multimodal channel
+- 🔑 **PX press-token** — PerimeterX press/silent quadruple (`px3/pxde/pxvid/pxcts`, `:1000:` gate) via Chromium + a self-hosted solving station (`/v1/solve`, captcha.run-compatible `/v2/tasks`, `/health`)
 - 🧾 **Built-in OCR surface** — `slidex.ocr` exposes `OcrTextExtractor`, `OcrResult`, and `FakeOcrExtractor`
 - 🔌 **Plugin-based extension** — Implement custom providers in 10 minutes
 - 🌐 **CDP mode** — Connect to existing browser, ideal for TypeScript/Node integration
@@ -35,6 +37,8 @@ pip install -e .
 playwright install chromium
 pip install -e ".[remote]"   # optional: remote control API
 pip install -e ".[automation-kit]"  # optional: native automation-kit adapter
+pip install -e ".[vision]"   # optional: YOLO backend for image-only gap detection
+pip install -e ".[server]"   # optional: self-hosted solving station (FastAPI/uvicorn)
 ```
 
 ## Quick Start
@@ -81,6 +85,130 @@ ocr_result = await solver.solve(
     )
 )
 ```
+
+### hCaptcha
+
+hCaptcha is a different protocol from the slider family: challenges live inside
+`iframe[src^="https://newassets.hcaptcha.com/captcha/v1/"]`, the verdict comes
+from `/checkcaptcha/` as `{"pass": bool}`, and the success artifact is an
+`h-captcha-response` token (not a cookie). It therefore does not go through the
+`CaptchaProvider` pipeline — it is dispatched as `ChallengeType.HCAPTCHA` by
+`VisualChallengeSolver`, reusing the same `SLIDEX_VISION_*` multimodal channel.
+
+```python
+from slidex.vision import ChallengeType, VisionContext, VisualChallengeRequest
+from slidex.vision import VisualChallengeSolver
+
+solver = VisualChallengeSolver()
+result = await solver.solve(
+    VisualChallengeRequest(
+        challenge_type=ChallengeType.HCAPTCHA,
+        context=VisionContext.PLAYWRIGHT_PAGE,
+        page=page,                       # required: hCaptcha is live-page only
+        question_language="auto",        # auto → zh first, then en
+        hcaptcha={"max_rounds": 3},      # optional: round cap
+    )
+)
+
+if result.success:
+    token = await page.input_value("textarea[name='h-captcha-response']")
+```
+
+Supported challenge types:
+
+| Type | Detected by | Page action |
+|------|-------------|-------------|
+| `image_label_binary` | `.task` count == 9 | click the center of selected tiles |
+| `image_label_area_select` | `.task` count == 0 and not a drag | click normalized coordinates |
+| `image_drag_drop` | engine reports a drag | bezier drag (eased ends + micro jitter) |
+
+Verdict and failure handling:
+
+- `success=True` means `/checkcaptcha/` returned `pass` (or an
+  `h-captcha-response` token is present).
+- **No retry after submit**: `hcaptcha_failed` / `hcaptcha_verdict_pending` are
+  `retryable=False`. Re-submitting the same answer only adds a penalized sample.
+  Only `hcaptcha_challenge_timeout` / `screenshot_failed` (page not yet touched)
+  are marked retryable.
+- If the challenge image does not change after submit, the executor stops; it
+  only continues to another page (crumb) when the image actually refreshed.
+
+Scope limits (no over-promising):
+
+- Covers the **visual/answering layer** only. Pass rate also depends on browser
+  fingerprint and IP reputation, which belongs to the stealth layer.
+- **No** `hsw.js` reversing and **no** msgpack payload decryption: it prefers
+  the plain JSON from `/getcaptcha/` and falls back to screenshotting the
+  challenge and reading the prompt from DOM — both rely only on public page
+  structure.
+
+### PX press-token & self-hosted solving station
+
+For PerimeterX (PX) press/silent challenges, slidex ships a self-hostable
+solving station: a headless Chromium opens the hsprotect iframe (or the site
+page), waits for PX JS to write `_px3`, then harvests the quadruple
+`{"px3","pxde","pxvid","pxcts"}` from the cookie jar. The only success
+criterion: **`px3` must contain `:1000:`** (rejected tokens usually carry
+`:200:`).
+
+```python
+from slidex.px import PxPressRequest, PxPressSolver
+
+solver = PxPressSolver(headless=True, concurrency=5)
+result = await solver.solve(
+    PxPressRequest.from_payload(
+        {
+            "appId": "PXzC5j78di",
+            "challengeUrl": "https://iframe.hsprotect.net/...",
+            "websiteURL": "https://signup.live.com/",
+            "country": "US",
+            "proxy": {"host": "1.2.3.4", "port": 8000,
+                      "login": "u", "password": "p"},
+        }
+    )
+)
+if result.success:
+    px3, pxde, pxvid, pxcts = (result.tokens[k] for k in ("px3", "pxde", "pxvid", "pxcts"))
+```
+
+Start the station (`slidex[server]`):
+
+```bash
+SLIDEX_CAPTCHA_KEYS=your-key uvicorn slidex.service.app:app --host 0.0.0.0 --port 8000
+```
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /v1/solve` | Synchronous solve: `{"type":"px_press", ...}` → `{"code":0,"data":{quadruple}}` |
+| `POST /v2/tasks/` + `GET /v2/tasks/{id}` | captcha.run-compatible async task protocol |
+| `GET /health` | `{ok, active_tasks, done_24h, fail_24h, types}` |
+
+```bash
+curl -s http://127.0.0.1:8000/v1/solve \
+  -H 'Authorization: Bearer your-key' -H 'Content-Type: application/json' \
+  -d '{"type":"px_press","appId":"PXzC5j78di",
+       "challengeUrl":"https://iframe.hsprotect.net/...",
+       "websiteURL":"https://signup.live.com/","country":"US"}'
+```
+
+Two error layers: HTTP status covers transport/auth/params (400/401/422/429/500),
+while the body `code` describes the solve result (0 ok; 1001 generic failure;
+1002 timeout; 1003 IP/appId blocked; 1004 concurrency exhausted). A failed solve
+is usually HTTP 200 with a non-zero `code` plus `data.kind` and
+`data.retryable`, so callers can decide whether to retry.
+
+Key rules:
+
+- **Same-IP rule**: whenever `proxy` is present, the browser context and every
+  outbound request use it; a mismatched egress voids the tokens. An empty proxy
+  means direct egress — local testing only.
+- **No persistence**: tasks live in memory only (30-min TTL) and are dropped on
+  completion; logs print token prefixes and lengths, never full cookie/token values.
+- **Concurrency**: `SLIDEX_PX_CONCURRENCY` (default 5); queue overflow returns
+  `solver_busy`.
+- **Compatibility**: `type` accepts aliases such as `px_press` / `press` /
+  `pxcaptcha2` / `silent` (case- and hyphen-insensitive); `geetest_v3` routes to
+  `SliderSolver` for existing callers.
 
 ### OCR API
 
@@ -336,6 +464,13 @@ config = SlidexConfig(
 | `SLIDEX_REMOTE_TIMEOUT` | `180` | Remote fallback timeout (seconds) |
 | `SLIDEX_TELEMETRY_ENABLED` | `1` | Enable structured E2E telemetry |
 | `SLIDEX_TELEMETRY_DIR` | `~/.slidex/telemetry` | Telemetry JSONL output directory |
+| `SLIDEX_HCAPTCHA_MAX_ROUNDS` | `3` | Max rounds per hCaptcha challenge |
+| `SLIDEX_HCAPTCHA_TILE_PADDING` | `3.0` | Tile click jitter cap (px) |
+| `SLIDEX_HCAPTCHA_PROMPT` | empty (built-in prompt) | Override the hCaptcha solving prompt |
+| `SLIDEX_CAPTCHA_KEYS` | empty (open mode) | Station API keys, comma-separated |
+| `CAPTCHA_RUN_KEY` | empty | Single-key alias for captcha.run compatibility (`SLIDEX_CAPTCHA_KEYS` wins) |
+| `SLIDEX_PX_CONCURRENCY` | `5` | Max concurrent PX solves |
+| `SLIDEX_PX_HEADLESS` | `1` | Run PX solving headless (set 0 for debugging) |
 
 ### 11. Artifacts and automation-kit adapters
 

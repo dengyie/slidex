@@ -21,6 +21,8 @@ Slidex 已从滑块验证码求解库升级为 `automation-kit` 生态的视觉�
 **特性**：
 - 🎯 **多供应商支持** — 内置 Aliyun NoCaptcha、AliyunCaptcha.js 2.0、GeeTest 适配器，自动检测
 - 🔎 **统一视觉接口** — `slidex.vision` 统一描述 slider、OCR、manual fallback
+- 🧩 **hCaptcha 兼容** — 9 宫格二选 / 区域点选 / 拖放三型，复用多模态视觉通道
+- 🔑 **PX press-token** — PerimeterX press/silent 四件套（`px3/pxde/pxvid/pxcts`，`:1000:` 判据），内置可自托管打码站（`/v1/solve`、captcha.run 兼容 `/v2/tasks`、`/health`）
 - 🖼️ **纯图片滑块识别** — `SliderImageSolver` 只给图片即可定位缺口，无需浏览器/网络
 - 🧾 **OCR 能力内建** — `slidex.ocr` 提供 `OcrTextExtractor` / `OcrResult` / `FakeOcrExtractor`
 - 🔌 **插件式扩展** — 10 分钟实现自定义 Provider，无需修改核心代码
@@ -37,6 +39,7 @@ playwright install chromium
 pip install -e ".[remote]"   # 可选：远程控制 API
 pip install -e ".[automation-kit]"  # 可选：native automation-kit 适配
 pip install -e ".[vision]"   # 可选：纯图片无块图缺口检测的 YOLO 后端
+pip install -e ".[server]"   # 可选：自建打码站（FastAPI/uvicorn）
 ```
 
 ## 快速开始
@@ -93,6 +96,123 @@ slider_result = await solver.solve(
     )
 )
 ```
+
+### hCaptcha
+
+hCaptcha 与滑块族是两套协议：挑战运行在
+`iframe[src^="https://newassets.hcaptcha.com/captcha/v1/"]` 内，判决走
+`/checkcaptcha/` 的 `{"pass": bool}`，成功产物是 `h-captcha-response` token
+（不是 cookie）。因此它不走 `CaptchaProvider` 流水线，而是作为
+`ChallengeType.HCAPTCHA` 由 `VisualChallengeSolver` 分派。识别复用同一套
+`SLIDEX_VISION_*` 多模态通道，无需额外配置。
+
+```python
+from slidex.vision import ChallengeType, VisionContext, VisualChallengeRequest
+from slidex.vision import VisualChallengeSolver
+
+solver = VisualChallengeSolver()
+result = await solver.solve(
+    VisualChallengeRequest(
+        challenge_type=ChallengeType.HCAPTCHA,
+        context=VisionContext.PLAYWRIGHT_PAGE,
+        page=page,                       # 必填：hCaptcha 全程在活页面上
+        question_language="auto",         # 题面语种：auto 中文优先，再回退 en
+        hcaptcha={"max_rounds": 3},       # 可选：轮次上限
+    )
+)
+
+if result.success:
+    token = await page.input_value("textarea[name='h-captcha-response']")
+```
+
+支持的三型挑战：
+
+| 题型 | 判定依据 | 页面动作 |
+|------|---------|---------|
+| `image_label_binary` | `.task` 数量 = 9 | 点击命中的格子中心 |
+| `image_label_area_select` | `.task` 数量 = 0 且拖放判定不成立 | 按归一化坐标点击 |
+| `image_drag_drop` | 引擎判定为拖放 | 贝塞尔路径拖拽（起止缓动 + 微抖动） |
+
+判决与失败处理：
+
+- `success=True` 表示 `/checkcaptcha/` 回了 `pass`（或已拿到
+  `h-captcha-response` token）。
+- **提交后不重试**：`hcaptcha_failed` / `hcaptcha_verdict_pending` 一律
+  `retryable=False`——同一题重复提交只会追加判罚样本。只有
+  `hcaptcha_challenge_timeout` / `screenshot_failed`（尚未触碰页面）标为可重试。
+- 提交后若题面画面**原地不动**，执行器直接停手；只有画面已刷新（进入下一
+  crumb）才继续解下一页。
+
+能力边界（不夸大）：
+
+- 只覆盖**视觉/答题层**。通过率同时受浏览器指纹与 IP 信誉影响，那属于
+  stealth 层，不在本能力的职责内。
+- **不逆向** `hsw.js`、不解析 msgpack 密文载荷：优先读 `/getcaptcha/` 的明文
+  JSON；拿不到时直接截挑战画面 + 读 DOM 题面，两条路都只依赖公开页面结构。
+
+### PX press-token 与自建打码站
+
+针对 PerimeterX（PX）的 press/silent 挑战，slidex 提供一个可自托管的打码站：
+headless Chromium 打开 hsprotect iframe（或站点页），等 PX JS 自行写入
+`_px3`，再从 cookie jar 抽出四件套 `{"px3","pxde","pxvid","pxcts"}`。
+成功判据只有一条：**`px3` 必须含 `:1000:`**（拒绝级常见 `:200:`）。
+
+```python
+from slidex.px import PxPressRequest, PxPressSolver
+
+solver = PxPressSolver(headless=True, concurrency=5)
+result = await solver.solve(
+    PxPressRequest.from_payload(
+        {
+            "appId": "PXzC5j78di",
+            "challengeUrl": "https://iframe.hsprotect.net/...",
+            "websiteURL": "https://signup.live.com/",
+            "country": "US",
+            "proxy": {"host": "1.2.3.4", "port": 8000,
+                      "login": "u", "password": "p"},
+        }
+    )
+)
+if result.success:
+    px3, pxde, pxvid, pxcts = (result.tokens[k] for k in ("px3", "pxde", "pxvid", "pxcts"))
+```
+
+启动打码站（`slidex[server]`）：
+
+```bash
+SLIDEX_CAPTCHA_KEYS=your-key uvicorn slidex.service.app:app --host 0.0.0.0 --port 8000
+```
+
+三种入口：
+
+| 接口 | 用途 |
+|------|------|
+| `POST /v1/solve` | 同步求解，`{"type":"px_press", ...}` → `{"code":0,"data":{四件套}}` |
+| `POST /v2/tasks/` + `GET /v2/tasks/{id}` | captcha.run 兼容的异步任务协议 |
+| `GET /health` | `{ok, active_tasks, done_24h, fail_24h, types}` |
+
+```bash
+curl -s http://127.0.0.1:8000/v1/solve \
+  -H 'Authorization: Bearer your-key' -H 'Content-Type: application/json' \
+  -d '{"type":"px_press","appId":"PXzC5j78di",
+       "challengeUrl":"https://iframe.hsprotect.net/...",
+       "websiteURL":"https://signup.live.com/","country":"US"}'
+```
+
+错误语义分两层：HTTP 状态码表达传输/鉴权/参数（400/401/422/429/500），
+响应体 `code` 表达求解结果（0 成功；1001 通用失败；1002 超时；1003 IP/appId
+被拦；1004 并发已满）。求解失败通常是 HTTP 200 + 非零 `code`，并带
+`data.kind` 与 `data.retryable`，调用方据此决定是否重试。
+
+要点：
+
+- **同 IP 铁律**：任务里只要带了 `proxy`，浏览器 context 与所有出站请求都走它；
+  出口不一致会让 token 直接作废。空 proxy 表示直连，仅限本机调试。
+- **不落盘**：任务只存在内存里（30 分钟 TTL），完成即弃；日志只打印 token
+  前缀与长度，不输出完整 cookie/token。
+- **并发**：`SLIDEX_PX_CONCURRENCY`（默认 5），排队超时返回 `solver_busy`。
+- **兼容**：`type` 支持别名 `px_press` / `press` / `pxcaptcha2` / `silent` 等
+  （大小写与连字符不敏感）；`geetest_v3` 转调 `SliderSolver` 保留旧调用方。
 
 ### OCR API
 
@@ -447,6 +567,13 @@ config = SlidexConfig(
 | `SLIDEX_REMOTE_TIMEOUT` | `180` | 远程兜底超时（秒） |
 | `SLIDEX_TELEMETRY_ENABLED` | `1` | 启用结构化 E2E 埋点 |
 | `SLIDEX_TELEMETRY_DIR` | `~/.slidex/telemetry` | telemetry JSONL 输出目录 |
+| `SLIDEX_HCAPTCHA_MAX_ROUNDS` | `3` | hCaptcha 单次挑战最多解几轮 |
+| `SLIDEX_HCAPTCHA_TILE_PADDING` | `3.0` | 九宫格点击抖动上限（像素） |
+| `SLIDEX_HCAPTCHA_PROMPT` | 空（内置提示词） | 覆盖 hCaptcha 判题提示词 |
+| `SLIDEX_CAPTCHA_KEYS` | 空（开放模式） | 打码站 API key，逗号分隔多把 |
+| `CAPTCHA_RUN_KEY` | 空 | 兼容 captcha.run 的单 key 写法（`SLIDEX_CAPTCHA_KEYS` 优先） |
+| `SLIDEX_PX_CONCURRENCY` | `5` | PX 求解并发上限 |
+| `SLIDEX_PX_HEADLESS` | `1` | PX 求解是否 headless（调试时可置 0） |
 
 ### 11. E2E 数据监控
 
