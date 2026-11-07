@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import os
+import shlex
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
@@ -85,6 +86,16 @@ def _is_root() -> bool:
     return bool(geteuid) and geteuid() == 0
 
 
+def _env_chromium_args() -> List[str]:
+    """``SLIDEX_PX_CHROMIUM_ARGS`` 追加启动参数（空格分隔）。
+
+    低内存宿主（如 4G 无 swap 的共享 pod）需要收窄 chromium 的进程数与
+    虚拟预留，但这类参数不宜写死在默认值里——通过环境变量按部署点注入。
+    """
+    raw = (os.environ.get("SLIDEX_PX_CHROMIUM_ARGS") or "").strip()
+    return shlex.split(raw) if raw else []
+
+
 def _default_launch_args(*, is_root: bool) -> List[str]:
     """Chromium 启动参数。
 
@@ -135,7 +146,11 @@ class _BrowserFarm:
                 return self._browser
             try:
                 self._pw = await self._playwright_factory()
-                launch_args = _default_launch_args(is_root=_is_root()) + self._extra_args
+                launch_args = (
+                    _default_launch_args(is_root=_is_root())
+                    + self._extra_args
+                    + _env_chromium_args()
+                )
                 self._browser = await self._pw.chromium.launch(
                     headless=self._headless,
                     args=launch_args,
@@ -527,7 +542,7 @@ class PxPressSolver:
                     await add_init_script(_PARENT_MESSAGE_PROBE)
                 except Exception as exc:  # pragma: no cover - 注入失败不阻断
                     logger.debug(f"px: stealth init script skipped: {exc}")
-            self._expose_parent_probe(context, diag)
+            await self._expose_parent_probe(context, diag)
             specs = self._cookie_specs(request)
             if specs:
                 try:
@@ -723,7 +738,7 @@ class PxPressSolver:
         )
 
     @staticmethod
-    def _expose_parent_probe(context: Any, diag: _Diagnostics) -> None:
+    async def _expose_parent_probe(context: Any, diag: _Diagnostics) -> None:
         """把页面侧的 postMessage 观测接到 _Diagnostics。
 
         ``expose_binding`` 在 context 级别生效（每个 frame 都有）；拿不到该方法
@@ -738,7 +753,9 @@ class PxPressSolver:
             diag.parent_message_seen = True
 
         try:
-            expose("__slidexParentMessage__", _on_parent_message)
+            # expose_binding 是 async：必须 await，否则协程从未执行、只留下
+            # "coroutine was never awaited" 警告，页面观测实际是死路。
+            await expose("__slidexParentMessage__", _on_parent_message)
         except Exception:  # pragma: no cover - 重复绑定等竞态
             pass
 

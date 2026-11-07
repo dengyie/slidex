@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.9.4] - 2026-11-08
+
+pxed（4G 无 swap 共享 pod）常态化部署专项：修掉宿主全局 OOM 杀 chromium
+的 `Target crashed`，并修一个服务日志里实际出现过的真 bug。
+
+### Fixed
+- **`expose_binding` 未 await（真 bug，服务日志实锤）**：
+  `_expose_parent_probe` 里 `expose("__slidexParentMessage__", …)` 是协程
+  却没有 await——uvicorn 日志出现 `coroutine 'BrowserContext.expose_binding'
+  was never awaited`，binding 从未注册，父页 postMessage 观测是死路。
+  改为 `await`，回归测试断言 binding 真实注册 + handler 可调用；
+  变异验证（去掉 await → 测试失败）。
+
+### Added
+- **`SLIDEX_PX_CHROMIUM_ARGS`**：追加 chromium 启动参数的环境变量（空格
+  分隔，经 shlex 解析），供低内存部署点注入收窄参数（如
+  `--renderer-process-limit=4`），不写死默认值；测试覆盖解析与
+  farm→launch 连线。
+
+### Ops（pxed，代码外）
+- `slidex-oom-guard`（supervisor 常驻）：每 2s 把本机 chrome-headless 进程
+  的 `oom_score_adj` 钉到 -500。根因：pod 3.9G 无 swap + overcommit=1，
+  宿主全局 OOM（dmesg 122 次 oom-killer，`constraint=CONSTRAINT_NONE`）
+  专挑 adj=300 的 chromium；cgroup 自身 failcnt=0 不是限额内 OOM。
+  验证：修复前重复 context 循环 1-2 轮即 Target crashed，修复后
+  20/20 轮全绿。
+
+### Verified
+- 全量 996 passed / 18 skipped（+3）。
+
 ## [0.9.3] - 2026-11-08
 
 S3 断层根因修复：0.9.2 的 `sensor_console` 抓到传感器静默退出（19 条

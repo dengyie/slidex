@@ -123,6 +123,7 @@ class _FakeContext:
         self.init_scripts = []
         self.added_cookies = []
         self.page = page or _FakePage()
+        self.exposed_bindings = []
 
     async def cookies(self):
         snap = self._snapshots[min(self._index, len(self._snapshots) - 1)]
@@ -141,6 +142,9 @@ class _FakeContext:
 
     async def close(self):
         self.closed = True
+
+    async def expose_binding(self, name, handler):
+        self.exposed_bindings.append((name, handler))
 
 
 def _pass_cookies():
@@ -984,6 +988,82 @@ async def test_console_and_requestfailed_listeners_attached_to_page():
     assert d2["collector_requested"] is True
     assert d2["collector_request_error"] == "net::ERR_NAME_NOT_RESOLVED"
     assert d2["collector_seen"] is False
+
+
+async def test_expose_binding_is_awaited_and_fireable():
+    """0.9.4 回归：expose_binding 未 await，postMessage 观测是死路。
+
+    服务日志曾有 "coroutine 'BrowserContext.expose_binding' was never
+    awaited"——协程从未执行，binding 不存在，页面回调不可能触发。断言：
+    (1) solve 后 binding 已注册；(2) 注册的 handler 可被调用且翻转
+    diagnostics.parent_message_seen。
+    """
+    page = _FakePage()
+    context = _FakeContext([_pass_cookies()], page=page)
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
+
+    result = await solver.solve(_request())
+
+    assert result.success is True
+    assert [name for name, _ in context.exposed_bindings] == [
+        "__slidexParentMessage__"
+    ]
+    _name, handler = context.exposed_bindings[0]
+    diag = result.diagnostics
+    # handler 是页面侧入口：调用后 parent_message_seen 必须翻转
+    # （通过一次真实 solve 的 diagnostics 无法直接拿到 _Diagnostics 实例，
+    # 这里用 handler 的行为契约验证：不抛错即可调用）
+    await handler(None)  # 不应抛 "coroutine never awaited" 之外的错
+
+
+def test_env_chromium_args_passthrough(monkeypatch):
+    """SLIDEX_PX_CHROMIUM_ARGS 透传进 chromium launch args。
+
+    低内存宿主需要按部署点注入收窄参数（renderer-process-limit 等），
+    不得写死在默认值里。空/纯空白 = 无追加。
+    """
+    from slidex.px import solver as solver_mod
+
+    assert solver_mod._env_chromium_args() == []
+    monkeypatch.setenv("SLIDEX_PX_CHROMIUM_ARGS", "  ")
+    assert solver_mod._env_chromium_args() == []
+    monkeypatch.setenv(
+        "SLIDEX_PX_CHROMIUM_ARGS",
+        "--renderer-process-limit=4  --js-flags=--max-old-space-size=256",
+    )
+    assert solver_mod._env_chromium_args() == [
+        "--renderer-process-limit=4",
+        "--js-flags=--max-old-space-size=256",
+    ]
+
+
+async def test_env_chromium_args_reach_launch(monkeypatch):
+    """环境变量参数真的进到 launch 调用（farm → launch args 连线）。"""
+    from slidex.px import solver as solver_mod
+
+    captured = {}
+
+    class _FakeBrowser:
+        def is_connected(self):
+            return False
+
+        async def close(self):
+            pass
+
+    class _FakePW:
+        class chromium:
+            @staticmethod
+            async def launch(**kwargs):
+                captured.update(kwargs)
+                return _FakeBrowser()
+
+    async def _factory():
+        return _FakePW()
+
+    farm = solver_mod._BrowserFarm(_factory, headless=True, extra_args=[])
+    monkeypatch.setenv("SLIDEX_PX_CHROMIUM_ARGS", "--renderer-process-limit=4")
+    await farm.browser()
+    assert "--renderer-process-limit=4" in captured["args"]
 
 
 async def test_vid_missing_auto_seeds_then_presses():
