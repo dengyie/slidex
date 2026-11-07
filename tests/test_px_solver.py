@@ -76,10 +76,16 @@ class _FakePage:
 
 
 class _FakeResponse:
-    def __init__(self, status, url, frame):
+    def __init__(self, status, url, frame, resource_type="document") -> None:
         self.status = status
         self.url = url
         self.frame = frame
+        self.request = _FakeRequest(resource_type)
+
+
+class _FakeRequest:
+    def __init__(self, resource_type):
+        self.resource_type = resource_type
 
 
 class _FakeContext:
@@ -607,3 +613,49 @@ async def test_mid_task_browser_death_resets_farm_and_fails_fast():
     assert result.retryable_error is True
     assert time.monotonic() - started < 2.0
     assert solver._farm is None
+
+
+class _SubresourcePage(_FakePage):
+    """主帧先回文档，再回若干子资源响应（frame 同为 main_frame）。"""
+
+    def __init__(self, document_status, subresources, *, status=200):
+        super().__init__(status=document_status)
+        self._document_status = document_status
+        self._subresources = list(subresources)
+
+    async def goto(self, url, **kwargs):
+        self.goto_calls.append((url, kwargs))
+        handler = self._response_handlers[0] if self._response_handlers else None
+        if handler is None:
+            return None
+        await handler(_FakeResponse(self._document_status, url, self.main_frame))
+        for status, rtype in self._subresources:
+            await handler(_FakeResponse(status, url + "sub", self.main_frame, rtype))
+        return None
+
+
+async def test_healthy_page_with_404_subresource_is_not_killed():
+    """文档 200 + 404 阻塞脚本：子资源状态不许覆盖文档状态（否则健康页被误杀）。"""
+    page = _SubresourcePage(200, [(404, "script"), (500, "fetch")])
+    context = _FakeContext([[{"name": "_px3", "value": _PASS_PX3}]], page=page)
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
+
+    result = await solver.solve(_request())
+
+    assert result.success is True
+    assert result.error_kind == ""
+
+
+async def test_200_subresource_does_not_mask_real_404_document():
+    """文档 404 + 200 阻塞脚本：仍须按确定性失败早退，不能拖成超时。"""
+    page = _SubresourcePage(404, [(200, "script"), (200, "image")])
+    context = _FakeContext([[]], page=page)
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
+
+    started = time.monotonic()
+    result = await solver.solve(_request())
+
+    assert result.success is False
+    assert result.error_kind == ERR_CHALLENGE_HTTP
+    assert result.retryable_error is False
+    assert time.monotonic() - started < 2.0

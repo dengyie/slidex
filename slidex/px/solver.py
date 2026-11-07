@@ -165,6 +165,31 @@ Object.defineProperty(window, 'chrome', {get: () => window.chrome || {runtime: {
 """
 
 
+def _is_document_response(response: Any) -> bool:
+    """主帧响应是否为「文档」本身（而非 script/img/fetch 等子资源）。
+
+    Playwright 的子资源 ``response.frame`` 也指向 main_frame，因此 frame 相等
+    不足以区分。拿不到 ``request.resource_type`` 时（测试注入的老式假对象）
+    按文档处理，保持既有测试语义不变。
+    """
+    request = getattr(response, "request", None)
+    if request is None:
+        return True
+    try:
+        resource_type = getattr(request, "resource_type", None)
+    except Exception:
+        return False
+    # 某些绑定把 resource_type 实现为方法
+    if callable(resource_type):
+        try:
+            resource_type = resource_type()
+        except Exception:
+            return False
+    if not isinstance(resource_type, str):
+        return True
+    return resource_type == "document"
+
+
 class PxPressSolver:
     """一次调用解一道挑战；并发上限 = ``concurrency``。
 
@@ -319,9 +344,14 @@ class PxPressSolver:
                 try:
                     frame = response.frame
                     if frame is not None and frame == page.main_frame:
-                        # 只记主帧最后一条：重定向链后 target URL 是 302，
-                        # 但真正渲染的是最终文档（可能是 PX 的 403 拦截页）。
-                        page_status["last"] = int(response.status)
+                        # 只认主帧的「文档」响应：子资源（script/img/fetch）的
+                        # response.frame 同样是 main_frame，若无条件记录，一个
+                        # 404 的阻塞脚本会把健康页判死，一个 200 的脚本又会
+                        # 把真 404 页从 fail-fast 拖成超时（实测两个方向都会错）。
+                        if _is_document_response(response):
+                            # 重定向链后 target 是 302，真正渲染的是最终文档
+                            # （可能是 PX 的 403 拦截页），所以留最后一条。
+                            page_status["last"] = int(response.status)
                 except Exception:  # pragma: no cover
                     pass
 

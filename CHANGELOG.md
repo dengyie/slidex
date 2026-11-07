@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.8.2] - 2026-11-08
+
+线上深度验收（第二轮）抓到的回归：0.8.1 引入的「主帧最后一条状态码」在
+**子资源**上也会更新，把两个方向都判错。
+
+### Fixed
+- **子资源状态覆盖文档状态**：Playwright 的 `response.frame` 对 `<script>` /
+  `<img>` / `fetch` 这些子资源同样指向 main_frame，旧代码只比 `frame == main_frame`
+  就记状态，于是：
+  - 文档 200 + 一个 404 的**阻塞**脚本 → 最后记录的是 404 → 健康页被判
+    `challenge_http_error` / `retryable=false` 直接误杀；
+  - 文档 404 + 一个 200 脚本 → 最后记录的是 200 → 本该 fail-fast 的 404 页
+    进入轮询，耗满预算变成 `px_token_timeout`（可重试）。
+  现在只接受 `request.resource_type == "document"` 的响应（`_is_document_response`），
+  取不到类型的老式假对象按文档处理，保持既有测试语义。
+
+### Verified (live, gz-cvm 10.144.144.8:8077)
+- 文档 200 + 404 阻塞脚本：`code=0`，1.4s 成功（修复前被判死）。
+- 文档 404 + 200 阻塞脚本：`code=1001 challenge_http_error`，
+  `retryable=false`，0.1s（修复前拖成超时）。
+- 深度验收 16/16：契约边界 7 项、上下文卫生 6 项（时区/UA/locale/隐身/referer/
+  cookie 落文档）、代理铁律 3 项（含死代理不回退直连）。
+  C1/C2 的验收口径同时修正：对 `http://` 目标 Chromium 走绝对 URI 的 plain GET，
+  不是 CONNECT——原断言只看 CONNECT，属于测试自身误判，非服务缺陷。
+
 ## [0.8.1] - 2026-11-08
 
 线上深度 review 第二轮：8 个根因修复。全部有可复现证据（本地假页面单测 +
