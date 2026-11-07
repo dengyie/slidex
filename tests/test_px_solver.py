@@ -64,6 +64,7 @@ class _FakePage:
         self._status = status
         self.closed = False
         self._response_handlers = []
+        self._event_handlers = {}
         self.main_frame = object()
         self.iframe_frame = object()  # press 双页结构下 challenge 的子 frame
 
@@ -92,6 +93,7 @@ class _FakePage:
     def on(self, event, handler):
         if event == "response":
             self._response_handlers.append(handler)
+        self._event_handlers.setdefault(event, []).append(handler)
 
     async def close(self):
         self.closed = True
@@ -846,6 +848,117 @@ async def test_diagnostics_captcha_js_and_collector_seen():
     assert snap["main_min_js_loaded"] is True and snap["main_min_js_status"] == 200
     assert snap["captcha_js_loaded"] is True
     assert snap["collector_seen"] is True
+
+
+async def test_collector_failed_request_distinguished_from_never_sent():
+    """冒烟报告 §3 P0-2：「collector 没发出」vs「发出但失败」必须可区分。
+
+    beacon 到了网络层但失败（DNS/拒绝/TLS）只有 requestfailed 能证明——
+    requested=true + seen=false + error 有值 = 网络层断；requested=false =
+    传感器在浏览器内静默放弃（执行层断）。response 成功后 error 复位。
+    """
+    from slidex.px.solver import _Diagnostics
+
+    class _FailedReq:
+        url = "https://collector-pxxxxxxxxx.hsprotect.net/api/v2/mst/beacon?uuid=zzz"
+        failure = type("F", (), {"errorText": "net::ERR_CONNECTION_REFUSED"})()
+
+    diag = _Diagnostics()
+    diag.observe_request_failed(_FailedReq())
+    snap = diag.snapshot()
+    assert snap["collector_requested"] is True
+    assert snap["collector_seen"] is False
+    assert snap["collector_request_error"] == "net::ERR_CONNECTION_REFUSED"
+    # URL query（uuid 会话参数）不进诊断
+    assert "uuid" not in snap["collector_request_error"]
+
+    # 非 collector 的失败请求不算
+    class _OtherReq:
+        url = "https://client.hsprotect.net/main.min.js"
+        failure = type("F", (), {"errorText": "net::ERR_TIMED_OUT"})()
+    diag.observe_request_failed(_OtherReq())
+    assert diag.snapshot()["collector_request_error"] == "net::ERR_CONNECTION_REFUSED"
+
+    # 后来重试成功：error 复位，seen=true
+    diag.observe_response(_FakeResponse(
+        200, "https://collector-pxxxxxxxxx.hsprotect.net/api/v2/collector",
+        object(), "xhr",
+    ))
+    snap = diag.snapshot()
+    assert snap["collector_seen"] is True
+    assert snap["collector_request_error"] == ""
+
+
+async def test_sensor_console_captures_and_redacts():
+    """冒烟报告 §3 P0-1：console/pageerror 进 diagnostics.sensor_console。
+
+    PX 静默退出通常在 console 留提示（"App communication failure" 等）。
+    脱敏约束：截断到 200 字符、单任务上限 20 条、空文本不记。
+    """
+    from slidex.px.solver import _Diagnostics
+
+    diag = _Diagnostics()
+    diag.observe_console("error", "App communication failure: api blocked " + "x" * 500)
+    diag.observe_console("warning", "")
+    diag.observe_console("pageerror", "TypeError: Cannot read properties of undefined")
+    snap = diag.snapshot()
+    assert len(snap["sensor_console"]) == 2
+    first = snap["sensor_console"][0]
+    assert first.startswith("error: App communication failure")
+    assert len(first) <= 208  # "error: " 前缀 + 200 截断
+    assert "pageerror: TypeError" in snap["sensor_console"][1]
+
+    # 刷屏保护：超过 20 条后丢弃
+    for i in range(30):
+        diag.observe_console("log", f"noise {i}")
+    assert len(diag.snapshot()["sensor_console"]) == 20
+
+
+async def test_console_and_requestfailed_listeners_attached_to_page():
+    """冒烟报告 §3 P0：console/pageerror/requestfailed 监听真的挂上了 page。
+
+    挂了但没触发没有意义——fake page 在 goto 时派发事件，断言事件流经
+    handler 落进当次任务的 diagnostics（端到端连线，而不只是单元行为）。
+    """
+    page = _FakePage()
+    context = _FakeContext([_pass_cookies()], page=page)
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
+
+    result = await solver.solve(_request())
+
+    assert result.success is True
+    for event in ("console", "pageerror", "requestfailed"):
+        assert event in page._event_handlers, f"{event} listener not attached"
+
+    failed_req = type(
+        "R", (),
+        {"url": "https://collector-pxxxxx.hsprotect.net/api/v2/collector",
+         "failure": type("F", (), {"errorText": "net::ERR_NAME_NOT_RESOLVED"})()},
+    )()
+
+    class _NoisyPage(_FakePage):
+        async def goto(self, url, **kwargs):
+            await asyncio.sleep(0)
+            for h in self._event_handlers.get("console", []):
+                h(type("M", (), {"type": "error", "text": "App communication failure"}))
+            for h in self._event_handlers.get("requestfailed", []):
+                h(failed_req)
+            for h in self._event_handlers.get("pageerror", []):
+                h(RuntimeError("sensor crashed"))
+            return None
+
+    noisy = _NoisyPage()
+    context2 = _FakeContext([_pass_cookies()], page=noisy)
+    solver2 = PxPressSolver(context_factory=lambda opts: _resolve(context2))
+    result2 = await solver2.solve(_request())
+    d2 = result2.diagnostics
+    assert d2["sensor_console"] == [
+        "error: App communication failure",
+        "pageerror: sensor crashed",
+    ]
+    assert d2["collector_requested"] is True
+    assert d2["collector_request_error"] == "net::ERR_NAME_NOT_RESOLVED"
+    assert d2["collector_seen"] is False
 
 
 async def test_vid_missing_auto_seeds_then_presses():

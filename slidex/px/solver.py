@@ -229,8 +229,11 @@ class _Diagnostics:
         self.main_min_js_loaded: bool = False
         self.main_min_js_status: Optional[int] = None
         self.collector_seen: bool = False
+        self.collector_requested: bool = False
+        self.collector_request_error: str = ""
         self.parent_message_seen: bool = False
         self.px_cookie_names_seen: List[str] = []
+        self.sensor_console: List[str] = []
 
     def observe_response(self, response: Any) -> None:
         """按 URL 特征归类一条响应（任务 context 内所有 frame 的都算）。"""
@@ -248,6 +251,46 @@ class _Diagnostics:
             self.main_min_js_status = status
         elif "collector-" in low and ("hsprotect.net" in low or "px-client.net" in low):
             self.collector_seen = True
+            # 发出去又成功了：失败标记复位（重试后通了）
+            self.collector_request_error = ""
+
+    def observe_request_failed(self, request: Any) -> None:
+        """请求发出但失败（DNS/拒绝/TLS/超时）：区分「没发出」vs「发出失败」。
+
+        PX 传感器静默放弃的一个分支就是 collector beacon 发不出去；只有
+        ``requestfailed`` 能证明 beacon 到过网络层。只记 failure 文本一行，
+        不记 URL query（可能带会话参数）。
+        """
+        try:
+            url = str(getattr(request, "url", "") or "")
+        except Exception:
+            return
+        low = url.lower()
+        if not ("collector-" in low and ("hsprotect.net" in low or "px-client.net" in low)):
+            return
+        self.collector_requested = True
+        if self.collector_request_error:
+            return  # 只留第一行，避免刷屏
+        try:
+            failure = getattr(request, "failure", None)
+            text = str(getattr(failure, "errorText", None) or failure or "unknown")
+            self.collector_request_error = text[:200]
+        except Exception:
+            self.collector_request_error = "unknown"
+
+    def observe_console(self, kind: str, text: str) -> None:
+        """传感器执行链的 console/error 提示（PX 静默退出通常留痕于此）。
+
+        脱敏：只存「级别+截断文本」，且单任务上限 20 条——console 可能被
+        页面脚本刷屏，诊断不能反过来变成内存放大器。
+        """
+        text = (text or "").strip()
+        if not text:
+            return
+        if len(self.sensor_console) >= 20:
+            return
+        # 可能带 token/query 的一律按行截断到 200 字符
+        self.sensor_console.append(f"{kind}: {text[:200]}")
 
     def note_iframe_document(self, status: int) -> None:
         self.iframe_loaded = True
@@ -281,8 +324,14 @@ class _Diagnostics:
             "main_min_js_loaded": self.main_min_js_loaded,
             "main_min_js_status": self.main_min_js_status,
             "collector_seen": self.collector_seen,
+            # 冒烟报告 §3 P0-2：区分「collector 没发出」vs「发出但失败」——
+            # requested=true + seen=false + error 有值 = 网络层断；
+            # requested=false = 传感器在浏览器内就静默放弃了（执行层断）。
+            "collector_requested": self.collector_requested,
+            "collector_request_error": self.collector_request_error,
             "parent_message_seen": self.parent_message_seen,
             "px_cookie_names_seen": list(self.px_cookie_names_seen),
+            "sensor_console": list(self.sensor_console),
         }
 
 
@@ -501,6 +550,34 @@ class PxPressSolver:
                     pass
 
             page.on("response", _on_response)
+
+            # 冒烟报告 §3 P0-1/P0-2：传感器静默放弃的最后一块观测盲区。
+            # console/pageerror 抓「浏览器内执行层」退出原因；requestfailed
+            # 抓「beacon 到了网络层但发不出去」。都不改变求解流程，只进诊断。
+            def _on_console(msg: Any) -> None:
+                try:
+                    diag.observe_console(str(getattr(msg, "type", "log")), str(getattr(msg, "text", "")))
+                except Exception:  # pragma: no cover
+                    pass
+
+            def _on_pageerror(err: Any) -> None:
+                try:
+                    diag.observe_console("pageerror", str(err))
+                except Exception:  # pragma: no cover
+                    pass
+
+            def _on_requestfailed(req: Any) -> None:
+                try:
+                    diag.observe_request_failed(req)
+                except Exception:  # pragma: no cover
+                    pass
+
+            try:
+                page.on("console", _on_console)
+                page.on("pageerror", _on_pageerror)
+                page.on("requestfailed", _on_requestfailed)
+            except Exception:  # pragma: no cover - 事件注册失败不阻断
+                logger.debug("px: console/pageerror/requestfailed listeners skipped")
 
             if mode == "press":
                 # 双页结构（需求单 v2 §3.1）：顶层页先落 websiteURL 域并做

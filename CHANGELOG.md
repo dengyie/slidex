@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.9.2] - 2026-11-08
+
+冒烟报告（grok-register §4.1 live，2026-11-08 05:22–05:37）后续：双页结构
+与诊断字段已生效，但真实挑战仍无 token——诊断把断层收敛到「main.min.js
+加载成功但零 collector beacon、零 PX cookie」，即传感器在 headless
+Chromium 内静默放弃上报。本版按报告 §3 落地增量诊断，不做 stealth 加固
+（等有头对比实验结果再定）。
+
+### Added
+- **diagnostics.sensor_console（报告 §3 P0-1）**：`page.on("console")` +
+  `page.on("pageerror")` 挂进任务页，PX 静默退出通常在 console 留痕
+  （"App communication failure" / api blocked）。脱敏：级别+截断 200 字符、
+  单任务上限 20 条（防页面脚本刷屏放大内存）。
+- **diagnostics.collector_requested / collector_request_error（报告
+  §3 P0-2）**：`page.on("requestfailed")` 区分「collector beacon 没发出」
+  （requested=false → 执行层断）vs「发出但失败」（requested=true +
+  error 有值 → 网络层断，记 failure.errorText 一行 200 字符）；response
+  成功后 error 复位。URL query（会话参数）不进诊断。
+
+### Verified
+- 两个诊断路径均变异验证（删监听 → 对应测试失败，恢复后全绿）；
+  全量 992 passed / 18 skipped。
+- 线上实验（S3 重跑 + 有头对比）结果回填冒烟报告 §5。
+
 ## [0.9.1] - 2026-11-08
 
 0.9.0 部署后线上 deep_check 回归抓到的问题（21/23 → 修复目标 23/23）。
