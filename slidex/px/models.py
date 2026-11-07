@@ -147,6 +147,34 @@ def _as_text(value: Any) -> str:
     return str(value).strip()
 
 
+def _validate_url(value: str, field: str) -> None:
+    """URL 只认 http(s)。裸域名/ftp/javascript 会让 Chromium ``goto`` 失败，
+    而那是确定性错误：应在创建任务时 422 暴露，别让调用方重试到超时。"""
+    if not value:
+        return
+    if not (value.startswith("http://") or value.startswith("https://")):
+        raise PxRequestError(
+            f"{field} must be an absolute http(s) URL, got {value!r}"
+        )
+
+
+def _valid_timezone(tz: str) -> bool:
+    """IANA 时区校验。tzdata 缺失的机器上无法校验 → 放行（少拦不误拦）。"""
+    try:
+        from zoneinfo import ZoneInfo
+    except Exception:  # pragma: no cover - 极老解释器
+        return True
+    try:
+        ZoneInfo("UTC")  # 探针：系统的 tzdata 可用才继续
+    except Exception:  # pragma: no cover - 无 tzdata 的容器
+        return True
+    try:
+        ZoneInfo(tz)
+        return True
+    except Exception:
+        return False
+
+
 def _as_cookie_map(value: Any) -> Dict[str, str]:
     """接受 {name: value} 或 [{"name","value"}]，其余形态直接拒绝。"""
     out: Dict[str, str] = {}
@@ -234,6 +262,9 @@ class PxPressRequest:
             _pick(payload, "challengeUrl", "challenge_url", "url")
         )
         website_url = _as_text(_pick(payload, "websiteURL", "website_url", "siteUrl"))
+        # 裸域名/ftp/javascript: 打开必失败且重试无用，提前 422
+        _validate_url(challenge_url, "challengeUrl")
+        _validate_url(website_url, "websiteURL")
 
         mode = _as_text(_pick(payload, "mode", default="")).lower()
         if mode not in {"press", "silent"}:
@@ -247,6 +278,11 @@ class PxPressRequest:
 
         country = _as_text(_pick(payload, "country", default="US")).upper() or "US"
         timezone = _as_text(_pick(payload, "timezone", "timeZone")) or country_default_timezone(country)
+        # 时区不合法会让 Chromium new_page 报 Invalid timezone ID → 服务端把
+        # 确定性错误误标成可重试 internal；PX 新闻时区与出口 IP 不一致还影响
+        # 放行。创建时 422 是「立刻 fail 并写明类别」（需求单 §6）。
+        if not _valid_timezone(timezone):
+            raise PxRequestError(f"timezone is not a valid IANA zone: {timezone!r}")
         locale = _as_text(_pick(payload, "locale", "language")) or country_default_locale(country)
         user_agent = _as_text(_pick(payload, "userAgent", "user_agent")) or DEFAULT_PX_USER_AGENT
 

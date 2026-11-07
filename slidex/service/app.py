@@ -24,6 +24,7 @@ import hmac
 import os
 import time
 from collections import deque
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, Optional, Sequence, Tuple
 
@@ -289,10 +290,24 @@ def create_app(
     auth = _Auth(tuple(keys) if keys is not None else _configured_keys())
     store = TaskStore(ttl_s=task_ttl_s)
 
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        # 关停时先取消在跑任务，再回收共享 Chromium：否则 systemd restart 后
+        # 旧进程的浏览器/pw driver 会苟着，和下一个实例抢内存（1.9G 小机器）。
+        yield
+        await store.cancel_all()
+        close = getattr(px_solver, "close", None)
+        if callable(close):
+            try:
+                await close()
+            except Exception as exc:  # pragma: no cover - 关停竞态
+                logger.warning(f"service: solver close failed: {exc}")
+
     app = FastAPI(
         title="slidex captcha service",
         version="1.0.0",
         description="Self-hosted CAPTCHA solving service: PX press-token (px_press) + GeeTest v3.",
+        lifespan=lifespan,
     )
     app.state.registry = handler_registry
     app.state.solver = px_solver

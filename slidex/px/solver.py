@@ -227,6 +227,22 @@ class PxPressSolver:
         if self._farm is not None:
             await self._farm.close()
 
+    async def _reset_farm(self) -> None:
+        """进程没了时丢弃农场，下一个任务自动重建；没有农场则空操作。"""
+        farm, self._farm = self._farm, None
+        if farm is not None:
+            await farm.close()
+
+    @staticmethod
+    def _connected(browser: Any) -> bool:
+        """浏览器是否还活着；拿不到判断依据（测试注入）按活着处理。"""
+        if browser is None:
+            return True
+        try:
+            return bool(browser.is_connected())
+        except Exception:  # pragma: no cover
+            return False
+
     # ------------------------------------------------------------------ 内部
     async def _browser(self) -> Any:
         if self._closed:
@@ -303,29 +319,59 @@ class PxPressSolver:
                 try:
                     frame = response.frame
                     if frame is not None and frame == page.main_frame:
-                        page_status[response.url] = int(response.status)
+                        # 只记主帧最后一条：重定向链后 target URL 是 302，
+                        # 但真正渲染的是最终文档（可能是 PX 的 403 拦截页）。
+                        page_status["last"] = int(response.status)
                 except Exception:  # pragma: no cover
                     pass
 
             page.on("response", _on_response)
 
             nav_ok = await self._navigate(request, page)
-            # 首屏状态码本身就能判死：403/429 是 PX 明确拦截，404 是 challengeUrl
-            # 写错。这几种都不该再耗满整个预算去轮询 cookie。
-            status = self._pick_status(page_status, request.target_url)
-            blocked = status in (403, 429)
-            if not nav_ok or blocked:
-                kind = ERR_CHALLENGE_HTTP if status in (403, 429, 404) else ERR_CHALLENGE_TIMEOUT
-                retryable = status not in (403, 429)
+            # 首屏状态码本身就能判死：403/429/404 是确定性终止（PX 拦截 /
+            # challengeUrl 写错），>=500 是上游故障（可重试）。这些都不该再
+            # 耗满预算去轮询 cookie；导航失败一律按可重试超时处理。
+            status = self._pick_status(page_status)
+            if status in (403, 429, 404):
                 return PxPressResult(
-                    False, mode=mode, error_kind=kind,
+                    False, mode=mode, error_kind=ERR_CHALLENGE_HTTP,
                     error=f"challenge page status={status}",
-                    retryable=retryable, duration_ms=self._ms(started),
+                    retryable=False, duration_ms=self._ms(started),
+                )
+            if status is not None and status >= 500:
+                return PxPressResult(
+                    False, mode=mode, error_kind=ERR_CHALLENGE_HTTP,
+                    error=f"upstream responded {status}",
+                    retryable=True, duration_ms=self._ms(started),
+                )
+            if not nav_ok:
+                return PxPressResult(
+                    False, mode=mode, error_kind=ERR_CHALLENGE_TIMEOUT,
+                    error="challenge page did not load",
+                    retryable=True, duration_ms=self._ms(started),
                 )
 
             blocked_since: Optional[float] = None
+            read_failures = 0
             while time.monotonic() < deadline:
-                tokens = await self._read_tokens(context)
+                tokens = await self._read_tokens(context, log_failure=(read_failures == 0))
+                if tokens is None:
+                    # cookie 读不出来：context/browser 多半已经死了（Chromium 被
+                    # OOM 杀、context 被关）。继续轮询只会把整个预算耗光并刷屏
+                    # 警告，必须尽快失败并把农场重置，让下一个任务拿新进程。
+                    read_failures += 1
+                    if read_failures == 1 and not self._connected(browser):
+                        logger.warning("px: chromium gone mid-task, resetting farm")
+                        await self._reset_farm()
+                    if read_failures >= 2 or not self._connected(browser):
+                        return PxPressResult(
+                            False, mode=mode, error_kind=ERR_INTERNAL,
+                            error="browser/context lost mid-task (cookie read failed)",
+                            retryable=True, duration_ms=self._ms(started),
+                        )
+                    await asyncio.sleep(request.poll_interval_s or self._poll_interval_s)
+                    continue
+                read_failures = 0
                 px3 = tokens.get("px3", "")
                 if px3 and is_pass_token(px3):
                     tokens = self._fill_from_request(tokens, request)
@@ -397,20 +443,23 @@ class PxPressSolver:
             return False
 
     @staticmethod
-    def _pick_status(page_status: Dict[str, int], target: str) -> Optional[int]:
-        """主帧状态码：优先目标 URL，退回最后一次记录（重定向后 URL 会变）。"""
+    def _pick_status(page_status: Dict[str, int]) -> Optional[int]:
+        """最后一条主帧状态：重定向链后这是最终文档（PX 拦截页落在最后）。"""
         if not page_status:
             return None
-        if target in page_status:
-            return page_status[target]
-        return next(reversed(page_status.values()), None)
+        return page_status.get("last")
 
-    async def _read_tokens(self, context: Any) -> Dict[str, str]:
+    async def _read_tokens(
+        self, context: Any, *, log_failure: bool = True
+    ) -> Optional[Dict[str, str]]:
         try:
             cookies = await context.cookies()
         except Exception as exc:
-            logger.warning(f"px: cookie read failed: {exc}")
-            return {"px3": "", "pxde": "", "pxvid": "", "pxcts": ""}
+            # 失败说明 context/browser 可能已死：返回 None 交给上层快速失败，
+            # 只在首次刷一条警告，避免每个 poll 周期都刷屏
+            if log_failure:
+                logger.warning(f"px: cookie read failed: {exc}")
+            return None
         return extract_px_tokens(cookies)
 
     def _fill_from_request(
@@ -418,10 +467,8 @@ class PxPressSolver:
     ) -> Dict[str, str]:
         out = dict(tokens)
         if not out.get("pxvid") and request.vid:
+            # vid 就是调用方手里的 deviceId（= PX vid），缺失时补上合理
             out["pxvid"] = request.vid
-        if not out.get("pxcts") and request.uuid:
-            # uuid 是 PX 里 vid 的近亲；只在 pxcts 缺时兜底，避免伪造
-            out["pxcts"] = request.uuid
         return out
 
     @staticmethod

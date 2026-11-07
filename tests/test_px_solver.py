@@ -310,7 +310,7 @@ async def test_referer_passed_on_press_navigation():
     assert kwargs["wait_until"] == "domcontentloaded"
 
 
-async def test_missing_fields_filled_from_vid_and_uuid():
+async def test_missing_pxvid_filled_from_vid():
     cookies = [{"name": "_px3", "value": _PASS_PX3}]
     context = _FakeContext([cookies])
     solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
@@ -320,8 +320,10 @@ async def test_missing_fields_filled_from_vid_and_uuid():
 
     assert result.success is True
     assert result.tokens["pxvid"] == "vid-from-payload"
-    assert result.tokens["pxcts"] == "uuid-from-payload"
-    assert result.missing == ["pxde"]
+    # uuid 是 leadingChallengeId，不是 pxcts：不许拿它伪造 token（需求单 §4
+    # 出口/上下文一致性；伪造值会被 risk/verify 当作无效证据）
+    assert result.tokens["pxcts"] == ""
+    assert result.missing == ["pxde", "pxcts"]
 
 
 async def test_cookie_read_failure_is_internal_error():
@@ -332,11 +334,14 @@ async def test_cookie_read_failure_is_internal_error():
     context = _BrokenContext([[]])
     solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
 
+    started = time.monotonic()
     result = await solver.solve(_request())
 
-    # _read_tokens 吞掉异常返回空 token → 最终 timeout 而非 crash
+    # 读 cookie 一失败就判定 context 已死：不能把整个预算耗在无意义的轮询上
     assert result.success is False
-    assert result.error_kind in {ERR_TOKEN_TIMEOUT, ERR_INTERNAL}
+    assert result.error_kind == ERR_INTERNAL
+    assert result.retryable_error is True
+    assert time.monotonic() - started < 2.0
 
 
 async def test_cancellation_propagates():
@@ -484,4 +489,121 @@ async def test_browser_gone_mid_task_resets_farm_and_is_retryable():
     assert result.success is False
     assert result.retryable_error is True
     # 农场必须被重置，否则后续任务全挂在断连的 browser 上
+    assert solver._farm is None
+
+
+# ────────────────────── 线上 review：首屏状态判定与中途断连 ──────────────────────
+
+
+class _MultiResponsePage(_FakePage):
+    """按序回放多条主帧响应（模拟重定向链）。"""
+
+    def __init__(self, sequence):
+        super().__init__()
+        self._sequence = list(sequence)
+
+    async def goto(self, url, **kwargs):
+        self.goto_calls.append((url, kwargs))
+        for status, resp_url in self._sequence:
+            for handler in self._response_handlers:
+                await handler(_FakeResponse(status, resp_url, self.main_frame))
+        return None
+
+
+async def test_redirect_followed_by_403_fails_fast_as_deterministic():
+    """target 302 后落到 403 拦截页：不能只看 target 的 302 继续轮询。"""
+    page = _MultiResponsePage(
+        [(302, "https://iframe.hsprotect.net/challenge"),
+         (403, "https://iframe.hsprotect.net/blocked")]
+    )
+    context = _FakeContext([[]], page=page)
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
+
+    started = time.monotonic()
+    result = await solver.solve(_request())
+
+    assert result.success is False
+    assert result.error_kind == ERR_CHALLENGE_HTTP
+    assert result.retryable_error is False
+    assert time.monotonic() - started < 2.0
+
+
+async def test_redirect_followed_by_404_fails_fast():
+    page = _MultiResponsePage(
+        [(302, "https://iframe.hsprotect.net/challenge"),
+         (404, "https://iframe.hsprotect.net/gone")]
+    )
+    context = _FakeContext([[]], page=page)
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
+
+    result = await solver.solve(_request())
+
+    assert result.success is False
+    assert result.error_kind == ERR_CHALLENGE_HTTP
+    assert result.retryable_error is False
+
+
+async def test_404_fails_fast_instead_of_burning_budget():
+    page = _FakePage(status=404)
+    context = _FakeContext([[]], page=page)
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
+
+    started = time.monotonic()
+    result = await solver.solve(_request())
+
+    assert result.success is False
+    assert result.error_kind == ERR_CHALLENGE_HTTP
+    assert result.retryable_error is False
+    assert time.monotonic() - started < 2.0
+
+
+async def test_5xx_fails_fast_but_is_retryable():
+    page = _FakePage(status=502)
+    context = _FakeContext([[]], page=page)
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
+
+    started = time.monotonic()
+    result = await solver.solve(_request())
+
+    assert result.success is False
+    assert result.error_kind == ERR_CHALLENGE_HTTP
+    assert result.retryable_error is True
+    assert time.monotonic() - started < 2.0
+
+
+async def test_mid_task_browser_death_resets_farm_and_fails_fast():
+    """出 cookie 读失败 + Chromium 已断连：立刻失败并重置农场。"""
+    class _DeadMidTask(_FakeBrowserObj):
+        async def new_context(self, **kwargs):
+            # 上下文建好后 Chromium 被 OOM 杀：is_connected() 变 False
+            self._connected = False
+            return _DeadContext()
+
+    class _DeadContext:
+        async def cookies(self):
+            raise RuntimeError("Target page, context or browser has been closed")
+
+        async def add_init_script(self, script):
+            pass
+
+        async def add_cookies(self, specs):
+            pass
+
+        async def new_page(self):
+            return _FakePage()
+
+        async def close(self):
+            pass
+
+    dead = _DeadMidTask()
+    pw = _FakePw([dead, _FakeBrowserObj()])
+    solver = PxPressSolver(playwright_factory=lambda: _resolve(pw))
+
+    started = time.monotonic()
+    result = await solver.solve(_request())
+
+    assert result.success is False
+    assert result.error_kind == ERR_INTERNAL
+    assert result.retryable_error is True
+    assert time.monotonic() - started < 2.0
     assert solver._farm is None

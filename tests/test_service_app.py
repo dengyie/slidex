@@ -549,3 +549,87 @@ def test_geetest_v3_solver_error_is_retryable_failure():
     ).json()
     assert body["code"] == 1001
     assert body["data"]["kind"] == "geetest_solver_error"
+
+
+# ────────────────────── 线上 review：确定性输入必须 4xx，不能变可重试 ──────────────────────
+
+
+def test_bare_hostname_website_url_is_422():
+    """裸域名在 Chromium 里必失败；必须创建时 422，别让调用方重试到超时。"""
+    client = _client()
+    response = client.post(
+        "/v1/solve",
+        json={"type": "px_press", "appId": "PXzC5j78di", "websiteURL": "signup.live.com"},
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert response.status_code == 422
+    body = response.json()
+    assert body["data"]["retryable"] is False
+    assert "websiteURL" in body["error"]
+
+
+def test_non_http_challenge_url_is_422():
+    client = _client()
+    response = client.post(
+        "/v1/solve",
+        json={"type": "px_press", "appId": "PXzC5j78di", "challengeUrl": "ftp://x/y"},
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert response.status_code == 422
+    assert "challengeUrl" in response.json()["error"]
+
+
+def test_invalid_timezone_is_422():
+    client = _client()
+    response = client.post(
+        "/v1/solve",
+        json={**_PX_BODY, "timezone": "Not/AZone"},
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert response.status_code == 422
+    assert "timezone" in response.json()["error"]
+
+
+def test_geetest_v3_solver_is_closed_after_task():
+    closed = []
+
+    class _Closable(_FakeGeeTestSolver):
+        async def close(self):
+            closed.append(True)
+
+    client = _client(geetest_factory=lambda proxy: _Closable())
+    client.post(
+        "/v1/solve",
+        json={"type": "geetest_v3", "websiteURL": "https://example.com/login"},
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert closed == [True]
+
+
+def test_geetest_v3_solver_closed_even_on_failure():
+    closed = []
+
+    class _Closable(_FakeGeeTestSolver):
+        async def close(self):
+            closed.append(True)
+
+    client = _client(geetest_factory=lambda proxy: _Closable(exc=RuntimeError("boom")))
+    client.post(
+        "/v1/solve",
+        json={"type": "geetest_v3", "websiteURL": "https://example.com/login"},
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert closed == [True]
+
+
+def test_lifespan_shutdown_closes_solver_and_cancels_tasks():
+    events = []
+
+    class _Solver(_FakePxSolver):
+        async def close(self):
+            events.append("solver_closed")
+
+    app = create_app(keys=["secret"], solver=_Solver())
+    with TestClient(app) as client:
+        assert client.get("/health", headers={"Authorization": "Bearer secret"}).status_code == 200
+    assert events == ["solver_closed"]

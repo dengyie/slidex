@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.8.1] - 2026-11-08
+
+线上深度 review 第二轮：8 个根因修复。全部有可复现证据（本地假页面单测 +
+真实 Chromium 行为验证），不靠猜测改代码。
+
+### Fixed
+- **URL 不是 http(s) 时拖动整个预算才超时**：`challengeUrl` 写裸域名
+  （`signup.live.com`）时 Chromium `goto` 直接抛 `Cannot navigate to invalid URL`，
+  `ftp://` 则 `net::ERR_ABORTED`——两者都是确定性错误，但此前都落进
+  `solver_internal_error` 并标可重试，调用方会拿同一个坏 payload 重试到超时。
+  现在 `from_payload` 校验 URL scheme，创建任务即 422、`retryable=false`。
+- **非法 IANA 时区被误标成可重试 internal**：`new_context(timezone_id="Not/AZone")`
+  本身**不报错**（实测），错误发生在之后的 `new_page()`：`Invalid timezone ID`，
+  被兜底 except 吞成 `solver_internal_error`（可重试）。而这是调用方参数错误，
+  重试同一 payload 永远不会好。现在解析期校验 `zoneinfo.ZoneInfo`，
+  非法时 422；机器无 tzdata 时放行（少拦不误拦）。
+- **重定向后的拦截页被当成正常页轮询**：状态码原按「target URL」取，PX 把
+  challenge URL 302 到别的域名后再回 403 时，只看到那条 302，于是一直轮询到
+  `px_token_timeout`。改为主帧**最后一条**响应状态（即最终渲染的文档）。
+- **404 被当成可重试超时**：旧逻辑 `retryable = status not in (403, 429)` 让 404
+  变成「可重试」，调用方会对一个写错的 challengeUrl 反复重试。现在 403/429/404
+  一律确定性终止；新增 **>=500 视为上游故障、可重试**（此前 5xx 落到
+  `px_token_timeout`，语义错且同样耗满预算）；导航失败统一
+  `challenge_load_timeout`。
+- **任务中途 Chromium 死亡仍耗尽整个预算**：cookie 读取失败原被吞成空 token，
+  循环继续 poll，直到预算耗尽才返回 `px_token_timeout`，期间日志每个周期刷一条
+  警告，而且农场里那具死进程不回收（后续任务继续挂）。现在读失败即判定
+  `browser/context lost mid-task`（`retryable=true`），确认断连时重置农场让下个
+  任务拿新进程；仅在首次失败打一条警告。
+- **`pxcts` 被 `uuid` 伪造**：缺 `pxcts` 时曾把调用方的 `uuid`（leadingChallengeId）
+  填进 `pxcts`。两者语义不同，伪造值会让调用方的 risk/verify 当成无效证据。
+  现在只从 cookie 取真值，缺就报在 `missing` 里；只有 `pxvid` 仍可由 `vid` 补。
+- **`geetest_v3` 每个任务泄漏一个浏览器**：handler 从不关闭 `SliderSolver`，
+  每次调用留下一个 Chromium + playwright driver，1.9G 小机器上很快 OOM。
+  `solve` 改为 try/finally 无条件 `close()`（失败路径也关）。
+- **`systemctl restart` 后旧进程的 Chromium/pw driver 苟活**：服务没有关停钩子，
+  重启后新旧两套浏览器抢内存。新增 FastAPI `lifespan`：先 `cancel_all()` 取消
+  在跑任务，再 `close()` 共享 solver。
+
+### Notes
+- 测试 +11（请求模型 3、服务路由 3、求解器 5）：裸域名/ftp URL→422、非法时区→422、
+  重定向→403/404 fail-fast、404/5xx 快速终止与 retryable 区分、任务中途断连快速
+  失败并重置农场、geetest solver 成功/失败都关闭、lifespan 关停回收。
+  全量 **971 passed / 18 skipped**（0.8.0 基线 960 + 11，零回归）。
+- `_read_tokens` 现在失败返回 `None`（原返回空四件套），调用方按「context 已死」
+  处理——语义更贴合事实，也让「读不到」和「读到了但没 px3」不再混淆。
+
 ## [0.7.0] - 2026-11-06
 
 provider 治理波（配合 automation-kit 0.6.0）：`visual.challenge` 迎来第二个真实同类 provider。

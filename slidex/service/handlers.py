@@ -100,6 +100,17 @@ def _default_geetest_solver_factory(proxy_url: Optional[str]) -> Any:
     return SliderSolver(provider="geetest", proxy=proxy_url, headless=True)
 
 
+async def _close_quietly(solver: Any) -> None:
+    """尽力回收 solver 的浏览器；关闭失败不该改变任务结果。"""
+    close = getattr(solver, "close", None) if solver is not None else None
+    if not callable(close):
+        return
+    try:
+        await close()
+    except Exception as exc:  # pragma: no cover - 关闭竞态
+        logger.debug(f"service: solver close skipped: {exc}")
+
+
 class GeeTestV3Handler:
     """兼容既有 ``geetest_v3`` 调用方：在 websiteURL 上跑 slidex 滑块链。"""
 
@@ -119,6 +130,7 @@ class GeeTestV3Handler:
             raise HandlerFailure.bad_request("websiteURL is required for geetest_v3")
 
         proxy_url = _proxy_url(payload.get("proxy"))
+        solver: Any = None
         try:
             solver = self._factory(proxy_url)
             success, cookies = await solver.solve(website)
@@ -130,6 +142,10 @@ class GeeTestV3Handler:
                 retryable=True,
                 code=codes.SOLVE_FAILED,
             ) from None
+        finally:
+            # SliderSolver.close() 负责回收自己的 Chromium + playwright driver。
+            # 不调用的话每个 geetest_v3 任务泄漏一个浏览器（1.9G 小机器上很快 OOM）。
+            await _close_quietly(solver)
 
         if not success:
             raise HandlerFailure(
