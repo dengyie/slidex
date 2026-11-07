@@ -63,7 +63,12 @@ class PxPressHandler:
     @staticmethod
     def _to_data(result: PxPressResult) -> Dict[str, Any]:
         if result.success:
-            return dict(result.tokens)
+            data = dict(result.tokens)
+            # 诊断随成功响应一起给（需求单 v2 §4.2：无论成败都要可见）；
+            # 老客户端多拿一个键，无副作用
+            if result.diagnostics:
+                data["diagnostics"] = dict(result.diagnostics)
+            return data
         kind = result.error_kind or "px_solve_failed"
         raise HandlerFailure(
             kind=kind,
@@ -71,6 +76,7 @@ class PxPressHandler:
             retryable=result.retryable_error,
             status_code=429 if kind == "solver_busy" else 200,
             code=codes.for_kind(kind),
+            data={"diagnostics": dict(result.diagnostics)} if result.diagnostics else {},
         )
 
 

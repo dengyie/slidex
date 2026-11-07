@@ -82,14 +82,20 @@ class TaskRecord:
     status: str = "processing"
     response: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+    diagnostics: Optional[Dict[str, Any]] = None
     created_at: float = field(default_factory=time.monotonic)
     finished_at: Optional[float] = None
 
     def public(self) -> Dict[str, Any]:
         if self.status == "success":
+            # response 里可能已带 diagnostics（handler 透传），不再重复
             return {"status": "success", "response": dict(self.response or {})}
         if self.status in {"fail", "failed", "error"}:
-            return {"status": "fail", "error": self.error or "solve failed"}
+            body: Dict[str, Any] = {"status": "fail", "error": self.error or "solve failed"}
+            if self.diagnostics:
+                # 需求单 v2 §3.3：fail 响应附脱敏诊断，老客户端忽略未知键
+                body["diagnostics"] = dict(self.diagnostics)
+            return body
         return {"status": "processing"}
 
 
@@ -145,6 +151,7 @@ class TaskStore:
         except HandlerFailure as exc:
             record.status = "fail"
             record.error = f"{exc.kind}: {exc.message}"
+            record.diagnostics = (exc.data or {}).get("diagnostics") or None
         except Exception as exc:  # pragma: no cover - 兜底
             logger.warning(f"service: task {record.task_id} crashed: {exc}")
             record.status = "fail"

@@ -102,6 +102,7 @@ ERR_CHALLENGE_TIMEOUT = "challenge_load_timeout"
 ERR_TOKEN_TIMEOUT = "px_token_timeout"
 ERR_TOKEN_BLOCKED = "px_token_blocked"
 ERR_COOKIE_PARSE = "cookie_parse_failed"
+ERR_VID_REQUIRED = "caller_vid_required"
 ERR_INTERNAL = "solver_internal_error"
 
 RETRYABLE_KINDS = frozenset(
@@ -351,7 +352,12 @@ class PxPressRequest:
 
 @dataclass(slots=True)
 class PxPressResult:
-    """一次求解的终态。``success`` 只由 px3 是否含 ``:1000:`` 决定。"""
+    """一次求解的终态。``success`` 只由 px3 是否含 ``:1000:`` 决定。
+
+    ``diagnostics`` 是传感器执行链的脱敏观测（需求单 v2 §3.3）：无论成败都
+    尽量带上，调用方（与运维）用它区分「脚本没执行」「执行了被拒」「token
+    发去了父页」。字段全可选，老客户端忽略未知键。
+    """
 
     success: bool
     tokens: Dict[str, str] = field(default_factory=dict)
@@ -361,6 +367,7 @@ class PxPressResult:
     retryable: bool = False
     duration_ms: int = 0
     missing: List[str] = field(default_factory=list)
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def retryable_error(self) -> bool:
@@ -369,8 +376,11 @@ class PxPressResult:
         return bool(self.retryable)
 
     def error_payload(self) -> Dict[str, Any]:
-        return {
+        payload = {
             "kind": self.error_kind or "unknown",
             "message": self.error or "solve failed",
             "retryable": self.retryable_error,
         }
+        if self.diagnostics:
+            payload["diagnostics"] = dict(self.diagnostics)
+        return payload

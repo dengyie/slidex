@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.9.0] - 2026-11-08
+
+需求单 v2（px_press 真实挑战求解修复）：live 联调证明直接导航 hsprotect
+iframe URL 时 postMessage 通道永远沉默，110–120s 预算内连非通过级 `_px3`
+都种不出来。PX token 依赖「宿主页 + iframe」双层协作，单层结构无解。
+
+### Added
+- **press 双页上下文（§3.1，P0）**：press 求解不再直接导航 `challengeUrl`，
+  改为顶层页先落 `websiteURL` 域（fail-fast 判死 403/407/4xx/5xx），再把
+  challengeUrl 作为 **iframe 注入宿主页**（`page.evaluate`，320×110 可见
+  尺寸），postMessage 由浏览器自然打通。cookie 抽取照旧扫全 jar——
+  iframe 会把 `_px*` postMessage 给父页，PX main.min.js 写回宿主页域。
+- **vid 自动补种子（§3.2，P0）**：press 且 `vid` 为空时不再沉默裸导航——
+  先用裸 silent（独立 `_harvest_vid` 循环，只等 `_pxvid` 出现，预算 25s）
+  领初始 vid，种进 cookies + `vid` 字段后继续 press；种子也失败则立刻
+  `caller_vid_required`（可重试）失败，不再烧满预算。silent 模式 vid 本就
+  可选（v1 契约），不做种子套娃。
+- **诊断 diagnostics（§3.3，P1）**：无论成败，`PxPressResult.diagnostics`
+  携带传感器执行链观测——`iframe_loaded/iframe_status`、
+  `captcha_js_loaded/captcha_js_status`、`main_min_js_loaded/_status`、
+  `collector_seen`、`parent_message_seen`（context 级 expose_binding +
+  init script 探针，只记「有过」）、`px_cookie_names_seen`（只有名字+域，
+  绝无值）。`/v1/solve` 放在 `data.diagnostics`，v2 轮询 fail 信封附
+  `diagnostics` 键，success 的 `response` 里透传；老客户端忽略未知键。
+
+### Fixed
+- press 模式下 challengeUrl 的 403/407/4xx/5xx 判死提前到 iframe 注入之前——
+  否则一个 404 的 challengeUrl 会先白等 iframe 就绪预算再失败。
+
+### Verified
+- 变异验证（三处）：删掉宿主页 fail-fast 分支 → `test_host_page_404_fails_fast_before_iframe_injection`
+  失败（回到白等 iframe）；删掉 vid 补种 → `test_vid_missing_and_seed_fails_returns_vid_required`
+  失败；删掉 v2 诊断透传 → `test_v2_fail_response_carries_diagnostics` 失败。
+- 全量 987 passed / 18 skipped（新增 10 条：双页导航、宿主判死、诊断成劣
+  双路、诊断采集分类、vid 补种三态、cookie 名脱敏、v2 透传）。
+- 真浏览器仿真（test_px_sim）确认 silent 无 vid 任务不受种子逻辑影响。
+
 ## [0.8.5] - 2026-11-08
 
 Code review 收尾：代理 407 拿到独立 kind 与业务码，调用方在数字码层面就能区分

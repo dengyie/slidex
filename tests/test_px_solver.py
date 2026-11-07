@@ -20,6 +20,7 @@ from slidex.px.models import (
     ERR_BROWSER_LAUNCH,
     ERR_CHALLENGE_HTTP,
     ERR_PROXY_AUTH,
+    ERR_VID_REQUIRED,
     ERR_CHALLENGE_LOAD,
     ERR_CHALLENGE_TIMEOUT,
     ERR_INTERNAL,
@@ -27,6 +28,7 @@ from slidex.px.models import (
     ERR_TOKEN_BLOCKED,
     ERR_TOKEN_TIMEOUT,
     PxPressRequest,
+    PxPressResult,
 )
 from slidex.px.solver import (
     PxPressSlots,
@@ -43,6 +45,9 @@ def _request(**overrides) -> PxPressRequest:
         "appId": "PXzC5j78di",
         "challengeUrl": "https://iframe.hsprotect.net/challenge",
         "websiteURL": "https://signup.live.com/",
+        # 真实调用方（grok-register）通常带 deviceId；单元测试也要带，否则
+        # 走 vid 自动补种（另测），每个用例都得先过那道门
+        "vid": "vid-from-caller",
         "country": "US",
         "pollInterval": 0.25,
         "timeout": 10,
@@ -54,11 +59,13 @@ def _request(**overrides) -> PxPressRequest:
 class _FakePage:
     def __init__(self, *, goto_exc=None, status=200):
         self.goto_calls = []
+        self.evaluate_calls = []
         self._goto_exc = goto_exc
         self._status = status
         self.closed = False
         self._response_handlers = []
         self.main_frame = object()
+        self.iframe_frame = object()  # press 双页结构下 challenge 的子 frame
 
     async def goto(self, url, **kwargs):
         self.goto_calls.append((url, kwargs))
@@ -69,6 +76,18 @@ class _FakePage:
         if handler is not None:
             await handler(_FakeResponse(self._status, url, self.main_frame))
         return None
+
+    async def evaluate(self, script, *args):
+        self.evaluate_calls.append((script, args))
+        # 真实浏览器里 iframe 注入后 challenge 文档随即到达；fake 同步补发
+        # 一条子 frame 文档响应，让 _attach_iframe 的就绪 Future 立刻完成，
+        # fail-fast 断言（<2s）不被等待拖慢
+        for handler in self._response_handlers:
+            await handler(
+                _FakeResponse(200, "https://iframe.hsprotect.net/challenge",
+                              self.iframe_frame)
+            )
+        return "px-captcha-host"
 
     def on(self, event, handler):
         if event == "response":
@@ -260,9 +279,12 @@ async def test_stealth_init_script_injected_with_locale():
 
     await solver.solve(_request(country="JP"))
 
-    assert len(context.init_scripts) == 1
-    assert "ja-JP" in context.init_scripts[0]
-    assert "webdriver" in context.init_scripts[0]
+    # 0.9.0：stealth + postMessage 探针两条 init script
+    assert len(context.init_scripts) == 2
+    joined = "\n".join(context.init_scripts)
+    assert "ja-JP" in joined
+    assert "webdriver" in joined
+    assert "__pxParentProbe" in joined
 
 
 async def test_px_cookies_injected_on_both_domains():
@@ -325,6 +347,7 @@ async def test_navigate_timeout_is_load_timeout():
 
 
 async def test_referer_passed_on_press_navigation():
+    """press 双页结构：第一跳是宿主页 websiteURL（带 referer 的是 challenge）。"""
     page = _FakePage()
     context = _FakeContext([_pass_cookies()], page=page)
     solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
@@ -332,9 +355,13 @@ async def test_referer_passed_on_press_navigation():
     await solver.solve(_request())
 
     target, kwargs = page.goto_calls[0]
-    assert target == "https://iframe.hsprotect.net/challenge"
-    assert kwargs["referer"] == "https://signup.live.com/"
+    # 0.9.0：宿主页先落 websiteURL 域，challengeUrl 变成注入的 iframe
+    assert target == "https://signup.live.com/"
     assert kwargs["wait_until"] == "domcontentloaded"
+    assert len(page.evaluate_calls) == 1
+    script, args = page.evaluate_calls[0]
+    assert args[0] == "https://iframe.hsprotect.net/challenge"
+    assert "iframe" in script
 
 
 async def test_missing_pxvid_filled_from_vid():
@@ -702,3 +729,170 @@ async def test_proxy_407_fails_fast_not_retryable():
     assert result.retryable_error is False
     assert "407" in result.error
     assert time.monotonic() - started < 2.0
+
+
+# ------------------------------------------------------ 0.9.0 双页/补种/诊断
+
+async def test_press_navigates_host_then_injects_iframe():
+    """§3.1：press 不再把 iframe URL 当顶层页——先宿主页，再注入 challenge。
+
+    直接导航 iframe 时 postMessage 通道永远沉默（live 实测种不出任何
+    _px cookie），顶层页必须先落在 websiteURL 域上。
+    """
+    page = _FakePage()
+    context = _FakeContext([_pass_cookies()], page=page)
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
+
+    result = await solver.solve(_request())
+
+    assert result.success is True
+    assert len(page.goto_calls) == 1
+    host_url, host_kwargs = page.goto_calls[0]
+    assert host_url == "https://signup.live.com/"
+    assert host_kwargs["wait_until"] == "domcontentloaded"
+    # challengeUrl 只以 iframe 形态进入，绝不走 goto
+    assert all(url != "https://iframe.hsprotect.net/challenge"
+               for url, _ in page.goto_calls)
+    assert len(page.evaluate_calls) == 1
+    script, inject_args = page.evaluate_calls[0]
+    assert inject_args[0] == "https://iframe.hsprotect.net/challenge"
+    assert "createElement('iframe')" in script
+
+
+async def test_host_page_404_fails_fast_before_iframe_injection():
+    """宿主页 404：确定性终止，且不再注入 iframe（白等 iframe 就绪没有意义）。"""
+    page = _FakePage(status=404)
+    context = _FakeContext([[]], page=page)
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
+
+    started = time.monotonic()
+    result = await solver.solve(_request())
+
+    assert result.success is False
+    assert result.error_kind == ERR_CHALLENGE_HTTP
+    assert result.retryable_error is False
+    assert time.monotonic() - started < 2.0
+    assert page.evaluate_calls == []
+
+
+async def test_diagnostics_present_on_success_and_failure():
+    """§3.3：成败响应都带 diagnostics（脱敏观测）。"""
+    context = _FakeContext([_pass_cookies()])
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
+
+    result = await solver.solve(_request())
+
+    assert result.success is True
+    d = result.diagnostics
+    assert d["iframe_loaded"] is True
+    assert d["iframe_status"] == 200
+    assert isinstance(d["px_cookie_names_seen"], list)
+    assert any(name.startswith("_px3") for name in d["px_cookie_names_seen"])
+    # 脱敏：诊断里只有名字，绝没有 cookie 值
+    assert _PASS_PX3 not in str(d)
+
+
+async def test_diagnostics_captcha_js_and_collector_seen():
+    """传感器执行链归类：captcha.js / main.min.js / collector 各认各的。"""
+    from slidex.px.solver import _Diagnostics
+
+    diag = _Diagnostics()
+    diag.observe_response(_FakeResponse(200, "https://client.hsprotect.net/PXzC5j78di/main.min.js", object(), "script"))
+    diag.observe_response(_FakeResponse(200, "https://iframe.hsprotect.net/captcha.js?a=c&v=vid", object(), "script"))
+    diag.observe_response(200, ) if False else None
+
+    class _R:
+        status = 200
+        url = "https://collector-pxxxxxxxxx.hsprotect.net/api/v2/mst/beacon"
+    diag.observe_response(_R())
+
+    snap = diag.snapshot()
+    assert snap["main_min_js_loaded"] is True and snap["main_min_js_status"] == 200
+    assert snap["captcha_js_loaded"] is True
+    assert snap["collector_seen"] is True
+
+
+async def test_vid_missing_auto_seeds_then_presses():
+    """§3.2 策略二：vid 缺失先裸 silent 补种子，拿到的 vid 种进 cookies 再 press。"""
+    harvests = ["vid-seeded"]
+
+    async def fake_harvest(self, request):
+        assert request.mode == "silent"  # 种子必须是裸 silent，不是 press
+        return harvests.pop(0)
+
+    real_solve_once = PxPressSolver._solve_once
+    seen_requests = []
+
+    async def fake_solve_once(self, request, started):
+        seen_requests.append(request)
+        # press 阶段：验证 vid 已种上（cookie + 字段双落）
+        assert request.vid == "vid-seeded"
+        assert request.cookies.get("_pxvid") == "vid-seeded"
+        return PxPressResult(
+            True, tokens={"px3": _PASS_PX3, "pxvid": "vid-seeded"},
+            mode="press", duration_ms=1,
+        )
+
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(_FakeContext([[]])))
+    solver._harvest_vid = fake_harvest.__get__(solver)  # type: ignore[method-assign]
+    solver._solve_once = fake_solve_once.__get__(solver)  # type: ignore[method-assign]
+
+    # press 且无 vid（真实场景：challengeDetails.deviceId 为空）
+    result = await solver.solve(_request(vid=""))
+
+    assert result.success is True
+    assert len(seen_requests) == 1
+    assert seen_requests[0].mode == "press"
+
+
+async def test_vid_missing_and_seed_fails_returns_vid_required():
+    """§3.2：补种子也拿不到 vid → 明确 fail（caller_vid_required），不再沉默超时。"""
+
+    async def fake_harvest(self, request):
+        return ""
+
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(_FakeContext([[]])))
+    solver._harvest_vid = fake_harvest.__get__(solver)  # type: ignore[method-assign]
+
+    started = time.monotonic()
+    result = await solver.solve(_request(vid=""))  # press 无 vid；种子必然失败
+
+    assert result.success is False
+    assert result.error_kind == ERR_VID_REQUIRED
+    assert result.retryable_error is True
+    assert result.diagnostics == {"vid_seeded": False}
+    assert time.monotonic() - started < 5.0  # 不许烧 press 预算
+
+
+async def test_vid_present_skips_seeding():
+    """vid 已带：不跑种子任务，直接 press。"""
+    calls = []
+
+    async def fake_solve_once(self, request, started):
+        calls.append(request.mode)
+        return PxPressResult(True, tokens={"px3": _PASS_PX3}, mode=request.mode)
+
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(_FakeContext([[]])))
+    solver._solve_once = fake_solve_once.__get__(solver)  # type: ignore[method-assign]
+
+    result = await solver.solve(_request(vid="vid-direct"))
+
+    assert result.success is True
+    assert calls == ["press"]
+
+
+async def test_cookie_names_diagnostic_collects_names_not_values():
+    """observe_cookie_names 只收名字+域，值不进诊断。"""
+    from slidex.px.solver import _Diagnostics
+
+    diag = _Diagnostics()
+    diag.observe_cookie_names([
+        {"name": "_px3", "value": "1:a:1000:SECRET::", "domain": ".signup.live.com"},
+        {"name": "_pxvid", "value": "vid-x", "domain": ".hsprotect.net"},
+        {"name": "session", "value": "zzz", "domain": ".signup.live.com"},
+    ])
+    snap = diag.snapshot()
+    assert "_px3(.signup.live.com)" in snap["px_cookie_names_seen"]
+    assert "_pxvid(.hsprotect.net)" in snap["px_cookie_names_seen"]
+    assert all("session" not in n for n in snap["px_cookie_names_seen"])
+    assert all("SECRET" not in n for n in snap["px_cookie_names_seen"])

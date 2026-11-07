@@ -204,7 +204,14 @@ curl -s http://127.0.0.1:8000/v1/solve \
 页面已加载但预算内没出 token；1003 IP/appId 被拦；1004 并发已满；
 1005 连不上挑战页——先查代理链路；1006 代理要认证 407——改代理配置）。
 求解失败通常是 HTTP 200 + 非零 `code`，并带
-`data.kind` 与 `data.retryable`，调用方据此决定是否重试。
+`data.kind` 与 `data.retryable`，调用方据此决定是否重试。成败响应均可带
+`data.diagnostics`（传感器执行链脱敏观测：iframe/captcha.js/main.min.js
+加载状态、collector 是否上报、父页 postMessage 是否出现、jar 里见过的
+`_px*` cookie 名——只有名字和域，没有值）。
+
+press 任务的双页结构：顶层页先落在 `websiteURL` 域、再把 `challengeUrl`
+作为 iframe 注入（与真实嵌入一致，postMessage 通道才会活）；`vid` 缺失时
+自动用裸 silent 补种子（拿 `_pxvid`），种子失败立刻 `caller_vid_required`。
 
 要点：
 

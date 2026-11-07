@@ -670,3 +670,57 @@ def test_lifespan_shutdown_closes_solver_and_cancels_tasks():
     with TestClient(app) as client:
         assert client.get("/health", headers={"Authorization": "Bearer secret"}).status_code == 200
     assert events == ["solver_closed"]
+
+
+def test_diagnostics_passthrough_v1_and_v2():
+    """需求单 v2 §4.2：成败响应都要带 diagnostics——/v1/solve 与 v2 双路验证。"""
+    diag = {"iframe_loaded": True, "captcha_js_loaded": False}
+
+    # v1 失败路径
+    failed = PxPressResult(
+        False, error_kind="px_token_timeout", error="no pass token",
+        retryable=True, diagnostics=diag,
+    )
+    client = _client(_FakePxSolver(failed))
+    body = client.post(
+        "/v1/solve", json=_PX_BODY, headers={"Authorization": "Bearer secret"}
+    ).json()
+    assert body["data"]["diagnostics"] == diag
+
+    # v1 成功路径
+    ok = PxPressResult(True, tokens=dict(_PASS_TOKENS), diagnostics=diag)
+    client = _client(_FakePxSolver(ok))
+    body = client.post(
+        "/v1/solve", json=_PX_BODY, headers={"Authorization": "Bearer secret"}
+    ).json()
+    assert body["code"] == 0
+    assert body["data"]["diagnostics"] == diag
+
+
+def test_v2_fail_response_carries_diagnostics():
+    """v2 轮询 fail 信封附 diagnostics（老客户端忽略未知键）。"""
+    diag = {"iframe_loaded": False, "captcha_js_loaded": False, "collector_seen": False}
+    failed = PxPressResult(
+        False, error_kind="px_token_timeout", error="no pass token",
+        retryable=True, diagnostics=diag,
+    )
+    with _client(_FakePxSolver(failed)) as client:
+        resp = client.post(
+            "/v2/tasks/",
+            json=dict(_PX_BODY, taskId="diag-task-1"),
+            headers={"Authorization": "Bearer secret"},
+        )
+        assert resp.status_code == 200
+        deadline = time.time() + 10
+        body = {}
+        while time.time() < deadline:
+            poll = client.get(
+                "/v2/tasks/diag-task-1",
+                headers={"Authorization": "Bearer secret"},
+            ).json()
+            if poll.get("status") != "processing":
+                body = poll
+                break
+            time.sleep(0.05)
+    assert body.get("status") == "fail"
+    assert body.get("diagnostics") == diag
