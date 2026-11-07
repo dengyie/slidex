@@ -1,0 +1,19 @@
+[Unit]
+Description=slidex captcha service (PX press-token station, mesh-only)
+After=network.target easytier.service
+Wants=easytier.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/slidex-captcha
+EnvironmentFile=/etc/slidex-captcha.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/slidex-captcha/.venv/bin/uvicorn slidex.service.app:app --host 10.144.144.8 --port 8077 --workers 1 --log-level info
+Restart=on-failure
+RestartSec=3
+# 与 co-located 服务（balatro/openpet/decidex）共享 1.9G 内存：
+# 超限时只杀本 cgroup，不波及邻居
+MemoryMax=1200M
+
+[Install]
+WantedBy=multi-user.target

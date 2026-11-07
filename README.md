@@ -223,6 +223,69 @@ press 任务的双页结构：顶层页先落在 `websiteURL` 域、再把 `chal
 - **兼容**：`type` 支持别名 `px_press` / `press` / `pxcaptcha2` / `silent` 等
   （大小写与连字符不敏感）；`geetest_v3` 转调 `SliderSolver` 保留旧调用方。
 
+#### 生产部署
+
+当前线上形态：gz-cvm（mesh 内 `10.144.144.8`）systemd 常驻，业务方用
+`http://10.144.144.8:8077` + Bearer key 调用。部署资产在 [`deploy/`](deploy/)：
+
+- `deploy/slidex-captcha.service` — systemd 单元（`MemoryMax=1200M`，与同机
+  服务隔离 cgroup；`workers=1`，并发靠进程内 semaphore）
+- `deploy/slidex-captcha.env.example` — 配置模板（keys / 并发 / headless）
+- `deploy/deploy.sh` — 一键发布：本地构建 wheel → 上传 → 安装 → 重启 →
+  sha 校验 → `check/deep_check.py` 23 项验收全绿才算过
+- `deploy/README.md` — 首次安装、验收工具、运维注意（密钥轮换、内存水位）
+
+#### 业务方接入（HTTP API）
+
+认证统一 `Authorization: Bearer <key>`（也接受 `X-Api-Key`）。两种协议：
+
+**同步（内网低延迟场景，推荐）**——`POST /v1/solve`，一个请求拿到结果：
+
+```python
+import httpx
+
+def solve_press(key, challenge_url, website_url, *, vid="", proxy=None, timeout_s=150):
+    r = httpx.post(
+        "http://10.144.144.8:8077/v1/solve",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "type": "px_press", "appId": "PXzC5j78di",
+            "challengeUrl": challenge_url, "websiteURL": website_url,
+            "vid": vid, "timeout": timeout_s,
+            **({"proxy": proxy} if proxy else {}),
+        },
+        timeout=timeout_s + 30,   # 服务端预算 + 传输余量
+    )
+    r.raise_for_status()
+    return r.json()   # {"code":0,"msg":"ok","data":{"px3","pxde","pxvid","pxcts"[,"diagnostics"]}}
+```
+
+**异步（长预算/要 taskId 幂等）**——`POST /v2/tasks/` 创建，`GET /v2/tasks/{taskId}`
+轮询（captcha.run 兼容，`taskId` 自己传可实现重试不重复消耗）：
+
+```python
+# 创建 → {"taskId": "..."}；轮询 → {"status": "processing"} 直到
+# {"status": "success", "response": {...四件套}} 或
+# {"status": "fail", "error": "...", "diagnostics": {...}}
+```
+
+**重试决策**只看两件事：`data.kind`（失败类别）与 `data.retryable`
+（是否值得重试同一 payload）。固定规则：
+
+| kind | retryable | 调用方动作 |
+|------|-----------|-----------|
+| `px_token_timeout` / `challenge_load_timeout` | true | 换新 challengeUrl 重试 |
+| `challenge_load_failed` | true | 先查代理链路再重试 |
+| `challenge_proxy_auth` | false | 修代理配置（407），重试无意义 |
+| `challenge_http_error` | false（4xx）/true（5xx） | 看 `retryable` 位 |
+| `px_token_blocked` | true | 换出口 IP / 换 vid |
+| `caller_vid_required` | true | 补 deviceId（challengeDetails）或先跑 silent 拿 vid |
+| `solver_busy` | true | 退避后重试（并发已满） |
+
+带 `proxy` 的任务遵循**同 IP 铁律**：后续用 token 的业务请求（risk/verify）
+必须走同一出口，否则 token 作废。
+
+
 ### OCR API
 
 ```python
