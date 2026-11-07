@@ -155,6 +155,26 @@ class TestAliyunCaptchaJsProvider:
         assert isinstance(instance, AliyunCaptchaJsProvider)
         assert instance.name == "aliyun-captcha-js"
 
+    def test_image_selectors_cover_both_dom_shapes(self):
+        """图片镜像元素有两种 DOM 形态，选择器必须同时命中。
+
+        2026-11-04 chat.z.ai 实测：id 从包裹 div 挪到了 <img> 自身
+        （`img#aliyunCaptcha-img` / `img#aliyunCaptcha-puzzle`），旧选择器
+        `#aliyunCaptcha-img img` 命不中 → extract_images 拿 None →
+        "bg/piece image extraction failed"，滑块永远过不去。
+        弹窗 id 同时存在 `-window-popup`（旧）与 `-window-float`（新）。
+        """
+        from slidex.providers import aliyun_captcha_js as mod
+
+        def parts(selector: str) -> set[str]:
+            return {s.strip() for s in selector.split(",")}
+
+        assert parts(mod._BG_IMG) >= {"#aliyunCaptcha-img img", "img#aliyunCaptcha-img"}
+        assert parts(mod._PIECE_IMG) >= {"#aliyunCaptcha-puzzle img",
+                                         "img#aliyunCaptcha-puzzle"}
+        assert parts(mod._POPUP) >= {"#aliyunCaptcha-window-popup",
+                                     "#aliyunCaptcha-window-float"}
+
     def test_knob_target_conversion_chain(self):
         """缺口 bg px → CSS → 二次反解：z.ai 实测链路（k=300/296, bx0=2）。"""
         from unittest.mock import MagicMock

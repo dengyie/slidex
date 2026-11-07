@@ -52,9 +52,13 @@ from slidex._slide_geometry import aliyun_jigsaw_knob_for_piece, scale_recorded_
 
 _KNOB = "#aliyunCaptcha-sliding-slider"
 _TRACK = "#aliyunCaptcha-sliding-body"
-_BG_IMG = "#aliyunCaptcha-img img"
-_PIECE_IMG = "#aliyunCaptcha-puzzle img"
-_POPUP = "#aliyunCaptcha-window-popup"
+# 背景/拼图镜像元素。新一代 SDK 有两种形态：
+#   旧：#aliyunCaptcha-img 是包裹 div，真正 <img> 在其内 → `#aliyunCaptcha-img img`
+#   新（2026-11 实测 chat.z.ai）：<img> 自身带 id → `img#aliyunCaptcha-img`
+# 逗号取并集，两种都命中。
+_BG_IMG = "#aliyunCaptcha-img img, img#aliyunCaptcha-img"
+_PIECE_IMG = "#aliyunCaptcha-puzzle img, img#aliyunCaptcha-puzzle"
+_POPUP = "#aliyunCaptcha-window-popup, #aliyunCaptcha-window-float"
 _TEXT_BOX = "#aliyunCaptcha-sliding-text-box"
 
 _SUCCESS_PAT = ("验证通过", "验证成功", "verification success", "verified")
