@@ -209,11 +209,12 @@ def _response(
     code: int,
     msg: str,
     data: Any,
+    error: Optional[str] = None,
 ) -> JSONResponse:
-    return JSONResponse(
-        status_code=status_code,
-        content={"code": code, "msg": msg, "data": data},
-    )
+    content: Dict[str, Any] = {"code": code, "msg": msg, "data": data}
+    if error is not None:
+        content["error"] = error
+    return JSONResponse(status_code=status_code, content=content)
 
 
 def _failure_response(failure: HandlerFailure) -> JSONResponse:
@@ -227,6 +228,9 @@ def _failure_response(failure: HandlerFailure) -> JSONResponse:
         code=failure.code,
         msg=failure.message,
         data=data,
+        # 需求单 §3.主体：创建失败是 4xx/5xx + {"error": "..."}。额外带上
+        # error 键对 v1 调用方是纯增量，v2 侧则和 captcha.run 形状对齐。
+        error=failure.message,
     )
 
 

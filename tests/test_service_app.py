@@ -226,6 +226,21 @@ def test_missing_app_id_is_422():
     assert response.json()["data"]["kind"] == "invalid_request"
 
 
+def test_failure_envelope_carries_error_key():
+    """需求单 §3.1：创建失败是 4xx/5xx + {"error": "..."}。"""
+    client = _client()
+    response = client.post(
+        "/v2/tasks/",
+        json={"captchaType": "PxCaptcha2", "websiteURL": "https://signup.live.com/"},
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"] == "appId is required"
+    assert body["msg"] == body["error"]
+    assert body["code"] == 422
+
+
 def test_unsupported_type_is_400():
     client = _client()
     response = client.post(

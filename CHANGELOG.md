@@ -77,6 +77,9 @@ provider 治理波（配合 automation-kit 0.6.0）：`visual.challenge` 迎来�
   重置农场（仅在确认真断连时，避免参数错误连坐杀其它在跑任务的 context）。
 - **启动失败泄漏 playwright driver**：`launch()` 抛错时 `_pw` 已赋值但没关，
   每次重试叠一个 node 子进程。现在失败路径统一 `_close_browser()`。
+- **失败响应缺 `error` 键**：需求单 §3.1 要求创建失败是 4xx/5xx + `{"error": "..."}`，
+  实际只回了 `{code,msg,data}`。信封现在额外带 `error`（= `msg`），v2 侧与
+  captcha.run 形状对齐，对 v1 调用方是纯增量、不影响既有解析。
 
 ### Notes
 - **同 IP 铁律**：payload 带 `proxy` 时，浏览器 context 与全部出站请求共用该
@@ -85,14 +88,17 @@ provider 治理波（配合 automation-kit 0.6.0）：`visual.challenge` 迎来�
 - **成功判据**：只认 `px3` 含 `:1000:`；非通过级 token 不冒充成功。
 - **能力边界**：只做协议/浏览器层，不逆向 PX 的 wasm/JS 指纹算法，不做 IP 信誉
   对抗；未在真实 signup.live.com 做回归（仅本地 Chromium 仿真）。
-- 测试 +127：请求模型 34、cookie 逻辑 33、求解器（假 context）22、服务路由 35、
+- 测试 +128：请求模型 34、cookie 逻辑 33、求解器（假 context）22、服务路由 36、
   本地 Chromium 仿真 3（本地 HTTP 页写 cookie，验证真实链路；浏览器不可用时跳过）。
-  全量 959 passed / 18 skipped（基线 832 + 127，零回归；skipped 为 automation_core
+  全量 960 passed / 18 skipped（基线 832 + 128，零回归；skipped 为 automation_core
   未装时的 kit 集成用例）。
 - **线上部署**（gz-cvm，`10.144.144.8:8077`，仅网格监听，systemd
-  `slidex-captcha.service`，`MemoryMax=1200M`，`SLIDEX_PX_CONCURRENCY=3`）：
+  `slidex-captcha.service`，`MemoryMax=1200M`，`SLIDEX_PX_CONCURRENCY=20`）：
   17 项线上验收全绿（health/鉴权/两套协议/合成页 `:1000:`/低分拦截/403 fail-fast/
-  proxy 真的生效（死代理必失败）/日志脱敏/无落盘/TTL/并发上限与串行化）。
+  proxy 真的生效（死代理必失败）/日志脱敏/无落盘/TTL/并发上限与真并行）。
+  并发上限按 §6「起步 ≥5，target 20」逐级实测：3→5→8→16→20 并发慢页，
+  20 并发时 wall 8.0s（串行会 >120s）、cgroup 峰值内存 490MB，故取 20；
+  1.9G 小机器上不再靠 3 槽臆测，`MemoryMax=1200M` 仍是兜底 OOM 边界。
 
 ## [0.7.1] - 2026-11-07
 
