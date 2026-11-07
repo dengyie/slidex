@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.8.5] - 2026-11-08
+
+Code review 收尾：代理 407 拿到独立 kind 与业务码，调用方在数字码层面就能区分
+「改代理配置」（407）与「换 IP / 查链路」（403/5xx/连接失败）。
+
+### Changed
+- **新增 kind `challenge_proxy_auth`**：代理 407 不再与页面层 HTTP 错误共用
+  `challenge_http_error`——两者处置方向不同（407 是代理配置坏了，同一 payload
+  重试永远一样；403/5xx 是页面/上游层面的事）。
+- **新增业务码 `SOLVE_PROXY_AUTH = 1006`**，`challenge_proxy_auth` → 1006。
+  `challenge_http_error`（403/429/404/5xx）保持落默认 1001，已在
+  `codes.py` 注明「处置看 data.retryable」。
+- README 错误码表补齐 1005/1006。
+
+### Removed
+- `_SubresourcePage` 测试构造器里从未使用的 `status=200` 关键字参数。
+
+### Verified
+- 变异验证：把 `for_kind` 的 1006 映射删掉 → `test_proxy_auth_407_maps_to_1006_not_1001`
+  失败（落 1001）；把 solver 的 407 分支改回 `ERR_CHALLENGE_HTTP` →
+  `test_proxy_407_fails_fast_not_retryable` 失败。
+- 全量 977 passed / 18 skipped。
+
 ## [0.8.4] - 2026-11-08
 
 失败类别收口：把「根本没到达挑战页」从「页面加载了但没出 token」里拆出来，

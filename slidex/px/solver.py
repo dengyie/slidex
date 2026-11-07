@@ -25,6 +25,7 @@ from .models import (
     ERR_BROWSER_LAUNCH,
     ERR_CHALLENGE_HTTP,
     ERR_CHALLENGE_LOAD,
+    ERR_PROXY_AUTH,
     ERR_CHALLENGE_TIMEOUT,
     ERR_INTERNAL,
     ERR_SOLVER_BUSY,
@@ -386,7 +387,7 @@ class PxPressSolver:
                 # 浏览器把 407 当文档渲染了，轮询到预算耗尽只会得到一个
                 # 误导性的 px_token_timeout，而同一个 payload 重试永远一样。
                 return PxPressResult(
-                    False, mode=mode, error_kind=ERR_CHALLENGE_HTTP,
+                    False, mode=mode, error_kind=ERR_PROXY_AUTH,
                     error="proxy requires authentication (407)",
                     retryable=False, duration_ms=self._ms(started),
                 )

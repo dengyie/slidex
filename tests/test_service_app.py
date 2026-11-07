@@ -311,6 +311,25 @@ def test_load_failure_maps_to_1005_not_1002():
         assert body["data"]["retryable"] is True
 
 
+def test_proxy_auth_407_maps_to_1006_not_1001():
+    """代理要认证（407）→ 1006，与页面层 403/5xx 的 1001 分开。
+
+    407 是代理配置坏了（改代理密码），403/404 是被拦或配置错，5xx 可重试——
+    处置方向不同，数字码层面就要能区分。
+    """
+    failed = PxPressResult(
+        False, error_kind="challenge_proxy_auth",
+        error="proxy requires authentication (407)", retryable=False,
+    )
+    client = _client(_FakePxSolver(failed))
+    body = client.post(
+        "/v1/solve", json=_PX_BODY, headers={"Authorization": "Bearer secret"}
+    ).json()
+    assert body["code"] == 1006
+    assert body["data"]["kind"] == "challenge_proxy_auth"
+    assert body["data"]["retryable"] is False
+
+
 def test_solver_busy_is_http_429():
     busy = PxPressResult(
         False, error_kind="solver_busy", error="slots exhausted", retryable=True

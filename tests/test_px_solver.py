@@ -19,6 +19,7 @@ import pytest
 from slidex.px.models import (
     ERR_BROWSER_LAUNCH,
     ERR_CHALLENGE_HTTP,
+    ERR_PROXY_AUTH,
     ERR_CHALLENGE_LOAD,
     ERR_CHALLENGE_TIMEOUT,
     ERR_INTERNAL,
@@ -638,7 +639,7 @@ async def test_mid_task_browser_death_resets_farm_and_fails_fast():
 class _SubresourcePage(_FakePage):
     """主帧先回文档，再回若干子资源响应（frame 同为 main_frame）。"""
 
-    def __init__(self, document_status, subresources, *, status=200):
+    def __init__(self, document_status, subresources):
         super().__init__(status=document_status)
         self._document_status = document_status
         self._subresources = list(subresources)
@@ -682,11 +683,12 @@ async def test_200_subresource_does_not_mask_real_404_document():
 
 
 async def test_proxy_407_fails_fast_not_retryable():
-    """代理回 407（要认证）：确定性终止，不许把预算耗成 px_token_timeout。
+    """代理回 407（要认证）：独立 kind（challenge_proxy_auth），确定性终止。
 
     Chromium 把 407 当文档渲染（status=407、resource_type=document），旧逻辑
     只认 403/429/404，于是它一路轮询到预算耗尽，返回误导性的可重试超时——
-    而同一个 payload 配错的代理密码重试永远不会好。
+    而同一个 payload 配错的代理密码重试永远不会好。kind 与页面层 403/5xx
+    （challenge_http_error）分开，因为处置方向不同：407 要改代理配置。
     """
     page = _SubresourcePage(407, [])
     context = _FakeContext([[]], page=page)
@@ -696,7 +698,7 @@ async def test_proxy_407_fails_fast_not_retryable():
     result = await solver.solve(_request())
 
     assert result.success is False
-    assert result.error_kind == ERR_CHALLENGE_HTTP
+    assert result.error_kind == ERR_PROXY_AUTH
     assert result.retryable_error is False
     assert "407" in result.error
     assert time.monotonic() - started < 2.0
