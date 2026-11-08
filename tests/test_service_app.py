@@ -769,3 +769,117 @@ def test_load_env_file_missing_is_silent(tmp_path):
 
     # 不存在 → 静默返回，不抛错（尽力而为）
     app_mod._load_env_file(str(tmp_path / "nope.env"))
+
+
+async def test_cancel_all_is_atomic_against_concurrent_create():
+    """cancel 与清表必须原子（0.9.5 F3）：窗口内 create 的新任务不能被抹掉。
+
+    变异验证：把 cancel_all 里的「list→cancel→clear」改回无锁三步后本测试
+    不稳定失败——新任务仍在跑但 GET 变 404（孤儿任务）。
+    """
+    import asyncio
+
+    from slidex.service.app import TaskStore
+
+    store = TaskStore()
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_runner(payload):
+        started.set()
+        await release.wait()
+        return {"ok": True}
+
+    # 第一个任务进 _running
+    await store.create("t1", "px_press", slow_runner, {})
+    await asyncio.wait_for(started.wait(), timeout=5)
+
+    # cancel_all 进行中，并发塞入第二个任务：cancel+clear 原子化后，
+    # 它只可能 (a) 在 cancel 前入表→被正常取消，或 (b) 在 clear 后入表→
+    # 完整跑完且 GET 仍可见。绝不允许「在跑却 404」。
+    cancel_task = asyncio.ensure_future(store.cancel_all())
+
+    # 让出事件循环，使 cancel_all 先拿到锁并进入等待区
+    await asyncio.sleep(0)
+    second = asyncio.ensure_future(
+        store.create("t2", "px_press", slow_runner, {})
+    )
+    await asyncio.wait_for(second, timeout=5)
+
+    release.set()
+    await asyncio.wait_for(cancel_task, timeout=5)
+
+    # t2 无论处于哪个时序分支，都不该「表里查无但任务还在跑」
+    record = await store.get_owned("t2", None)
+    running_now = store._running.get("t2")
+    assert not (record is None and running_now is not None), (
+        "orphan task: running but invisible via GET"
+    )
+    if record is not None:
+        assert store._running.get("t2") is None or record.status in {
+            "processing", "success",
+        }
+
+
+def test_v2_task_owner_isolation_between_keys():
+    """多 key 部署点：A 创建的任务，B 的 key 轮询必须 404（0.9.5 F7）。
+
+    变异验证：把 get_task 里的 get_owned 换回无条件 get 后本测试失败
+    （B 拿到 A 的任务结果）。开放模式（无 key 配置）不受影响。
+    """
+    import hashlib
+
+    class _BlockingSolver:
+        def __init__(self):
+            self.release = None
+
+        async def solve(self, request):
+            import asyncio
+            await asyncio.Event().wait()  # 一直挂着，任务停 processing
+
+    solver = _BlockingSolver()
+    client = _client(solver, keys=("key-a", "key-b"))
+
+    created = client.post(
+        "/v2/tasks/",
+        headers={"Authorization": "Bearer key-a"},
+        json={"type": "px_press", "appId": "PXzC5j78di", "websiteURL": "https://x.example/"},
+    )
+    assert created.status_code == 200
+    task_id = created.json()["taskId"]
+
+    # 创建者自己能查到
+    mine = client.get(
+        f"/v2/tasks/{task_id}", headers={"Authorization": "Bearer key-a"}
+    )
+    assert mine.status_code == 200
+    assert mine.json()["status"] == "processing"
+
+    # 别的 key 查同一个 id → 404，形状保持 v2 fail
+    theirs = client.get(
+        f"/v2/tasks/{task_id}", headers={"Authorization": "Bearer key-b"}
+    )
+    assert theirs.status_code == 404
+    assert theirs.json() == {"status": "fail", "error": "task not found"}
+
+    # 无 key → 401（不是 404，鉴权语义不混淆）
+    noauth = client.get(f"/v2/tasks/{task_id}")
+    assert noauth.status_code == 401
+
+
+def test_v2_task_open_mode_has_no_owner():
+    """开放模式（无 key）下创建的任务任何请求都可查——过渡期不误伤。"""
+    from fastapi.testclient import TestClient as _TC
+
+    class _FastSolver:
+        async def solve(self, request):
+            return {"px3": "1:a:1000:x::"}
+
+    app = create_app(solver=_FastSolver(), keys=[])
+    client = _TC(app)
+    created = client.post(
+        "/v2/tasks/", json={"type": "px_press", "appId": "PX", "websiteURL": "https://x.example/"}
+    )
+    task_id = created.json()["taskId"]
+    got = client.get(f"/v2/tasks/{task_id}")  # 无 header
+    assert got.status_code == 200

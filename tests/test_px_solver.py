@@ -538,6 +538,27 @@ async def test_dead_browser_is_relaunched():
     assert pw.chromium.launches == 2
 
 
+async def test_farm_launch_pins_adj_via_thread_pool(monkeypatch):
+    """launch 后的自钉走 async 包装（线程池），不再阻塞事件循环（0.9.5 F4）。
+
+    变异验证：把 _pin_oom_score_adj_async 换成同步直调后本测试失败——
+    农场如果还在 launch 路径里同步扫 /proc，事件循环会被卡 ~百 ms。
+    """
+    from slidex.px import solver as solver_mod
+
+    calls = []
+
+    async def fake_async_pin(adj=-20):
+        calls.append(("async", adj))
+
+    monkeypatch.setattr(solver_mod, "_pin_oom_score_adj_async", fake_async_pin)
+
+    pw = _FakePw([_FakeBrowserObj()])
+    farm = _BrowserFarm(lambda: _resolve(pw), headless=True, extra_args=[])
+    await farm.browser()
+    assert calls == [("async", -20)]
+
+
 async def test_launch_failure_does_not_leak_driver():
     """首发失败要把 playwright driver 一起关掉，否则 node 进程逐个泄漏。"""
     pw_bad = _FakePw([RuntimeError("no chromium")])
@@ -1064,6 +1085,68 @@ async def test_env_chromium_args_reach_launch(monkeypatch):
     monkeypatch.setenv("SLIDEX_PX_CHROMIUM_ARGS", "--renderer-process-limit=4")
     await farm.browser()
     assert "--renderer-process-limit=4" in captured["args"]
+
+
+async def test_vid_seeding_does_not_hold_main_slot(monkeypatch):
+    """补种期间主并发槽必须放回：concurrency=1 时第二个 press 请求应能进槽。
+
+    回归背景（0.9.5 review F1）：种子原先在主槽内跑（最长 25s），低并发部署
+    点上两个 vid 缺失的调用方会互相把对方顶成 solver_busy。变异验证：把
+    「释放主槽」删掉后本测试失败（第二个请求 solver_busy）。
+    """
+    release_events = []
+    real_acquire = PxPressSlots.acquire
+    real_release = PxPressSlots.release
+
+    def tracked_acquire(self):
+        release_events.append("acquire")
+        return real_acquire(self)
+
+    def tracked_release(self):
+        release_events.append("release")
+        return real_release(self)
+
+    seeding = asyncio.Event()
+
+    async def fake_harvest(self, request):
+        # 种子跑的时候主槽必须已经放回（acquire 计数 < release 计数 + …）
+        release_events.append("seed_running")
+        assert "release" in release_events, "seed started while still holding main slot"
+        seeding.set()
+        return "vid-seeded"
+
+    real_solve_once = PxPressSolver._solve_once
+
+    async def fake_solve_once(self, request, started):
+        return PxPressResult(
+            True, tokens={"px3": _PASS_PX3, "pxvid": request.vid},
+            mode=request.mode, duration_ms=1,
+        )
+
+    monkeypatch.setattr(PxPressSlots, "acquire", tracked_acquire)
+    monkeypatch.setattr(PxPressSlots, "release", tracked_release)
+
+    solver = PxPressSolver(concurrency=1, context_factory=lambda opts: _resolve(_FakeContext([[]])))
+    solver._harvest_vid = fake_harvest.__get__(solver)  # type: ignore[method-assign]
+    solver._solve_once = fake_solve_once.__get__(solver)  # type: ignore[method-assign]
+
+    # 第一个请求：vid 缺失，走补种路径
+    first = asyncio.ensure_future(solver.solve(_request(vid="")))
+    await asyncio.wait_for(seeding.wait(), timeout=5)
+    # 主槽应已放回：第二个请求（带 vid）此刻必须能直接求解，不等种子结束
+    second_started = asyncio.Event()
+
+    async def second_solve():
+        result = await solver.solve(_request())
+        second_started.set()
+        return result
+
+    second = asyncio.ensure_future(second_solve())
+    await asyncio.wait_for(second_started.wait(), timeout=5)
+    r1 = await asyncio.wait_for(first, timeout=10)
+    r2 = await asyncio.wait_for(second, timeout=10)
+    assert r1.success is True
+    assert r2.success is True
 
 
 async def test_vid_missing_auto_seeds_then_presses():

@@ -106,6 +106,10 @@ def _pin_oom_score_adj(adj: int = -20) -> None:
     launch 刚返回 / 每任务 new_context 前自钉一次，把空档收窄到进程间。
     只写 /proc/<pid>/oom_score_adj，失败静默（尽力而为，权限不足时由
     外部 guard 兜底）。
+
+    注意：这是同步 /proc 全量扫描（pxed 实测 ~140ms），**阻塞式**——
+    async 调用方必须经 :func:`_pin_oom_score_adj_async` 进线程池，别在
+    事件循环里直接调用。
     """
     try:
         names = os.listdir("/proc")
@@ -126,6 +130,11 @@ def _pin_oom_score_adj(adj: int = -20) -> None:
                 fh.write(str(adj))
         except Exception:  # pragma: no cover - 权限/竞态
             continue
+
+
+async def _pin_oom_score_adj_async(adj: int = -20) -> None:
+    """``_pin_oom_score_adj`` 的线程池版本：/proc 扫描不让事件循环等。"""
+    await asyncio.to_thread(_pin_oom_score_adj, adj)
 
 
 def _default_launch_args(*, is_root: bool) -> List[str]:
@@ -188,7 +197,8 @@ class _BrowserFarm:
                     args=launch_args,
                 )
                 # 主进程树此刻已完整 fork：立即钉 adj，堵 guard 轮询空档
-                _pin_oom_score_adj()
+                #（/proc 扫描 ~百 ms，走线程池别卡事件循环）
+                await _pin_oom_score_adj_async()
             except Exception:
                 # 启动失败要把 playwright driver（node 进程）也清掉，否则
                 # 下次 launch 会叠加泄漏 node 子进程
@@ -439,6 +449,10 @@ class PxPressSolver:
         self._slots = slots or PxPressSlots(concurrency=concurrency)
         self._farm: Optional[_BrowserFarm] = None
         self._closed = False
+        # 种子任务（vid 补种）单独限速：低并发部署点（如 concurrency=2）上，
+        # 若种子与正式求解共用一个槽，一次补种会把正式求解顶出槽最长 25s，
+        # 两个 vid 缺失的调用方就能让服务 busy 掉整个窗口。
+        self._seed_slots = PxPressSlots(concurrency=1)
 
     # ------------------------------------------------------------------ 对外
     @property
@@ -454,7 +468,7 @@ class PxPressSolver:
             except asyncio.TimeoutError:
                 # 排队超预算：让调用方拿到明确的 busy，而不是干等到自身超时
                 return PxPressResult(
-                    False, mode=request.mode, error_kind=ERR_SOLVER_BUSY,
+                    success=False, mode=request.mode, error_kind=ERR_SOLVER_BUSY,
                     error="solver_busy: concurrency slots exhausted", retryable=True,
                 )
         else:
@@ -467,10 +481,35 @@ class PxPressSolver:
             if request.vid or request.mode != "press":
                 effective = request
             else:
-                seeded_vid = await self._seed_vid(request)
+                # 种子不占主槽：主槽在补种期间先放回去，种子在自己的限速槽里
+                # 跑；拿回 vid 后重新排队进主槽求解（极端情况下可能二次排队，
+                # 但种子最长 25s，比占着主槽空转 25s 对并发友好得多）。
+                sem.release()
+                self._slots.release()
+                try:
+                    seeded_vid = await self._seed_vid(request)
+                finally:
+                    if self._closed:
+                        return PxPressResult(
+                            success=False, mode=request.mode, error_kind=ERR_INTERNAL,
+                            error="solver closed during vid seeding", retryable=True,
+                            duration_ms=self._ms(started),
+                        )
+                    if self._queue_timeout_s > 0:
+                        try:
+                            await asyncio.wait_for(sem.acquire(), timeout=self._queue_timeout_s)
+                        except asyncio.TimeoutError:
+                            return PxPressResult(
+                                success=False, mode=request.mode, error_kind=ERR_SOLVER_BUSY,
+                                error="solver_busy: concurrency slots exhausted after seeding",
+                                retryable=True, duration_ms=self._ms(started),
+                            )
+                    else:
+                        await sem.acquire()
+                    self._slots.acquire()
                 if not seeded_vid:
                     return PxPressResult(
-                        False, mode=request.mode, error_kind=ERR_VID_REQUIRED,
+                        success=False, mode=request.mode, error_kind=ERR_VID_REQUIRED,
                         error=(
                             "vid is empty and auto-seed via bare silent failed; "
                             "caller should send challengeDetails.deviceId"
@@ -525,6 +564,68 @@ class PxPressSolver:
             return None
         return await self._farm.browser()
 
+    async def _new_task_context(
+        self,
+        request: PxPressRequest,
+        diag: Optional[_Diagnostics],
+        browser: Any = None,
+        *,
+        with_parent_probe: bool = False,
+    ) -> Any:
+        """任务 context 装配（_solve_once 与 _harvest_vid 共用）。
+
+        步骤：context（测试注入或真 farm，真 farm 上 new_context 失败且浏览器
+        已断连时重置农场）→ stealth init script（locale 注入；probe 模式还挂
+        postMessage 观测）→ caller cookies 注入。返回裸 context，调用方自己
+        new_page / 挂事件 / close。
+        """
+        context_options = self._context_options(request)
+        if self._context_factory is not None:
+            context = await self._context_factory(context_options)
+        else:
+            if browser is None:  # pragma: no cover
+                raise RuntimeError("no browser")
+            try:
+                context = await browser.new_context(**context_options)
+            except Exception:
+                # 只有「浏览器真的断了」才重置农场：new_context 参数错误
+                # 不能连坐杀掉其它在跑任务的 context
+                connected = True
+                try:
+                    connected = bool(browser.is_connected())
+                except Exception:  # pragma: no cover
+                    connected = False
+                if not connected and self._farm is not None:
+                    logger.warning("px: chromium gone mid-task, resetting farm")
+                    await self._farm.close()
+                    self._farm = None
+                raise
+        add_init_script = getattr(context, "add_init_script", None)
+        if callable(add_init_script):
+            try:
+                await add_init_script(
+                    _STEALTH_INIT_SCRIPT
+                    % {"locale": context_options.get("locale") or _FALLBACK_LOCALE}
+                )
+                if with_parent_probe:
+                    # 父页→iframe 的 postMessage 只记「发生过」，不记内容
+                    await add_init_script(_PARENT_MESSAGE_PROBE)
+            except Exception as exc:  # pragma: no cover - 注入失败不阻断
+                logger.debug(f"px: stealth init script skipped: {exc}")
+        if with_parent_probe and diag is not None:
+            await self._expose_parent_probe(context, diag)
+        specs = self._cookie_specs(request)
+        if specs:
+            try:
+                await context.add_cookies(specs)
+                logger.info(
+                    "px: injected cookies {} (domains redacted, {} specs)",
+                    sorted({s["name"] for s in specs}), len(specs),
+                )
+            except Exception as exc:  # pragma: no cover - 坏 cookie 名/域
+                logger.warning(f"px: add_cookies skipped: {exc}")
+        return context
+
     async def _solve_once(self, request: PxPressRequest, started: float) -> PxPressResult:
         deadline = started + request.solve_timeout_s
         mode = request.mode
@@ -534,7 +635,7 @@ class PxPressSolver:
         except Exception as exc:
             logger.warning(f"px: browser launch failed: {exc}")
             return PxPressResult(
-                False, mode=mode, error_kind=ERR_BROWSER_LAUNCH,
+                success=False, mode=mode, error_kind=ERR_BROWSER_LAUNCH,
                 error=f"browser_launch_failed: {exc}", retryable=True,
                 duration_ms=self._ms(started),
             )
@@ -547,50 +648,10 @@ class PxPressSolver:
             # new_context 会 fork 新 renderer（默认 adj=300）：每个任务前
             # 再钉一轮，覆盖 launch 之后新出现的进程（宿主 OOM 防祭品）。
             if self._context_factory is None:
-                _pin_oom_score_adj()
-            context_options = self._context_options(request)
-            if self._context_factory is not None:
-                context = await self._context_factory(context_options)
-            else:
-                if browser is None:  # pragma: no cover
-                    raise RuntimeError("no browser")
-                try:
-                    context = await browser.new_context(**context_options)
-                except Exception:
-                    # 只有「浏览器真的断了」才重置农场：new_context 参数错误
-                    # 不能连坐杀掉其它在跑任务的 context
-                    connected = True
-                    try:
-                        connected = bool(browser.is_connected())
-                    except Exception:  # pragma: no cover
-                        connected = False
-                    if not connected and self._farm is not None:
-                        logger.warning("px: chromium gone mid-task, resetting farm")
-                        await self._farm.close()
-                        self._farm = None
-                    raise
-            add_init_script = getattr(context, "add_init_script", None)
-            if callable(add_init_script):
-                try:
-                    await add_init_script(
-                        _STEALTH_INIT_SCRIPT
-                        % {"locale": context_options.get("locale") or _FALLBACK_LOCALE}
-                    )
-                    # 父页→iframe 的 postMessage 只记「发生过」，不记内容
-                    await add_init_script(_PARENT_MESSAGE_PROBE)
-                except Exception as exc:  # pragma: no cover - 注入失败不阻断
-                    logger.debug(f"px: stealth init script skipped: {exc}")
-            await self._expose_parent_probe(context, diag)
-            specs = self._cookie_specs(request)
-            if specs:
-                try:
-                    await context.add_cookies(specs)
-                    logger.info(
-                        "px: injected cookies {} (domains redacted, {} specs)",
-                        sorted({s["name"] for s in specs}), len(specs),
-                    )
-                except Exception as exc:  # pragma: no cover - 坏 cookie 名/域
-                    logger.warning(f"px: add_cookies skipped: {exc}")
+                await _pin_oom_score_adj_async()
+            context = await self._new_task_context(
+                request, diag, browser, with_parent_probe=True
+            )
 
             page = await context.new_page()
             page_status: Dict[str, int] = {}
@@ -717,7 +778,7 @@ class PxPressSolver:
                         mode, redact_token(px3), missing, diag.px_cookie_names_seen,
                     )
                     return PxPressResult(
-                        True, tokens=tokens, mode=mode, duration_ms=self._ms(started),
+                        success=True, tokens=tokens, mode=mode, duration_ms=self._ms(started),
                         missing=missing, diagnostics=diag.snapshot(),
                     )
                 if px3 and not is_pass_token(px3):
@@ -770,7 +831,7 @@ class PxPressSolver:
     ) -> PxPressResult:
         """失败终态：统一把诊断观测挂上，调用方在 fail 响应里直接可见。"""
         return PxPressResult(
-            False, mode=mode, error_kind=kind, error=message,
+            success=False, mode=mode, error_kind=kind, error=message,
             retryable=retryable, duration_ms=PxPressSolver._ms(started),
             diagnostics=diag.snapshot(),
         )
@@ -967,7 +1028,25 @@ class PxPressSolver:
             solve_timeout_s=25.0, poll_interval_s=max(0.5, request.poll_interval_s),
         )
         logger.info("px: vid missing, seeding via bare silent on {}", request.website_url)
-        vid = await self._harvest_vid(seeded)
+        # 种子限速：全局同时最多 1 个补种任务（种子是 best-effort 的旁路，
+        # 不该跟正式求解抢 context/内存，更不该多个种子并发叠加）。
+        seed_sem = self._seed_slots.ensure_semaphore()
+        if self._queue_timeout_s > 0:
+            try:
+                await asyncio.wait_for(
+                    seed_sem.acquire(), timeout=self._queue_timeout_s
+                )
+            except asyncio.TimeoutError:
+                logger.warning("px: vid seed queue full, giving up seeding")
+                return None
+        else:
+            await seed_sem.acquire()
+        self._seed_slots.acquire()
+        try:
+            vid = await self._harvest_vid(seeded)
+        finally:
+            self._seed_slots.release()
+            seed_sem.release()
         if vid:
             logger.info("px: vid seeded ok ({})", redact_token(vid))
         else:
@@ -983,28 +1062,9 @@ class PxPressSolver:
         page = None
         try:
             browser = await self._browser()
-            context_options = self._context_options(request)
-            if self._context_factory is not None:
-                context = await self._context_factory(context_options)
-            else:
-                if browser is None:  # pragma: no cover
-                    raise RuntimeError("no browser")
-                context = await browser.new_context(**context_options)
-            add_init_script = getattr(context, "add_init_script", None)
-            if callable(add_init_script):
-                try:
-                    await add_init_script(
-                        _STEALTH_INIT_SCRIPT
-                        % {"locale": context_options.get("locale") or _FALLBACK_LOCALE}
-                    )
-                except Exception:  # pragma: no cover
-                    pass
-            specs = self._cookie_specs(request)
-            if specs:
-                try:
-                    await context.add_cookies(specs)
-                except Exception:  # pragma: no cover
-                    pass
+            context = await self._new_task_context(
+                request, None, browser, with_parent_probe=False
+            )
             page = await context.new_page()
             nav_kind, nav_reason = await self._goto(
                 page, request.website_url, self._nav_kwargs(request, _NAV_TIMEOUT_S)

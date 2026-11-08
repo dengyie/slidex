@@ -84,3 +84,23 @@ class HandlerRegistry:
 
     def types(self) -> Sequence[str]:
         return sorted(self._handlers)
+
+    def canonical_types(self) -> Sequence[str]:
+        """每个 handler 一个名字（type_names 首个）：/health 的可读视图。
+
+        全别名列表（press/px/gt3/…）是路由层的宽容，运维看板只需要知道
+        「有几种求解器」。
+        """
+        seen = set()
+        out = []
+        for handler in self._handlers.values():
+            marker = id(handler)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            for name in handler.type_names:
+                key = normalize_type(name)
+                if key in self._handlers and self._handlers[key] is handler:
+                    out.append(key)
+                    break
+        return sorted(out)

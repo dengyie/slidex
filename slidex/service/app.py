@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import os
 import time
@@ -115,6 +116,10 @@ class TaskRecord:
     diagnostics: Optional[Dict[str, Any]] = None
     created_at: float = field(default_factory=time.monotonic)
     finished_at: Optional[float] = None
+    # 创建者的 key 指纹（sha256 前 16 hex）：多 key 部署点（不同业务方不同
+    # key）上，A 不该用 GET /v2/tasks/{id} 轮询到 B 的任务结果。存指纹不存
+    # key 本体——内存表也不多留一份可逆的凭据。None = 开放模式（无 key）。
+    owner_fingerprint: Optional[str] = None
 
     def public(self) -> Dict[str, Any]:
         if self.status == "success":
@@ -146,24 +151,45 @@ class TaskStore:
         captcha_type: str,
         runner: Any,
         payload: Dict[str, Any],
+        *,
+        owner_fingerprint: Optional[str] = None,
     ) -> TaskRecord:
         async with self._lock:
-            self._purge_locked()
+            self._purge()
             existing = self._tasks.get(task_id)
             if existing is not None:
                 # taskId 是幂等键：重复创建返回原任务，绝不重复消耗求解资源
                 return existing
-            record = TaskRecord(task_id=task_id, captcha_type=captcha_type)
+            record = TaskRecord(
+                task_id=task_id, captcha_type=captcha_type,
+                owner_fingerprint=owner_fingerprint,
+            )
             self._tasks[task_id] = record
             self._running[task_id] = asyncio.create_task(
                 self._run(record, runner, payload)
             )
             return record
 
-    async def get(self, task_id: str) -> Optional[TaskRecord]:
+    async def get_owned(
+        self, task_id: str, owner_fingerprint: Optional[str]
+    ) -> Optional[TaskRecord]:
+        """按任务 id + 属主指纹取任务：指纹不匹配按不存在处理（不泄露存在性）。
+
+        开放模式（fingerprint 为 None）或任务创建于开放模式时放行——同实例
+        从鉴权关闭切到开启的过渡期不误伤。
+        """
         async with self._lock:
-            self._purge_locked()
-            return self._tasks.get(task_id)
+            self._purge()
+            record = self._tasks.get(task_id)
+            if record is None:
+                return None
+            if (
+                owner_fingerprint is not None
+                and record.owner_fingerprint is not None
+                and record.owner_fingerprint != owner_fingerprint
+            ):
+                return None
+            return record
 
     async def _run(
         self, record: TaskRecord, runner: Any, payload: Dict[str, Any]
@@ -199,21 +225,23 @@ class TaskStore:
             )
 
     def _record_outcome(self, ok: bool) -> None:
+        # 无锁（单事件循环内 deque append/popleft 原子；名字不带 _locked
+        # 后缀——本类只有 create/get/cancel_all 走 self._lock）。
         now = time.monotonic()
         (self._done if ok else self._fail).append(now)
-        self._trim_locked(now)
+        self._trim(now)
 
     def record_outcome(self, ok: bool) -> None:
         """同步接口（/v1/solve）的成败同样计入 24h 看板。"""
         self._record_outcome(ok)
 
-    def _trim_locked(self, now: float) -> None:
+    def _trim(self, now: float) -> None:
         cutoff = now - _COUNTER_WINDOW_S
         for bucket in (self._done, self._fail):
             while bucket and bucket[0] < cutoff:
                 bucket.popleft()
 
-    def _purge_locked(self) -> None:
+    def _purge(self) -> None:
         now = time.monotonic()
         expired = [
             task_id
@@ -226,19 +254,23 @@ class TaskStore:
 
     def counters(self) -> Dict[str, int]:
         now = time.monotonic()
-        self._trim_locked(now)
+        self._trim(now)
         return {"done_24h": len(self._done), "fail_24h": len(self._fail)}
 
     async def cancel_all(self) -> None:
-        running = list(self._running.values())
-        for fut in running:
-            fut.cancel()
+        # 取消与清表必须原子：若先 list 再 clear，窗口内 create() 插入的新
+        # 任务会被 clear() 从表里抹掉——任务还在跑，但 GET 已经 404，变成
+        # 无人管理的孤儿（shutdown 时还会骗过「没有在跑任务」的判定）。
+        async with self._lock:
+            running = list(self._running.values())
+            for fut in running:
+                fut.cancel()
+            self._running.clear()
         for fut in running:
             try:
                 await fut
             except (asyncio.CancelledError, Exception):
                 pass
-        self._running.clear()
 
 
 def _response(
@@ -294,6 +326,19 @@ class _Auth:
                 status_code=401,
                 code=codes.UNAUTHORIZED,
             )
+
+    def owner_fingerprint(self, request: Request) -> Optional[str]:
+        """调用方 key 的不可逆指纹（sha256 前 16 hex）；开放模式返回 None。
+
+        v2 任务属主绑定用：指纹进 TaskRecord，GET 时比对——多 key 部署点
+        上业务方之间互不可见对方任务。不存 key 本体，泄露面为零。
+        """
+        if not self._keys:
+            return None
+        token = _bearer_token(request)
+        if not token:
+            return None
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
 
 
 async def _read_json(request: Request) -> Dict[str, Any]:
@@ -363,7 +408,7 @@ def create_app(
             "active_tasks": int(getattr(px_solver, "active_tasks", 0) or 0),
             "done_24h": counters["done_24h"],
             "fail_24h": counters["fail_24h"],
-            "types": list(handler_registry.types()),
+            "types": list(handler_registry.canonical_types()),
         }
 
     @app.post("/v1/solve")
@@ -427,7 +472,10 @@ def create_app(
             # 参数错误在创建时就暴露为 4xx，而不是让调用方轮询到 fail
             validate(body)
 
-        await store.create(task_id, captcha_type, handler.solve, body)
+        await store.create(
+            task_id, captcha_type, handler.solve, body,
+            owner_fingerprint=auth.owner_fingerprint(request),
+        )
         return JSONResponse(status_code=200, content={"taskId": task_id})
 
     @app.get("/v2/tasks/{task_id}")
@@ -440,7 +488,8 @@ def create_app(
                 status_code=exc.status_code,
                 content={"status": "fail", "error": exc.message},
             )
-        record = await store.get(task_id)
+        # 属主绑定：别人的 key 查这个 taskId 一律 404（不泄露任务存在性）
+        record = await store.get_owned(task_id, auth.owner_fingerprint(request))
         if record is None:
             return JSONResponse(
                 status_code=404,

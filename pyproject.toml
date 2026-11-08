@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "slidex"
-version = "0.9.4"
+version = "0.9.5"
 description = "专业滑块验证码求解库 | Professional CAPTCHA Solver — Multi-provider auto-detection, CDP mode, point-select, hCaptcha, PX press-token service, plugin-extensible"
 requires-python = ">=3.10"
 license = "MIT"
@@ -70,8 +70,13 @@ all = [
     "slidex[automation-kit,remote,vision,server,dev]",
 ]
 
+[tool.setuptools]
+# slidex/stealth.py（XianyuSliderStealth，12k 行闲鱼专用链路）只被 tests/demo
+# 引用，服务运行时不 import——不随 wheel 分发（setuptools 没有包内单模块的
+# exclude 开关，这里用 build_py 钩子做，见 setup.py）。
+
 [tool.setuptools.packages.find]
-include = ["slidex*", "demo*"]
+include = ["slidex", "slidex.*", "demo*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

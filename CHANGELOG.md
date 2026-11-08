@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.9.5] - 2026-11-08
+
+深度 review（结构 + 性能）修复批次：并发槽、事件循环阻塞、多租户隔离、
+wheel 分发面。全部变异验证或有明确不变量测试。
+
+### Fixed
+- **vid 补种占用主并发槽（F1）**：press 且 vid 缺失时，种子任务原先在主槽
+  内跑（最长 25s），concurrency=2 的部署点上两个 vid 缺失的调用方互顶成
+  `solver_busy`。现在主槽在补种期间放回，种子走独立限速槽（全局并发 1），
+  完成后重新排队进主槽。变异验证：删掉放回 → 新测试失败。
+- **`_pin_oom_score_adj` 阻塞事件循环（F4）**：/proc 全量扫描同步执行
+  （pxed 实测 ~140ms/轮，每任务两次），会卡住其它请求半个 poll 周期。
+  新增 `_pin_oom_score_adj_async()`（`asyncio.to_thread`），launch 后与
+  每任务前两个调用点均走线程池。变异验证：回退同步直调 → 测试失败。
+- **`TaskStore.cancel_all` 竞态窗口（F3）**：list→cancel→clear 三步之间
+  create 插入的任务会被 clear 抹掉（任务在跑但 GET 404 的孤儿）。改为
+  `async with self._lock` 内 cancel+clear 原子完成。附时序不变量测试
+  （注：单线程 TestClient 下竞态窗口写不出稳定失败，测试断言不变量）。
+- **v2 任务无属主隔离（F7）**：多 key 部署点上 A 的 key 能轮询到 B 的
+  taskId 结果。`TaskRecord` 记创建者 key 的 sha256 指纹（前 16 hex，不存
+  key 本体），`GET /v2/tasks/{id}` 时比对，不匹配一律 404（不泄露存在性）；
+  开放模式不受影响。变异验证：禁用比对 → 测试失败。
+
+### Changed
+- **wheel 排除 `slidex/stealth.py`（F2）**：12k 行闲鱼专用链路只被
+  tests/demo 引用，服务运行时不 import——经 `setup.py` 的 `build_py`
+  钩子排除，wheel 355KB→235KB；源码仓保留维持测试。运行时依赖
+  `_stealth_patch` 不受影响。
+- **`/health` 的 `types` 输出按 handler 去重（F6）**：从 11 个别名收敛为
+  每求解器一个规范名（`["geetest_v3", "px_press"]` 形状），registry 新增
+  `canonical_types()`。
+- **`PxPressResult` 构造改 keyword（F5）**：solver 内 7 处位置参数
+  `success` 改为 `success=True/False`，杜绝未来插字段静默错位。
+- **context 装配去重（P2-2）**：`_solve_once` 与 `_harvest_vid` 重复的
+  30 行装配逻辑（context 创建 + 断连重置 + stealth 注入 + cookies）抽成
+  `_new_task_context()`，probe 差异用参数表达。
+
+### Verified
+- 全量回归与部署实测见 deploy/README 同版本文档。
+
 ## [0.9.4] - 2026-11-08
 
 pxed（4G 无 swap 共享 pod）常态化部署专项：修掉宿主全局 OOM 杀 chromium
