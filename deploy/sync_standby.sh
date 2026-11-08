@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# pxed 冷备同步：把 wheel/env/check/nace 配置拉齐到 pxed，保证随时可切。
+# 冷备同步：把 wheel/env/check/nace 配置拉齐到备机，保证随时可切。
+# 主 = mesh-huawei（华为云上海）；备 = mesh-mango2（pxed 实测 load 顶不住 chrome，
+# 已降级为仅配置冷备）。备机切换用 systemctl（两台都是 systemd）。
 # 用法：./deploy/sync_standby.sh          # 全量同步 + 备机自检
 #       ./deploy/sync_standby.sh --check  # 只自检不传输
 set -euo pipefail
 
-STANDBY="${SLIDEX_STANDBY_REMOTE:-mesh-pxed}"
+STANDBY="${SLIDEX_STANDBY_REMOTE:-mesh-mango2}"
+STANDBY_MESH_IP="${SLIDEX_STANDBY_MESH_IP:-10.144.144.88}"
 ACTIVE="${SLIDEX_ACTIVE_REMOTE:-mesh-huawei}"
 REMOTE_DIR="/opt/slidex-captcha"
 VENV="$REMOTE_DIR/.venv"
@@ -31,7 +34,7 @@ if [ "${1:-}" = "--check" ]; then
   exit 0
 fi
 
-echo "==> [1/4] wheel 0.9.x 同步（本地构建 → pxed 安装）"
+echo "==> [1/4] wheel 0.9.x 同步（本地构建 → 备机安装）"
 WHEEL=$(ls dist/slidex-$VERSION-py3-none-any.whl 2>/dev/null || true)
 if [ -z "$WHEEL" ]; then
   [ -x /tmp/slidex-build/bin/python ] || { echo "missing build venv /tmp/slidex-build" >&2; exit 1; }
@@ -39,18 +42,18 @@ if [ -z "$WHEEL" ]; then
   WHEEL=dist/slidex-$VERSION-py3-none-any.whl
 fi
 scp -q "$WHEEL" "$STANDBY:/tmp/"
-ssh "$STANDBY" "sudo /root/.local/bin/uv pip install --python $STANDBY_VENV/bin/python --force-reinstall --no-deps -q /tmp/$(basename "$WHEEL") && rm /tmp/$(basename "$WHEEL")"
+ssh "$STANDBY" "sudo /opt/slidex-captcha/.venv/bin/pip install --force-reinstall --no-deps -q /tmp/$(basename "$WHEEL") && rm /tmp/$(basename "$WHEEL")"
 
 echo "==> [2/4] env 同步（经本机内存管道，不落本地盘）"
-ssh "$ACTIVE" 'cat /etc/slidex-captcha.env' | ssh "$STANDBY" 'cat > /etc/slidex-captcha.env && chmod 600 /etc/slidex-captcha.env'
+ssh "$ACTIVE" 'cat /etc/slidex-captcha.env' | ssh "$STANDBY" 'sudo tee /etc/slidex-captcha.env >/dev/null && sudo chmod 600 /etc/slidex-captcha.env'
 # env 变更后必须重载备机服务（key 是 import 时读的；不同步重启会让备机 401）
-ssh "$STANDBY" 'sudo supervisorctl -c /personal/pxed/supervisord.conf restart slidex-captcha >/dev/null && sleep 3'
+ssh "$STANDBY" 'sudo systemctl restart slidex-captcha >/dev/null && sleep 3'
 
 echo "==> [3/4] check 工具 + nace 配置对齐"
 scp -q "$CHECK_DIR/deep_check.py" "$CHECK_DIR/cycle_check.py" "$STANDBY:/tmp/" 2>/dev/null || \
   scp -q /tmp/slidex-deep/deep_check.py deploy/cycle_check.py "$STANDBY:/tmp/"
-ssh "$STANDBY" "sudo mkdir -p $CHECK_DIR && sudo mv /tmp/deep_check.py /tmp/cycle_check.py $CHECK_DIR/ && sudo sed -i 's|http://10.144.144.9:8077|http://10.144.144.31:8077|' $CHECK_DIR/cycle_check.py"
-# nace：配置与探针脚本拉齐（pxed 仍是 supervisor 形态，探针脚本供切换后使用）
+ssh "$STANDBY" "sudo mkdir -p $CHECK_DIR && sudo mv /tmp/deep_check.py /tmp/cycle_check.py $CHECK_DIR/ && sudo sed -i 's|http://10.144.144.9:8077|http://$STANDBY_MESH_IP:8077|' $CHECK_DIR/cycle_check.py"
+# nace：配置与探针脚本拉齐（探针供备机切换为主后使用）
 ssh "$ACTIVE" "cat $NACE_DIR/config/egress.yaml" | ssh "$STANDBY" "sudo tee $NACE_DIR/config/egress.yaml >/dev/null"
 ssh "$ACTIVE" "cat $NACE_DIR/health_probe.sh" | ssh "$STANDBY" "sudo tee $NACE_DIR/health_probe.sh >/dev/null && sudo chmod 700 $NACE_DIR/health_probe.sh"
 
@@ -58,5 +61,5 @@ echo "==> [4/4] 备机自检"
 standby_ok "$VERSION"
 
 echo "✔ standby in sync ($STANDBY = slidex $VERSION)。切换："
-echo "  ssh $STANDBY 'sudo supervisorctl -c /personal/pxed/supervisord.conf restart slidex-captcha'"
-echo "  调用方 CAPTCHA_RUN_BASE 改指 http://10.144.144.31:8077"
+echo "  ssh $STANDBY 'sudo systemctl restart slidex-captcha'"
+echo "  调用方 CAPTCHA_RUN_BASE 改指 http://$STANDBY_MESH_IP:8077"
