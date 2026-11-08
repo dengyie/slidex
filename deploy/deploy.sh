@@ -8,6 +8,19 @@ REMOTE_DIR="${SLIDEX_DEPLOY_DIR:-/opt/slidex-captcha}"
 VENV="${SLIDEX_DEPLOY_VENV:-$REMOTE_DIR/.venv}"
 CHECK_DIR="${SLIDEX_DEPLOY_CHECK:-$REMOTE_DIR/check}"
 BUILD_VENV="${SLIDEX_BUILD_VENV:-/tmp/slidex-build}"
+# 各机器服务绑定的 mesh IP（health 检查与 deep_check 的 SLIDEX_BASE 都用它）
+# huawei-sh = 华为云上海 10.144.144.9（gz-cvm 2026-11-10 到期后的接替机）
+case "$REMOTE" in
+  gz-cvm)    MESH_IP="${SLIDEX_MESH_IP:-10.144.144.8}" ;;
+  mesh-huawei|huawei-sh) MESH_IP="${SLIDEX_MESH_IP:-10.144.144.9}" ;;
+  *)         MESH_IP="${SLIDEX_MESH_IP:-}" ;;   # 未登记机器需显式给 SLIDEX_MESH_IP
+esac
+if [ -z "$MESH_IP" ]; then
+  echo "unknown REMOTE '$REMOTE': set SLIDEX_MESH_IP=<service bind ip>" >&2
+  exit 1
+fi
+# 部分机器（如 mesh-huawei）直接 root 登录、没有 sudo；有 sudo 才用
+SUDO=$(ssh "$REMOTE" 'command -v sudo >/dev/null 2>&1 && echo sudo || true')
 
 cd "$(dirname "$0")/.."
 VERSION="${1:-$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')}"
@@ -27,8 +40,8 @@ scp -q "$WHEEL" "$REMOTE:/tmp/"
 
 echo "==> [3/6] install + restart"
 ssh "$REMOTE" "set -e
-  sudo $VENV/bin/python -m pip install --force-reinstall --no-deps -q /tmp/$(basename "$WHEEL")
-  sudo systemctl restart slidex-captcha
+  $SUDO $VENV/bin/python -m pip install --force-reinstall --no-deps -q /tmp/$(basename "$WHEEL")
+  $SUDO systemctl restart slidex-captcha
   sleep 3
   systemctl is-active slidex-captcha >/dev/null || { journalctl -u slidex-captcha -n 30 --no-pager; exit 1; }
   $VENV/bin/python -c 'import importlib.metadata as m; print(\"    version:\", m.version(\"slidex\"))'"
@@ -42,9 +55,9 @@ fi
 echo "    sha ok: ${LOCAL_SHA:0:16}…"
 
 echo "==> [5/6] health"
-ssh "$REMOTE" "curl -s --max-time 5 http://10.144.144.8:8077/health | head -c 200; echo"
+ssh "$REMOTE" "curl -s --max-time 5 http://$MESH_IP:8077/health | head -c 200; echo"
 
 echo "==> [6/6] deep_check"
-ssh "$REMOTE" "sudo $VENV/bin/python $CHECK_DIR/deep_check.py 2>&1 | tail -2"
+ssh "$REMOTE" "$SUDO $VENV/bin/python $CHECK_DIR/deep_check.py 2>&1 | tail -2"
 
 echo "✔ deployed $VERSION"
