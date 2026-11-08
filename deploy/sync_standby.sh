@@ -43,6 +43,8 @@ ssh "$STANDBY" "sudo /root/.local/bin/uv pip install --python $STANDBY_VENV/bin/
 
 echo "==> [2/4] env 同步（经本机内存管道，不落本地盘）"
 ssh "$ACTIVE" 'cat /etc/slidex-captcha.env' | ssh "$STANDBY" 'cat > /etc/slidex-captcha.env && chmod 600 /etc/slidex-captcha.env'
+# env 变更后必须重载备机服务（key 是 import 时读的；不同步重启会让备机 401）
+ssh "$STANDBY" 'sudo supervisorctl -c /personal/pxed/supervisord.conf restart slidex-captcha >/dev/null && sleep 3'
 
 echo "==> [3/4] check 工具 + nace 配置对齐"
 scp -q "$CHECK_DIR/deep_check.py" "$CHECK_DIR/cycle_check.py" "$STANDBY:/tmp/" 2>/dev/null || \
