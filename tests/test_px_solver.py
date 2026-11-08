@@ -377,6 +377,51 @@ async def test_navigate_timeout_is_load_timeout():
     assert result.retryable_error is True
 
 
+async def test_navigate_playwright_timeout_is_load_timeout():
+    """playwright 自家 TimeoutError（与 asyncio.TimeoutError 不是同一个类，
+    pxed 第 13 轮 C4 回归实测：0.9.6 重写 except 链时把它落进
+    challenge_load_failed）也必须归为 challenge_load_timeout。
+    """
+    class TimeoutError(Exception):  # noqa: A001 - 模拟 playwright 的同名类
+        pass
+
+    page = _FakePage(goto_exc=TimeoutError("Page.goto: Timeout 12000ms exceeded."))
+    context = _FakeContext([[]], page=page)
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
+
+    result = await solver.solve(_request())
+
+    assert result.success is False
+    assert result.error_kind == ERR_CHALLENGE_TIMEOUT
+    assert result.retryable_error is True
+
+
+async def test_rpc_swallow_survives_cancelled_future():
+    """_rpc 的收割 callback 在 future 被取消时不得打崩自己（pxed 第 13 轮
+    日志实测 "Exception in callback _rpc._swallow"：CancelledError 是
+    BaseException，except Exception 捕不住）。
+    """
+    inner = asyncio.ensure_future(asyncio.sleep(3600))
+    done = asyncio.Event()
+
+    def _canceller():
+        inner.cancel()
+        done.set()
+
+    from slidex.px import solver as solver_mod
+
+    before = len(solver_mod._REAPED_RPC_EXCS)
+    loop = asyncio.get_event_loop()
+    loop.call_later(0.05, _canceller)
+    # 走 _rpc 的路径：它给 inner 挂 _swallow 并 cancel
+    with pytest.raises(asyncio.TimeoutError):
+        await solver_mod._rpc(asyncio.sleep(3600), timeout=0.05)
+    await asyncio.sleep(0.1)
+    # callback 不崩（pytest 会把 callback 异常报成 unhandled）；
+    # 有界队列长度不变或 +0（取消的 future 没有异常可收割）
+    assert len(solver_mod._REAPED_RPC_EXCS) >= before
+
+
 async def test_referer_passed_on_press_navigation():
     """press 双页结构：第一跳是宿主页 websiteURL（带 referer 的是 challenge）。"""
     page = _FakePage()
@@ -581,21 +626,206 @@ async def test_launch_failure_does_not_leak_driver():
 
 
 async def test_browser_gone_mid_task_resets_farm_and_is_retryable():
+    """new_context 报 farm 级死亡：先就地重置+重建重试一次，仍死则置空农场。
+
+    pxed 实测（0.9.5 部署验收）：渲染进程偶发 crash（Target crashed）与
+    playwright driver 被杀（handler is closed）后 ``is_connected()`` 仍返回
+    True——不按异常内容显式重置，后续任务会在同一具尸体上连环撞（B 组
+    连空根因）。重试用尽的 farm 必须置空，让再下一个任务从零重建。
+    """
     class _DeadOnContext(_FakeBrowserObj):
         async def new_context(self, **kwargs):
             self._connected = False
             raise RuntimeError("Target page, context or browser has been closed")
 
     dead = _DeadOnContext()
-    pw = _FakePw([dead])
+    also_dead = _DeadOnContext()
+    pw = _FakePw([dead, also_dead])
     solver = PxPressSolver(playwright_factory=lambda: _resolve(pw))
 
     result = await solver.solve(_request())
 
     assert result.success is False
     assert result.retryable_error is True
-    # 农场必须被重置，否则后续任务全挂在断连的 browser 上
-    assert solver._farm is None
+    # 0.9.6 起进程内重试一次：死亡后 farm 被重置（epoch 前进），重试在新
+    # farm 上跑（fake 浏览器列表已耗尽 → launch 失败收场）。farm 不得留在
+    # 带 browser 引用的死对象上；后续任务会从零重建。
+    assert solver._farm_epoch >= 2
+    assert solver._farm is None or solver._farm._browser is None
+    # 就地重试(第2次 launch) + solve 级重试(第3次 launch 耗尽列表)
+    assert pw.chromium.launches == 3
+
+
+async def test_page_crash_resets_farm_and_retries_inplace():
+    """context.new_page 报 Target crashed（pxed B 组连空的直接根因）：
+    重置农场 + 就地重建重试一次——本任务不白跑，且 crash 窗口内的
+    连环任务不会再撞同一具半死 browser。
+    """
+    calls = {"n": 0}
+
+    async def _new_context(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("BrowserContext.new_page: Target crashed ")
+        return _FakeContext([_pass_cookies()])
+
+    crashing_browser = _FakeBrowserObj()
+    fresh_browser = _FakeBrowserObj()
+    for b in (crashing_browser, fresh_browser):
+        b.new_context = _new_context
+    pw = _FakePw([crashing_browser, fresh_browser])
+    solver = PxPressSolver(playwright_factory=lambda: _resolve(pw))
+
+    result = await solver.solve(_request())
+
+    # 就地重试成功：本任务拿到 pass token，farm 换了新 browser
+    assert result.success is True
+    assert pw.chromium.launches == 2
+    assert solver._farm is not None
+    assert solver._farm._browser is fresh_browser
+
+
+async def test_solve_hard_deadline_abandons_cancel_swallowing_coroutine(monkeypatch):
+    """任务级硬顶必须用「放弃」而非 wait_for：inner 吞 cancel 时 wait_for
+    自身也挂起（pxed D1 双任务卡死 90s 的根因）。硬顶到点后主流程立即
+    返回 retryable 失败并重置农场，吞 cancel 的僵尸协程留在后台。
+    """
+    import asyncio as _asyncio
+
+    released = _asyncio.Event()
+
+    class _StubbornContext(_FakeContext):
+        async def new_page(self):
+            # 模拟 playwright greenlet 桥：吞 cancel 后继续挂
+            try:
+                await _asyncio.sleep(3600)
+            except _asyncio.CancelledError:
+                released.set()
+                await _asyncio.sleep(3600)
+
+    context = _StubbornContext([[]])
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
+    # 硬顶压到 0.2s 便于测试
+    monkeypatch.setattr("slidex.px.solver._SOLVE_HARD_MARGIN_S", -59.8)
+
+    result = await solver.solve(_request())
+
+    assert result.success is False
+    assert result.retryable_error is True
+    assert "hard deadline" in result.error
+    # 等僵尸协程的第一次 cancel 真正送达（事件被吞前触发过）
+    for _ in range(20):
+        if released.is_set():
+            break
+        await _asyncio.sleep(0.05)
+    assert released.is_set()
+
+
+async def test_driver_death_during_goto_resets_farm_and_retry_once():
+    """goto 报 driver 死亡（pxed 第 11 轮 C5/D1/D2 连空的根因）：
+    _goto 之前把它吞成 challenge_load_failed 返回，异常不进 _solve_once
+    的 except → 不触发 farm 重置，死 farm 留给后续任务连环撞；任务也不
+    重试，调用方直接吃到假失败。修复后：farm 死亡必须向上传播触发重置，
+    且 solve() 在进程内重试一次（新 farm 上本任务拿到 pass token）。
+    """
+    class _DeadOnGotoContext(_FakeContext):
+        async def new_page(self):
+            return _DeadOnGotoPage()
+
+    class _DeadOnGotoPage(_FakePage):
+        async def goto(self, url, **kwargs):
+            raise RuntimeError("Page.goto: Connection closed while reading from the driver")
+
+    dead_ctx = _DeadOnGotoContext([[]])
+    good_ctx = _FakeContext([_pass_cookies()])
+    contexts = [dead_ctx, good_ctx]
+
+    class _PickContextBrowser(_FakeBrowserObj):
+        async def new_context(self, **kwargs):
+            return contexts.pop(0)
+
+    pw = _FakePw([_PickContextBrowser(), _PickContextBrowser()])
+    solver = PxPressSolver(playwright_factory=lambda: _resolve(pw))
+
+    result = await solver.solve(_request())
+
+    assert result.success is True, f"expected in-process retry to pass: {result.error}"
+    assert pw.chromium.launches == 2
+    assert solver._farm is not None and solver._farm._browser is not None
+
+
+async def test_transient_failure_does_not_double_retry():
+    """进程内重试只针对「farm 死亡被重置」这一次：普通业务失败（如 cookie
+    读失败但 farm 未被重置）不得触发重试，否则错误预算翻倍。
+    """
+    class _BrokenContext(_FakeContext):
+        def __init__(self):
+            super().__init__([[]])
+            self.cookie_attempts = 0
+
+        async def cookies(self):
+            self.cookie_attempts += 1
+            raise RuntimeError("target closed")
+
+    context = _BrokenContext()
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
+
+    result = await solver.solve(_request())
+
+    assert result.success is False
+    assert result.error_kind == ERR_INTERNAL
+    assert result.retryable_error is True
+    # 没重试：farm 未被重置（epoch 不变）；_read_cookies 的 two-strikes
+    # 确认（失败后 sleep 一次再试）是既有设计，共读两次
+    assert context.cookie_attempts == 2
+    assert solver._farm_epoch == 0
+
+
+async def test_zombie_future_exception_is_retrieved(monkeypatch):
+    """硬顶放弃的僵尸协程死后异常必须被收割：pxed 第 11 轮日志出现
+    'Future exception was never retrieved'（吞 cancel 的协程死于 driver
+    关闭），asyncio 会把未收割异常记进 GC 警告日志。
+    """
+    import asyncio as _asyncio
+
+    released = _asyncio.Event()
+
+    class _StubbornDyingContext(_FakeContext):
+        async def new_page(self):
+            try:
+                await _asyncio.sleep(3600)
+            except _asyncio.CancelledError:
+                released.set()
+                # 吞掉 cancel 后死于真实异常（模拟 driver 关闭）
+                raise RuntimeError("Connection closed while reading from the driver")
+
+    context = _StubbornDyingContext([[]])
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
+    monkeypatch.setattr("slidex.px.solver._SOLVE_HARD_MARGIN_S", -59.8)
+
+    result = await solver.solve(_request())
+    assert result.success is False
+
+    # 给僵尸协程时间死透，再等收割 callback 执行
+    for _ in range(20):
+        if released.is_set():
+            break
+        await _asyncio.sleep(0.05)
+    for _ in range(20):
+        if solver._last_abandoned_exc is not None:
+            break
+        await _asyncio.sleep(0.05)
+    # 收割必须发生：否则 asyncio 会留下 "Task exception was never retrieved"。
+    # 僵尸 new_page 死在 _rpc 的 wait 内（被硬顶 cancel 连带取消），死因
+    # 由 _rpc 的收割观测点记录
+    from slidex.px import solver as solver_mod
+
+    for _ in range(20):
+        if solver_mod._REAPED_RPC_EXCS:
+            break
+        await _asyncio.sleep(0.05)
+    assert solver_mod._REAPED_RPC_EXCS, "zombie RPC exception must be reaped"
+    assert any("driver" in str(e) for e in solver_mod._REAPED_RPC_EXCS)
 
 
 # ────────────────────── 线上 review：首屏状态判定与中途断连 ──────────────────────
@@ -712,7 +942,11 @@ async def test_mid_task_browser_death_resets_farm_and_fails_fast():
     assert result.error_kind == ERR_INTERNAL
     assert result.retryable_error is True
     assert time.monotonic() - started < 2.0
-    assert solver._farm is None
+    # 0.9.6 起进程内重试一次：死亡被重置（epoch 前进），重试在新 farm 上
+    # 跑。fake 的第二个 browser 无 new_context → 重试报内部错误收场，
+    # 但 farm 本身健康（browser 是活的假对象），不再要求置空。
+    assert solver._farm_epoch >= 1
+    assert result.error_kind == ERR_INTERNAL
 
 
 class _SubresourcePage(_FakePage):
@@ -861,6 +1095,66 @@ async def test_host_page_404_fails_fast_before_iframe_injection():
     assert result.retryable_error is False
     assert time.monotonic() - started < 2.0
     assert page.evaluate_calls == []
+
+
+async def test_iframe_inject_timeout_retries_once(monkeypatch):
+    """iframe 注入 evaluate 调用级超时：当场重试一次而不是判死任务。
+
+    pxed 第 12 轮 B5 实测（02:00:23）：farm 冷启动 + A/B 组连续任务挤在
+    2 核上，单次 evaluate RPC 超 5s —— 注入是幂等操作，超时不该把整个
+    press 任务判成 challenge_load_failed（ENV_PAGE 的 _pxcts 没写进去，
+    B5 断言 referrer=''）。
+    """
+    import asyncio as _asyncio
+
+    class _FlakyInjectPage(_FakePage):
+        def __init__(self):
+            super().__init__()
+            self.evaluate_attempts = 0
+
+        async def evaluate(self, script, *args):
+            self.evaluate_attempts += 1
+            if self.evaluate_attempts == 1:
+                # 慢过调用级超时：monkeypatch 后 0.1s 即判超时
+                await _asyncio.sleep(5)
+            return await super().evaluate(script, *args)
+
+    monkeypatch.setattr("slidex.px.solver._COOKIE_RPC_TIMEOUT_S", 0.1)
+    page = _FlakyInjectPage()
+    context = _FakeContext([_pass_cookies()], page=page)
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
+
+    result = await solver.solve(_request())
+
+    assert result.success is True, f"inject retry should succeed: {result.error}"
+    assert page.evaluate_attempts == 2
+    assert len(page.evaluate_calls) == 1  # 第二次才真正执行到记录处
+
+
+async def test_iframe_inject_both_attempts_fail_is_load_failed(monkeypatch):
+    """两次注入都失败：维持既有 challenge_load_failed 语义（不静默继续）。"""
+    import asyncio as _asyncio
+
+    class _AlwaysFailInjectPage(_FakePage):
+        def __init__(self):
+            super().__init__()
+            self.evaluate_attempts = 0
+
+        async def evaluate(self, script, *args):
+            self.evaluate_attempts += 1
+            raise RuntimeError(f"evaluate blew up (attempt {self.evaluate_attempts})")
+
+    monkeypatch.setattr("slidex.px.solver._COOKIE_RPC_TIMEOUT_S", 0.1)
+    page = _AlwaysFailInjectPage()
+    context = _FakeContext([[]], page=page)
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
+
+    result = await solver.solve(_request())
+
+    assert result.success is False
+    assert result.error_kind == ERR_CHALLENGE_LOAD
+    assert "iframe inject failed" in result.error
+    assert page.evaluate_attempts == 2
 
 
 async def test_diagnostics_present_on_success_and_failure():

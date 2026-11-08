@@ -1,5 +1,68 @@
 # Changelog
 
+## [0.9.8] - 2026-11-09
+
+pxed 第 13 轮 deep_check（16/23）暴露的 0.9.6 自身回归 ×2（都是失败测试
+先行锁定；1013 passed 零回归）。B1-B4/D1/D2 的齐挂是 load 3.29 启动风暴
+的环境伤害，非代码回归。
+
+### Fixed
+- **`_goto` 超时分类回归（C4）**：0.9.6 重写 except 链时只捕
+  `asyncio.TimeoutError`，playwright 自家的 `TimeoutError`（不同类）落进
+  通用分支被错报成 `challenge_load_failed`（第 13 轮 C4 blackhole 实测
+  `failed (challenge_load_failed): TimeoutError: Page.goto: Timeout
+  12000ms exceeded`）。恢复 `_is_timeout_exc` 分类（按类名后缀，对两个
+  TimeoutError 都成立）。
+- **`_rpc._swallow` callback 崩溃**：future 被取消时 `fut.exception()`
+  抛 `CancelledError`（3.8+ 是 BaseException），`except Exception` 捕不住，
+  日志刷 "Exception in callback _rpc._swallow"（第 13 轮日志实测 ×2）。
+  callback 内显式捕 `CancelledError` 返回。
+
+## [0.9.7] - 2026-11-09
+
+pxed 第 12 轮 deep_check（22/23）唯一失败 B5 的根因修复：press 任务的
+iframe 注入 evaluate 单次 RPC 超过调用级超时（farm 冷启动 + A/B 组连续
+任务挤 2 核的启动风暴尾巴），iframe 没注入 → ENV_PAGE 的 `_pxcts` 没写 →
+断言 referrer=''。失败测试先行，1011 passed 零回归。
+
+### Fixed
+- **iframe 注入调用级超时当场重试一次**：注入是幂等操作，第 1 次
+  evaluate 超时/失败不再把整个 press 任务判成 `challenge_load_failed`
+  （B5 断言 referrer='' 的根因），当场重试一次；两次都失败维持既有
+  `challenge_load_failed` 语义。farm 级死亡消息仍抛 `_FarmDead` 哨兵
+  （交由 0.9.6 的进程内重试统一处理）。
+
+## [0.9.6] - 2026-11-09
+
+pxed 线上第 11 轮 deep_check（20/23）三失败的根因修复批次：一次 driver
+死亡事件的级联伤害暴露三个缺口，全部有失败测试先行 + 全量回归零新增失败
+（1009 passed）。
+
+### Fixed
+- **driver 死亡在 `_goto` 被吞成 `challenge_load_failed`（第 11 轮 C5/D1/D2
+  齐挂根因）**：`Page.goto: Connection closed while reading from the driver`
+  原先按导航失败返回，异常进不了 `_solve_once` 的 except → farm 不重置，
+  同一批并发任务连环撞同一具死 driver。现在 `_goto`（及 `_harvest_vid`）
+  对 farm 级死亡消息标记抛 `_FarmDead` 哨兵向上传播，`_solve_once` 统一
+  重置农场。
+- **无进程内重试**：farm 死亡原先只交还 retryable 给调用方；但重置后
+  ~3s farm 即 ready（第 11 轮实测），一次环境死亡不该由调用方承担重试。
+  `solve()` 现以 farm epoch（`_reset_farm` 时 +1）判定「farm 真死过一次」
+  才重试一次（普通业务失败 epoch 不变，预算不翻倍，变异验证：cookie 读
+  失败只触发既有 two-strikes 两次，无 solve 级重试）。
+- **僵尸协程异常无人认领**：硬顶放弃的协程死于 driver 关闭时 asyncio 刷
+  "Task exception was never retrieved"（第 11 轮日志实测）。新增 `_rpc()`
+  统一包装所有调用级超时 RPC（cookies/new_page/close/goto/evaluate）：
+  detach 模式到点放弃 + 死因收割进有界观测队列 `_REAPED_RPC_EXCS`；
+  `_rpc` 自身被取消（硬顶传入）时连带取消并收割内部协程（实测修复了
+  "unhandled exception during asyncio.run() shutdown"）。
+
+### Changed
+- 旧测试断言更新（`test_browser_gone_mid_task_resets_farm_and_is_retryable`
+  /`test_mid_task_browser_death_resets_farm_and_fails_fast`）：进程内重试
+  后 farm 不再必然置空——新契约是「farm 不留在死 browser 引用上 + epoch
+  前进 + retryable」。
+
 ## [0.9.5] - 2026-11-08
 
 深度 review（结构 + 性能）修复批次：并发槽、事件循环阻塞、多租户隔离、
