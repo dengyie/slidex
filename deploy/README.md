@@ -1,7 +1,17 @@
-# 部署（gz-cvm 常规形态）
+# 部署
 
-目标形态：**单机 mesh 常驻服务**——gz-cvm（EasyTier mesh，10.144.144.8）
-上 systemd 守护，业务方通过 `http://10.144.144.8:8077` + Bearer key 调用。
+目标形态：**单机常驻服务**，业务方通过 `http://<host>:8077` + Bearer key 调用。
+
+两种宿主形态：
+
+| 宿主 | 进程守护 | 说明 |
+|------|----------|------|
+| gz-cvm（systemd） | `slidex-captcha.service` | 内存充裕，标准形态，见下文 |
+| pxed（supervisor） | `supervisor-slidex-captcha.conf` | 4G 无 swap 共享宿主，**必须**额外装 oom_guard + renderer 限制，见文末 |
+
+## gz-cvm 形态（systemd）
+
+gz-cvm（EasyTier mesh，10.144.144.8）上 systemd 守护。
 
 ## 布局
 
@@ -77,3 +87,45 @@ curl -s http://10.144.144.8:8077/v1/solve -H "Authorization: Bearer $KEY" \
   `journalctl --vacuum-size=100M` 与浏览器缓存。
 - **日志**：`journalctl -u slidex-captcha -f`；只出 token 前缀与长度，
   无完整 cookie/token（代码层保证）。
+
+## pxed 形态（supervisor，低内存宿主）
+
+pxed（mesh 10.144.144.31）无 systemd，走 supervisor；且整机 4G 无 swap、
+overcommit=1、与其它服务共存——全局 OOM killer 曾专杀 chromium renderer
+（默认 `oom_score_adj=300`，adj 越高越先被杀）。除标准步骤外**必须**做三件事：
+
+### 安装
+
+```bash
+# 1. supervisor 程序配置（路径按宿主实际调整）
+sudo cp deploy/supervisor-slidex-captcha.conf /personal/pxed/
+sudo cp deploy/supervisor-slidex-oom-guard.conf /personal/pxed/
+# 把两个文件路径加进 supervisord.conf 的 files= 列表，然后：
+sudo supervisorctl reread && sudo supervisorctl update
+
+# 2. oom_guard（每 1s 把 chrome-headless 的 oom_score_adj 钉到 -20，
+#    无 CAP_SYS_RESOURCE 时可写到的下限；兜底覆盖 solver 自钉的空档）
+sudo install -m 755 deploy/oom_guard.sh /opt/slidex-captcha/bin/oom_guard.sh
+```
+
+### pxed 专属环境变量（/etc/slidex-captcha.env）
+
+```bash
+SLIDEX_PX_CHROMIUM_ARGS=--renderer-process-limit=4
+```
+
+`--renderer-process-limit=4` 不只是省内存：没有它，deep_check B 组
+（timezone/UA/locale 等指纹断言）会整组拿空值，22-23/23 → 15/23。
+solver 通过 `SLIDEX_PX_CHROMIUM_ARGS` 透传（`_env_chromium_args()`）。
+
+### 三层 OOM 防护（根因：dmesg 122 次 CONSTRAINT_NONE oom-killer 事件）
+
+1. **oom_guard**（supervisor 程序，1s 循环）——兜底；
+2. **solver 自钉** `_pin_oom_score_adj()`——launch 后、每个任务 new_context 前各钉一轮
+   （新 fork 的 renderer 默认 adj=300，是 OOM 首选祭品）；
+3. **renderer-process-limit=4**——限制 renderer 总量，兼保指纹断言。
+
+注意 pxed 容器缺 `CAP_SYS_RESOURCE`：`oom_score_adj` 只能写到 **-20**
+（supervisor 主进程的 adj），写 -500 会 EACCES——这是设计内行为，
+guard 与 solver 的默认值都是 -20。
+

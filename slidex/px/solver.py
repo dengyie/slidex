@@ -96,6 +96,38 @@ def _env_chromium_args() -> List[str]:
     return shlex.split(raw) if raw else []
 
 
+def _pin_oom_score_adj(adj: int = -20) -> None:
+    """把本机已出现的 chrome 进程 oom_score_adj 钉到低值（默认 -20）。
+
+    低内存宿主（4G 无 swap、overcommit=1）上，宿主全局 OOM killer 专挑
+    adj 高的进程祭旗，而 chromium renderer 默认 adj=300。无
+    CAP_SYS_RESOURCE 的容器里写低于 -20 会被内核钳回 EACCES，故默认取
+    -20（与守护进程同级、可写）。外部 guard 轮询存在 fork→OOM 空档；
+    launch 刚返回 / 每任务 new_context 前自钉一次，把空档收窄到进程间。
+    只写 /proc/<pid>/oom_score_adj，失败静默（尽力而为，权限不足时由
+    外部 guard 兜底）。
+    """
+    try:
+        names = os.listdir("/proc")
+    except Exception:  # pragma: no cover - 非 Linux
+        return
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/cmdline", "rb") as fh:
+                cmd = fh.read()
+        except Exception:
+            continue
+        if b"chrome-headless" not in cmd and b"chromium" not in cmd:
+            continue
+        try:
+            with open(f"/proc/{name}/oom_score_adj", "w") as fh:
+                fh.write(str(adj))
+        except Exception:  # pragma: no cover - 权限/竞态
+            continue
+
+
 def _default_launch_args(*, is_root: bool) -> List[str]:
     """Chromium 启动参数。
 
@@ -155,6 +187,8 @@ class _BrowserFarm:
                     headless=self._headless,
                     args=launch_args,
                 )
+                # 主进程树此刻已完整 fork：立即钉 adj，堵 guard 轮询空档
+                _pin_oom_score_adj()
             except Exception:
                 # 启动失败要把 playwright driver（node 进程）也清掉，否则
                 # 下次 launch 会叠加泄漏 node 子进程
@@ -510,6 +544,10 @@ class PxPressSolver:
         context = None
         page = None
         try:
+            # new_context 会 fork 新 renderer（默认 adj=300）：每个任务前
+            # 再钉一轮，覆盖 launch 之后新出现的进程（宿主 OOM 防祭品）。
+            if self._context_factory is None:
+                _pin_oom_score_adj()
             context_options = self._context_options(request)
             if self._context_factory is not None:
                 context = await self._context_factory(context_options)

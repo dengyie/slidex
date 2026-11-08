@@ -1150,3 +1150,63 @@ async def test_cookie_names_diagnostic_collects_names_not_values():
     assert "_pxvid(.hsprotect.net)" in snap["px_cookie_names_seen"]
     assert all("session" not in n for n in snap["px_cookie_names_seen"])
     assert all("SECRET" not in n for n in snap["px_cookie_names_seen"])
+
+
+def test_pin_oom_score_adj_writes_only_chrome_procs(tmp_path, monkeypatch):
+    """launch/每任务前自钉 chrome 进程 adj：只写匹配 cmdline 的 pid。"""
+    import builtins
+
+    from slidex.px import solver as solver_mod
+
+    # 用真实文件系统模拟 /proc：tmp 下建 pid 目录，patch listdir 让
+    # _pin_oom_score_adj 把 tmp 当 /proc 枚举；open 走 builtins 原样，
+    # 但 _pin_oom_score_adj 内部路径是写死的 /proc/... —— 为让 tmp 生效，
+    # 把 open 的路径前缀改写进 tmp（只拦 /proc/ 开头的调用）。
+    for pid, cmd in (
+        ("100", b"/usr/bin/chrome-headless-shell\0--type=renderer\0"),
+        ("200", b"/usr/bin/uvicorn\0slidex.service.app\0"),
+        ("300", b"chromium\0--headless\0"),
+    ):
+        d = tmp_path / pid
+        d.mkdir()
+        (d / "cmdline").write_bytes(cmd)
+        (d / "oom_score_adj").write_text("300")
+    (tmp_path / "self").mkdir()          # 非 digit：跳过
+    (tmp_path / "999").mkdir()           # cmdline 缺失：跳过
+
+    monkeypatch.setattr(
+        solver_mod.os, "listdir",
+        lambda p: ["100", "200", "300", "self", "999"],
+    )
+
+    real_open = builtins.open
+    prefix = str(tmp_path)
+
+    def fake_open(path, mode="r", *a, **kw):
+        s = str(path)
+        if s.startswith("/proc/") and not s.startswith("/proc/self"):
+            s = prefix + s[len("/proc"):]
+        return real_open(s, mode, *a, **kw)
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+
+    solver_mod._pin_oom_score_adj(-20)
+
+    assert (tmp_path / "100" / "oom_score_adj").read_text() == "-20"
+    assert (tmp_path / "300" / "oom_score_adj").read_text() == "-20"
+    assert (tmp_path / "200" / "oom_score_adj").read_text() == "300"  # 非 chrome 不动
+
+
+class _FakeWriteHandle:
+    def __init__(self, path, sink):
+        self._path = path
+        self._sink = sink
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def write(self, data):
+        self._sink[self._path] = data

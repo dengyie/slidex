@@ -19,16 +19,23 @@ pxed（4G 无 swap 共享 pod）常态化部署专项：修掉宿主全局 OOM �
   `--renderer-process-limit=4`），不写死默认值；测试覆盖解析与
   farm→launch 连线。
 
-### Ops（pxed，代码外）
-- `slidex-oom-guard`（supervisor 常驻）：每 2s 把本机 chrome-headless 进程
-  的 `oom_score_adj` 钉到 -500。根因：pod 3.9G 无 swap + overcommit=1，
-  宿主全局 OOM（dmesg 122 次 oom-killer，`constraint=CONSTRAINT_NONE`）
-  专挑 adj=300 的 chromium；cgroup 自身 failcnt=0 不是限额内 OOM。
-  验证：修复前重复 context 循环 1-2 轮即 Target crashed，修复后
-  20/20 轮全绿。
+### Ops（pxed，代码外，脚本入库 `deploy/`）
+- `slidex-oom-guard`（supervisor 常驻，`deploy/oom_guard.sh` + conf）：每 1s
+  把本机 chrome-headless 进程的 `oom_score_adj` 钉到 **-20**（容器缺
+  `CAP_SYS_RESOURCE`，-500 写入 EACCES，-20 是 supervisor 主进程 adj
+  允许的下限）。根因：pod 3.9G 无 swap + overcommit=1，宿主全局 OOM
+  （dmesg 122 次 oom-killer，`constraint=CONSTRAINT_NONE`）专挑 adj=300
+  的 chromium；cgroup 自身 failcnt=0 不是限额内 OOM。solver 内另有
+  launch 后/每任务前自钉，guard 兜底空档。验证：修复前重复 context
+  循环 1-2 轮即 Target crashed，修复后 20/20 轮全绿。
+- `deploy/supervisor-slidex-captcha.conf` + `deploy/README.md` pxed 章节：
+  supervisor 形态安装步骤、env 需自加载（服务端已实现
+  `_load_env_file()`）、`SLIDEX_PX_CHROMIUM_ARGS=--renderer-process-limit=4`
+  为 pxed 必需（缺它 B 组指纹断言整组拿空）。
 
 ### Verified
-- 全量 996 passed / 18 skipped（+3）。
+- 全量 999 passed / 18 skipped（+3：expose await 变异验证 1、
+  env 文件加载 2）。
 
 ## [0.9.3] - 2026-11-08
 
