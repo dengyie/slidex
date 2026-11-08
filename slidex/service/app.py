@@ -26,7 +26,37 @@ import time
 from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Deque, Dict, Optional, Sequence, Tuple
+
+
+def _load_env_file(path: str = "/etc/slidex-captcha.env") -> None:
+    """尽力加载 KEY=VALUE 环境文件（systemd EnvironmentFile 的对等物）。
+
+    systemd 部署用 ``EnvironmentFile=`` 注入；supervisor 等无 systemd 的
+    宿主（pxed）没有等价物——在模块导入时由服务自己读一次。规则从简且
+    与 EnvironmentFile 兼容：``#`` 注释、``export `` 前缀、键两侧空白、
+    值两侧可选引号。已存在的环境变量不覆盖（真实环境优先于文件）。
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -421,4 +451,5 @@ def create_app(
     return app
 
 
+_load_env_file()
 app = create_app()

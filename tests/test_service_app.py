@@ -5,6 +5,7 @@
 captcha.run 兼容的 ``/v2/tasks`` 三段状态、以及 401/422/429 的 HTTP 语义。
 """
 
+import os
 import time
 
 import pytest
@@ -724,3 +725,47 @@ def test_v2_fail_response_carries_diagnostics():
             time.sleep(0.05)
     assert body.get("status") == "fail"
     assert body.get("diagnostics") == diag
+
+
+def test_load_env_file_parses_and_never_overrides(tmp_path, monkeypatch):
+    """supervisor 宿主（无 systemd EnvironmentFile=）的服务端 env 文件加载。
+
+    规则：注释跳过、export 前缀、引号剥离、真实环境变量优先（不覆盖）。
+    """
+    from slidex.service import app as app_mod
+
+    env_file = tmp_path / "svc.env"
+    env_file.write_text(
+        "# comment line\n"
+        "SLIDEX_TEST_A=plain-value\n"
+        "export SLIDEX_TEST_B=\"quoted value\"\n"
+        "SLIDEX_TEST_C='single'\n"
+        "SLIDEX_TEST_D=  spaced  \n"
+        "NOT_A_PAIR_NO_EQUALS\n"
+        "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("SLIDEX_TEST_A", raising=False)
+    monkeypatch.delenv("SLIDEX_TEST_B", raising=False)
+    monkeypatch.delenv("SLIDEX_TEST_C", raising=False)
+    monkeypatch.delenv("SLIDEX_TEST_D", raising=False)
+    monkeypatch.setenv("SLIDEX_TEST_E", "from-real-env")
+    env_file.write_text(
+        env_file.read_text(encoding="utf-8") + "SLIDEX_TEST_E=from-file\n",
+        encoding="utf-8",
+    )
+
+    app_mod._load_env_file(str(env_file))
+
+    assert os.environ["SLIDEX_TEST_A"] == "plain-value"
+    assert os.environ["SLIDEX_TEST_B"] == "quoted value"
+    assert os.environ["SLIDEX_TEST_C"] == "single"
+    assert os.environ["SLIDEX_TEST_D"] == "spaced"
+    assert os.environ["SLIDEX_TEST_E"] == "from-real-env"  # 不覆盖
+
+
+def test_load_env_file_missing_is_silent(tmp_path):
+    from slidex.service import app as app_mod
+
+    # 不存在 → 静默返回，不抛错（尽力而为）
+    app_mod._load_env_file(str(tmp_path / "nope.env"))
