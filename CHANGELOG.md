@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.10.1] - 2026-11-10
+
+打包根修：恢复 stealth.py 随 wheel 分发。setup.py 的 build_py 排除钩子
+（0.9.5 `eb40d34` 引入）基于"服务运行时不 import stealth"的判断，但
+xianyu-auto-bot 的 reply_server / xianyu_auth_recovery 运行时就是
+`from slidex.stealth import XianyuSliderStealth`——66153dc 时代（xianyu
+当前 pin）wheel 一直带着它。若按 0.10.0 升级 pin，xianyu 鉴权链路会
+ModuleNotFoundError 崩溃（reply_server 的 fallback 守卫只认整包缺失，
+`slidex.stealth` 子模块缺失会原样 re-raise）。移除钩子后行为与 66153dc
+连续：xianyu 升级 pin 即平移到整合后的 0.10.1 stealth。
+
+### Fixed
+- **wheel 重新包含 slidex/stealth.py**：删除 setup.py 排除钩子（该文件
+  仅做这一件事，随之删除），pyproject 注释更正。对站点（px 服务）零影响
+  ——站点运行时不 import stealth，wheel 变大 ~400KB 源码而已。
+
 ## [0.10.0] - 2026-11-10
 
 深度整合 xianyu 侧 5-mixin 版本（10-30 上游同步世代）相对主仓的三组能力

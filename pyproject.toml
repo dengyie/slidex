@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "slidex"
-version = "0.10.0"
+version = "0.10.1"
 description = "专业滑块验证码求解库 | Professional CAPTCHA Solver — Multi-provider auto-detection, CDP mode, point-select, hCaptcha, PX press-token service, plugin-extensible"
 requires-python = ">=3.10"
 license = "MIT"
@@ -71,9 +71,12 @@ all = [
 ]
 
 [tool.setuptools]
-# slidex/stealth.py（XianyuSliderStealth，12k 行闲鱼专用链路）只被 tests/demo
-# 引用，服务运行时不 import——不随 wheel 分发（setuptools 没有包内单模块的
-# exclude 开关，这里用 build_py 钩子做，见 setup.py）。
+# slidex/stealth.py（XianyuSliderStealth，闲鱼专用滑块链路）随 wheel 分发。
+# 曾经用 build_py 钩子排除它（理由"服务运行时不 import"），但 xianyu-auto-bot
+# 的 reply_server/xianyu_auth_recovery 运行时就是 `from slidex.stealth import
+# XianyuSliderStealth`——66153dc 时代 wheel 一直带着它。排除钩子在 0.9.5
+# 引入后若升级 pin，会令 xianyu 鉴权链路 ModuleNotFoundError 崩溃（其 fallback
+# 守卫只认整包缺失）。0.10.1 起移除钩子，恢复分发。
 
 [tool.setuptools.packages.find]
 include = ["slidex", "slidex.*", "demo*"]
