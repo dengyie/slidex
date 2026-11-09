@@ -52,9 +52,11 @@ ssh "$ACTIVE" 'cat /etc/slidex-captcha.env' | ssh "$STANDBY" 'sudo tee /etc/slid
 ssh "$STANDBY" 'sudo systemctl restart slidex-captcha >/dev/null && sleep 3'
 
 echo "==> [3/4] check 工具 + nace 配置对齐"
-scp -q "$CHECK_DIR/deep_check.py" "$CHECK_DIR/cycle_check.py" "$STANDBY:/tmp/" 2>/dev/null || \
-  scp -q /tmp/slidex-deep/deep_check.py deploy/cycle_check.py "$STANDBY:/tmp/"
-ssh "$STANDBY" "sudo mkdir -p $CHECK_DIR && sudo mv /tmp/deep_check.py /tmp/cycle_check.py $CHECK_DIR/ && sudo sed -i 's|http://10.144.144.9:8077|http://$STANDBY_MESH_IP:8077|' $CHECK_DIR/cycle_check.py"
+# check 脚本以本仓为唯一真源（repo → 备机直发）：deep_check/cycle_check 均为
+# 自动探测本机 mesh IP 的版本（2026-11-10 根修写死 gz-cvm 的默认地址），
+# 备机不需要再 sed 改 BASE。
+scp -q deploy/check/deep_check.py deploy/cycle_check.py "$STANDBY:/tmp/"
+ssh "$STANDBY" "sudo mkdir -p $CHECK_DIR && sudo mv /tmp/deep_check.py /tmp/cycle_check.py $CHECK_DIR/"
 # nace：配置与探针脚本拉齐（探针为自机化版本：探自身 mesh IP，nace 未运行自动跳过）
 ssh "$ACTIVE" "cat $NACE_DIR/config/egress.yaml" | ssh "$STANDBY" "sudo tee $NACE_DIR/config/egress.yaml >/dev/null"
 ssh "$ACTIVE" "cat $NACE_DIR/health_probe.sh" | ssh "$STANDBY" "sudo tee $NACE_DIR/health_probe.sh >/dev/null && sudo chmod 700 $NACE_DIR/health_probe.sh && sudo bash -n $NACE_DIR/health_probe.sh"
