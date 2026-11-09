@@ -300,6 +300,16 @@ def _trajectory_history_dir() -> str:
 def _history_file(name: str) -> str:
     return os.path.join(_trajectory_history_dir(), name)
 
+
+def _is_runtime_detached_error(error: Exception) -> bool:
+    """判断浏览器异常是否为页面运行时 detached/disconnected（纯函数）。
+
+    来源：xianyu 侧 5-mixin 版本的同名实现（上游 #111 世代）。此前主仓各处
+    用局部闭包重复匹配 'detached'/'disconnected'，收敛到单一来源。
+    """
+    error_text = str(error).lower()
+    return 'detached' in error_text or 'disconnected' in error_text
+
 # ============================================================================
 # 分析来源：trajectory_history/*.json 成功记录
 # 分析时间：2026-01-28 优化版本
@@ -854,7 +864,24 @@ class XianyuSliderStealth:
                  slidex_config: Optional["SlidexConfig"] = None):
         self.user_id = user_id
         self.enable_learning = enable_learning
-        self.headless = headless  # 是否使用无头模式
+        # 人工验证成功时的临时 Cookie 快照仅属于当前一次验证。
+        # 每个实例从空状态开始，避免跨账号或跨重试复用旧快照。（上游 #111）
+        self._manual_success_cookies = None
+        # Token HTTP 链路出口 IP（上游 b838cd1 风控门控）：验证前由外层注入，
+        # 浏览器启动后再次探测；不一致时延迟验证，避免跨出口使用绑定的 x5sec。
+        self.expected_outbound_ip = None
+        auto_slider_value = os.environ.get("XY_ENABLE_AUTO_SLIDER", "").strip().lower()
+        # 保持旧版默认行为；只有显式关闭时才进入人工接管模式。
+        self.auto_slider_enabled = auto_slider_value not in {"0", "false", "no", "off"}
+        try:
+            self.manual_slider_timeout = max(
+                30,
+                int(os.environ.get("XY_MANUAL_SLIDER_TIMEOUT", "180") or 180),
+            )
+        except (TypeError, ValueError):
+            self.manual_slider_timeout = 180
+        # 人工处理必须显示浏览器，否则用户无法接管。
+        self.headless = bool(headless) if self.auto_slider_enabled else False
         self.initial_cookies = str(initial_cookies or "").replace("\ufeff", "").strip()
         self.proxy_config = dict(proxy or {})
         self.browser_channel = browser_channel or os.environ.get("XY_SLIDER_BROWSER_CHANNEL", "").strip() or None
@@ -1180,6 +1207,105 @@ class XianyuSliderStealth:
 
     def _should_abort_slider_retry_after_failure(self) -> Tuple[bool, str]:
         return self._should_abort_token_refresh_slider_flow_after_failure()
+
+    def _evaluate_slider_preflight_risk(self) -> Tuple[bool, str]:
+        """验证前门控：近期硬拒绝或连续失败时先冷却，避免继续加重风控。（上游 b838cd1）
+
+        只对 token_refresh 场景生效；读取 failure_history_file 中窗口期内的记录：
+        - 命中过硬拒绝（fail_code 或「验证失败，点击框体重试」+error:）→ 一票延迟；
+        - 失败次数达阈值（XY_SLIDER_RISK_FAILURE_THRESHOLD，默认 6）且窗口内
+          无成功记录 → 延迟。
+        任何读取异常按兼容模式放行，绝不因门控自身故障阻断验证。
+        """
+        if getattr(self, 'risk_trigger_scene', '') != 'token_refresh':
+            return True, ''
+
+        try:
+            if not os.path.exists(self.failure_history_file):
+                return True, ''
+            with open(self.failure_history_file, 'r', encoding='utf-8') as f:
+                failures = json.load(f)
+            if not isinstance(failures, list):
+                return True, ''
+
+            now = time.time()
+            window_seconds = max(300, int(os.environ.get('XY_SLIDER_RISK_WINDOW', '1800') or 1800))
+            recent = []
+            hard_rejects = []
+            for record in failures:
+                if not isinstance(record, dict):
+                    continue
+                ts = record.get('timestamp')
+                if not isinstance(ts, (int, float)) or now - float(ts) > window_seconds:
+                    continue
+                scene = self._normalize_learning_scene(
+                    record.get('trigger_scene') or record.get('risk_trigger_scene')
+                )
+                if scene not in {'generic', 'token_refresh'}:
+                    continue
+                recent.append(record)
+                feedback = record.get('verification_feedback') or {}
+                fail_code = str(feedback.get('fail_code') or '').strip().lower()
+                message = ' '.join([
+                    str(feedback.get('message') or ''),
+                    str(feedback.get('dom_error_text') or ''),
+                ]).lower()
+                if fail_code or ('验证失败，点击框体重试' in message and 'error:' in message):
+                    hard_rejects.append(record)
+
+            if hard_rejects:
+                return False, f'近{window_seconds // 60}分钟命中过硬拒绝，等待风控冷却后再验证'
+
+            threshold = max(3, int(os.environ.get('XY_SLIDER_RISK_FAILURE_THRESHOLD', '6') or 6))
+            if len(recent) >= threshold:
+                recent_successes = 0
+                for record in self._load_success_history():
+                    if not isinstance(record, dict) or not record.get('success'):
+                        continue
+                    ts = record.get('timestamp')
+                    if isinstance(ts, (int, float)) and now - float(ts) <= window_seconds:
+                        recent_successes += 1
+                if recent_successes == 0:
+                    return False, (
+                        f'近{window_seconds // 60}分钟滑块失败{len(recent)}次且无成功记录，'
+                        '等待风险下降后再验证'
+                    )
+        except Exception as preflight_error:
+            logger.debug(f"【{self.pure_user_id}】验证前风险门控检查失败，按兼容模式继续: {preflight_error}")
+        return True, ''
+
+    def _check_browser_outbound_ip_consistency(self) -> Tuple[bool, str]:
+        """比较 Token HTTP 链路和浏览器链路出口 IP；探测失败时兼容放行。（上游 b838cd1）
+
+        expected_outbound_ip 由外层（token 恢复流程）注入；未注入或探测不可用
+        一律放行——本门控只在「确定不一致」时延迟滑块，避免跨出口复用绑定的
+        x5sec 触发风控加重。
+        """
+        expected_ip = str(getattr(self, 'expected_outbound_ip', '') or '').strip()
+        if not expected_ip:
+            return True, ''
+        probe_url = os.environ.get(
+            'XY_OUTBOUND_IP_PROBE_URL',
+            'https://api.ipify.org?format=json',
+        ).strip()
+        if not probe_url:
+            return True, ''
+        try:
+            request_context = getattr(self.context, 'request', None)
+            if request_context is None:
+                return True, ''
+            response = request_context.get(probe_url, timeout=5000)
+            if not getattr(response, 'ok', False):
+                return True, ''
+            payload = response.json() or {}
+            browser_ip = str(payload.get('ip') or '').strip()
+            if browser_ip and browser_ip != expected_ip:
+                return False, 'Token 请求与验证浏览器出口 IP 不一致，暂不启动滑块'
+            if browser_ip:
+                logger.info(f"【{self.pure_user_id}】验证前出口 IP 一致性检查通过")
+        except Exception as probe_error:
+            logger.debug(f"【{self.pure_user_id}】浏览器出口 IP 探测失败，按兼容模式继续: {probe_error}")
+        return True, ''
 
     def _capture_verification_screenshot(self, page, frame=None, iframe_selector: Optional[str] = None) -> Optional[str]:
         """截取验证页面截图，多种方式逐级回退"""
@@ -3404,6 +3530,17 @@ class XianyuSliderStealth:
                 return None
                 
         except Exception as e:
+            # 正常情况下必须走 goofish 主域回访、域优先筛选和 token 稳定化。
+            # 只有用户在人工验证成功后关闭了页面、正常收口无法继续时，才使用
+            # 成功瞬间保存的 goofish 域快照作为兜底。（上游 #111）
+            manual_cookies = getattr(self, '_manual_success_cookies', None)
+            if manual_cookies:
+                self._manual_success_cookies = None
+                logger.warning(
+                    f"【{self.pure_user_id}】页面已不可访问，使用人工验证成功时的"
+                    f"goofish Cookie 快照兜底，共{len(manual_cookies)}个"
+                )
+                return manual_cookies
             logger.error(f"【{self.pure_user_id}】获取滑块验证成功后的cookie失败: {str(e)}")
             return None
     
@@ -7498,8 +7635,7 @@ class XianyuSliderStealth:
 
             def _mark_detached_runtime(error: Exception) -> bool:
                 nonlocal detached_runtime
-                error_text = str(error).lower()
-                if 'detached' in error_text or 'disconnected' in error_text:
+                if _is_runtime_detached_error(error):
                     detached_runtime = True
                     return True
                 return False
@@ -8558,9 +8694,8 @@ class XianyuSliderStealth:
                     # 尝试访问frame的属性来检查是否被分离
                     _ = target_frame.url if hasattr(target_frame, 'url') else None
                 except Exception as frame_check_error:
-                    error_msg = str(frame_check_error).lower()
                     # 如果frame被分离（detached），说明验证成功，容器已消失
-                    if 'detached' in error_msg or 'disconnected' in error_msg:
+                    if _is_runtime_detached_error(frame_check_error):
                         blocked = self._resolve_post_slider_blocking_state(
                             self.page,
                             reject_log="Frame已分离，但当前命中[{kind}]，按验证失败处理",
@@ -8593,9 +8728,8 @@ class XianyuSliderStealth:
                             _ = target_frame.url if hasattr(target_frame, 'url') else None
                             container = target_frame.query_selector(".nc-container")
                         except Exception as frame_error:
-                            error_msg = str(frame_error).lower()
                             # 如果frame被分离（detached），说明容器已经不存在
-                            if 'detached' in error_msg or 'disconnected' in error_msg:
+                            if _is_runtime_detached_error(frame_error):
                                 logger.info(f"【{self.pure_user_id}】Frame已被分离，容器不存在")
                                 return (False, False)
                             # 其他错误，继续尝试
@@ -8608,17 +8742,15 @@ class XianyuSliderStealth:
                         is_visible = container.is_visible()
                         return (True, is_visible)
                     except Exception as vis_error:
-                        vis_error_msg = str(vis_error).lower()
                         # 如果元素被分离，说明容器不存在
-                        if 'detached' in vis_error_msg or 'disconnected' in vis_error_msg:
+                        if _is_runtime_detached_error(vis_error):
                             logger.info(f"【{self.pure_user_id}】容器元素已被分离，容器不存在")
                             return (False, False)
                         # 无法检查可见性，假设存在且可见
                         return (True, True)
                 except Exception as e:
-                    error_msg = str(e).lower()
                     # 如果frame或元素被分离，说明容器不存在
-                    if 'detached' in error_msg or 'disconnected' in error_msg:
+                    if _is_runtime_detached_error(e):
                         logger.info(f"【{self.pure_user_id}】Frame或容器已被分离，容器不存在")
                         return (False, False)
                     # 其他错误，保守处理，假设存在
@@ -12099,14 +12231,39 @@ class XianyuSliderStealth:
         # 每次 run() 进入都先清空内层自救兜底标记，避免上次状态残留
         self._post_recovery_success = False
         self._post_recovery_cookies = None
+        self._manual_success_cookies = None
         try:
+            # 验证前风险门控（上游 b838cd1）：近期硬拒绝/连败时先冷却，
+            # 避免在风控高压期硬冲把账号越打越死。放行路径零开销。
+            preflight_allowed, preflight_reason = self._evaluate_slider_preflight_risk()
+            if not preflight_allowed:
+                self.last_verification_feedback = {
+                    'status': 'preflight_deferred',
+                    'source': 'recent_risk_pressure',
+                    'message': preflight_reason,
+                }
+                logger.warning(f"【{self.pure_user_id}】验证前风险门控已延迟滑块: {preflight_reason}")
+                return False, None
+
             # 检查日期有效性
             if not self._check_date_validity():
                 logger.error(f"【{self.pure_user_id}】日期验证失败，无法执行")
                 return False, None
-            
+
             # 初始化浏览器
             self.init_browser()
+
+            # 出口 IP 一致性门控（上游 b838cd1）：Token 链路与浏览器出口不一致
+            # 时延迟验证，避免跨出口使用绑定的 x5sec。expected 未注入时零开销。
+            ip_allowed, ip_reason = self._check_browser_outbound_ip_consistency()
+            if not ip_allowed:
+                self.last_verification_feedback = {
+                    'status': 'preflight_deferred',
+                    'source': 'outbound_ip_mismatch',
+                    'message': ip_reason,
+                }
+                logger.warning(f"【{self.pure_user_id}】验证前风险门控已延迟滑块: {ip_reason}")
+                return False, None
 
             # 无头模式默认跳过额外预热，避免先访问其它页面把风控状态搞得更脏；
             # 如需回滚，可设置 XY_SLIDER_HEADLESS_WARMUP=1。
@@ -12173,9 +12330,72 @@ class XianyuSliderStealth:
 
                 self._simulate_human_page_behavior()
 
-                # 处理滑块验证
-                success = self.solve_slider(max_retries=self.slider_max_retries)
-                
+                # 本机可见浏览器的 Token 恢复场景优先交给用户手动处理。
+                # 自动轨迹一旦失败会立即关闭窗口并进入退避，导致界面虽显示
+                # “可接管”却没有实际可接管的浏览器。（上游 #111）
+                manual_headful = (
+                    not self.headless
+                    and not getattr(self, 'auto_slider_enabled', True)
+                    and getattr(self, 'risk_trigger_scene', '') == 'token_refresh'
+                )
+
+                if manual_headful:
+                    # 仅在确认当前页面存在可操作滑块时进入人工等待；处罚页、
+                    # 二维码页和其它无滑块页面继续走原有识别/处理分支。
+                    self._manual_success_cookies = None
+                    _, slider_button, _ = self.find_slider_elements(fast_mode=True)
+                    if slider_button is None:
+                        monitor_page = self._select_monitor_page(self.context, self.page) or self.page
+                        has_qr, qr_frame = self._detect_qr_code_verification(monitor_page)
+                        if has_qr:
+                            verification_result = self._process_verification_requirement(
+                                self.context,
+                                monitor_page,
+                                qr_frame,
+                                notification_callback=notification_callback,
+                                notification_scene=notification_scene,
+                            )
+                            if verification_result:
+                                return True, verification_result
+                        logger.warning(
+                            f"【{self.pure_user_id}】人工接管模式未找到可操作滑块，"
+                            "不进入无意义的超时等待"
+                        )
+                        return False, None
+                    logger.warning(
+                        f"【{self.pure_user_id}】已进入人工滑块模式，浏览器将保留"
+                        f"{getattr(self, 'manual_slider_timeout', 180)}秒，请在窗口中手动完成验证"
+                    )
+                    success = False
+                    deadline = time.time() + getattr(self, 'manual_slider_timeout', 180)
+                    while time.time() < deadline:
+                        try:
+                            if self.page.is_closed():
+                                break
+                            if slider_button is None:
+                                _, slider_button, _ = self.find_slider_elements(fast_mode=True)
+                            elif self.check_verification_success_fast(slider_button):
+                                success = True
+                                self._manual_success_cookies = self._snapshot_context_cookies(
+                                    self.context,
+                                    page=self.page,
+                                    preferred_domain_suffixes=('goofish.com',),
+                                )
+                                logger.info(f"【{self.pure_user_id}】已即时保存人工验证成功Cookie")
+                                logger.success(f"【{self.pure_user_id}】人工滑块验证成功")
+                                break
+                        except Exception as manual_check_error:
+                            logger.debug(
+                                f"【{self.pure_user_id}】等待人工滑块结果: {manual_check_error}"
+                            )
+                        time.sleep(1)
+                    if not success:
+                        self._manual_success_cookies = None
+                        logger.warning(f"【{self.pure_user_id}】等待人工滑块验证超时或窗口已关闭")
+                else:
+                    # 无头/自动模式继续使用自动滑块
+                    success = self.solve_slider(max_retries=self.slider_max_retries)
+
                 if success:
                     logger.info(f"【{self.pure_user_id}】滑块验证成功")
                     

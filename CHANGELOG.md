@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.10.0] - 2026-11-10
+
+深度整合 xianyu 侧 5-mixin 版本（10-30 上游同步世代）相对主仓的三组能力
+（上游 b838cd1 风控门控 + #111 人工接管），迁移零删除：手势库/轨迹池/
+并发管理器/进程树强杀此前已同源，只补真正缺口。1034 passed（基线 1013 +
+新增 21）零回归。
+
+### Added
+- **run() 验证前双门控（上游 b838cd1）**：
+  - `_evaluate_slider_preflight_risk`：token_refresh 场景读失败史，
+    窗口期（`XY_SLIDER_RISK_WINDOW`，默认 1800s）内命中过硬拒绝
+    （fail_code 或「验证失败，点击框体重试」+error:）一票延迟；失败达
+    阈值（`XY_SLIDER_RISK_FAILURE_THRESHOLD`，默认 6）且窗口内无成功
+    记录也延迟——风控高压期先冷却，不硬冲加重。任何读取异常兼容放行。
+  - `_check_browser_outbound_ip_consistency`：外层注入
+    `expected_outbound_ip`（Token HTTP 链路出口）后，浏览器启动完成再探
+    一次（`XY_OUTBOUND_IP_PROBE_URL`，缺省 ipify，置空可关）；不一致延迟
+    滑块，避免跨出口复用绑定的 x5sec。未注入/探测失败一律放行。
+- **人工滑块接管分支（上游 #111）**：`XY_ENABLE_AUTO_SLIDER=0` 时强制
+  有头（人工处理必须显示浏览器），token_refresh 场景的 run() 不再自动
+  轨迹硬试——确认页面存在可操作滑块后进入 `XY_MANUAL_SLIDER_TIMEOUT`
+  （默认 180s，下限 30）人工等待窗口，成功瞬间快照 goofish 域 Cookie；
+  无滑块页面（处罚/二维码）照走既有识别分支，不进无意义等待。
+  `_get_cookies_after_success` 异常收口增加人工快照兜底（用户成功后关页
+  的场景），消费后即清，禁止跨账号/跨重试复用。
+- **`_is_runtime_detached_error` 模块级纯函数**：detached/disconnected
+  判定收敛单一来源，run 内局部闭包与验证结果检查的 5 处内联匹配全部
+  委托。
+
 ## [0.9.8] - 2026-11-09
 
 pxed 第 13 轮 deep_check（16/23）暴露的 0.9.6 自身回归 ×2（都是失败测试
