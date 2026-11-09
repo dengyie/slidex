@@ -40,7 +40,14 @@ scp -q "$WHEEL" "$REMOTE:/tmp/"
 
 echo "==> [3/6] install + restart"
 ssh "$REMOTE" "set -e
-  $SUDO $VENV/bin/python -m pip install --force-reinstall --no-deps -q /tmp/$(basename "$WHEEL")
+  # 安装器自适应：pip venv（gz-cvm 时代）用 pip；uv venv（mesh-huawei，无 pip 模块）回退 uv
+  if $VENV/bin/python -m pip --version >/dev/null 2>&1; then
+    $SUDO $VENV/bin/python -m pip install --force-reinstall --no-deps -q /tmp/$(basename "$WHEEL")
+  elif command -v uv >/dev/null 2>&1; then
+    $SUDO uv pip install --python $VENV/bin/python --force-reinstall --no-deps -q /tmp/$(basename "$WHEEL")
+  else
+    echo 'neither pip nor uv available in venv/host' >&2; exit 1
+  fi
   $SUDO systemctl restart slidex-captcha
   sleep 3
   systemctl is-active slidex-captcha >/dev/null || { journalctl -u slidex-captcha -n 30 --no-pager; exit 1; }
@@ -58,6 +65,9 @@ echo "==> [5/6] health"
 ssh "$REMOTE" "curl -s --max-time 5 http://$MESH_IP:8077/health | head -c 200; echo"
 
 echo "==> [6/6] deep_check"
-ssh "$REMOTE" "$SUDO $VENV/bin/python $CHECK_DIR/deep_check.py 2>&1 | tail -2"
+# SLIDEX_BASE 必须显式指向本次部署的目标实例——deep_check.py 的内置默认
+# 仍是 gz-cvm(10.144.144.8)，不覆盖就会把验收流量打到旧机上（2026-11-10 实测：
+# 0.10.0 部署 huawei 后 deep_check D1/D2 打到 gz-cvm 半死服务，误报 1005）。
+ssh "$REMOTE" "SLIDEX_BASE=http://$MESH_IP:8077 $SUDO $VENV/bin/python $CHECK_DIR/deep_check.py 2>&1 | tail -2"
 
 echo "✔ deployed $VERSION"
