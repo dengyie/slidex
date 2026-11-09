@@ -24,7 +24,9 @@ standby_ok() {
     [ \"\$ver\" = \"$1\" ]
     [ -f /etc/slidex-captcha.env ] && [ -f $CHECK_DIR/deep_check.py ]
     [ -f $NACE_DIR/config/egress.yaml ] && [ -f $NACE_DIR/health_probe.sh ]
-    echo \"    standby ok: slidex \$ver + env + check + nace config\""
+    sudo grep -q '10.144.144.9:9999' $NACE_DIR/health_probe.sh && { echo 'stale probe with typo port 9999' >&2; exit 1; } || true
+    echo \"    standby ok: slidex \$ver + env + check + nace config\"
+    [ -f /etc/systemd/system/ha-probe.timer ] && echo '    standby ok: ha-probe.timer present' || echo '    WARN: ha-probe.timer missing (probe not self-healing on standby)'"
 }
 
 VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
@@ -53,9 +55,11 @@ echo "==> [3/4] check 工具 + nace 配置对齐"
 scp -q "$CHECK_DIR/deep_check.py" "$CHECK_DIR/cycle_check.py" "$STANDBY:/tmp/" 2>/dev/null || \
   scp -q /tmp/slidex-deep/deep_check.py deploy/cycle_check.py "$STANDBY:/tmp/"
 ssh "$STANDBY" "sudo mkdir -p $CHECK_DIR && sudo mv /tmp/deep_check.py /tmp/cycle_check.py $CHECK_DIR/ && sudo sed -i 's|http://10.144.144.9:8077|http://$STANDBY_MESH_IP:8077|' $CHECK_DIR/cycle_check.py"
-# nace：配置与探针脚本拉齐（探针供备机切换为主后使用）
+# nace：配置与探针脚本拉齐（探针为自机化版本：探自身 mesh IP，nace 未运行自动跳过）
 ssh "$ACTIVE" "cat $NACE_DIR/config/egress.yaml" | ssh "$STANDBY" "sudo tee $NACE_DIR/config/egress.yaml >/dev/null"
-ssh "$ACTIVE" "cat $NACE_DIR/health_probe.sh" | ssh "$STANDBY" "sudo tee $NACE_DIR/health_probe.sh >/dev/null && sudo chmod 700 $NACE_DIR/health_probe.sh"
+ssh "$ACTIVE" "cat $NACE_DIR/health_probe.sh" | ssh "$STANDBY" "sudo tee $NACE_DIR/health_probe.sh >/dev/null && sudo chmod 700 $NACE_DIR/health_probe.sh && sudo bash -n $NACE_DIR/health_probe.sh"
+# 探针 systemd 单元同步（若备机尚无则装上；timer enabled 但备机 nace 不常驻，脚本自带跳过）
+ssh "$STANDBY" '[ -f /etc/systemd/system/ha-probe.timer ] || { echo "WARN: ha-probe units missing on standby, install manually" >&2; }'
 
 echo "==> [4/4] 备机自检"
 standby_ok "$VERSION"
