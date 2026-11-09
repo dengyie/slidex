@@ -65,9 +65,11 @@ echo "==> [5/6] health"
 ssh "$REMOTE" "curl -s --max-time 5 http://$MESH_IP:8077/health | head -c 200; echo"
 
 echo "==> [6/6] deep_check"
-# SLIDEX_BASE 必须显式指向本次部署的目标实例——deep_check.py 的内置默认
-# 仍是 gz-cvm(10.144.144.8)，不覆盖就会把验收流量打到旧机上（2026-11-10 实测：
-# 0.10.0 部署 huawei 后 deep_check D1/D2 打到 gz-cvm 半死服务，误报 1005）。
-ssh "$REMOTE" "SLIDEX_BASE=http://$MESH_IP:8077 $SUDO $VENV/bin/python $CHECK_DIR/deep_check.py 2>&1 | tail -2"
+# check 脚本以本仓为唯一真源：每次部署先把 repo 版本同步到目标机，
+# 防止 server 侧热修导致 repo 副本漂移（review P3-3）。
+ssh "$REMOTE" "$SUDO mkdir -p $CHECK_DIR && $SUDO tee $CHECK_DIR/deep_check.py >/dev/null" < deploy/check/deep_check.py
+# 退出码门禁（review P2-1）：remote 无 pipefail 时 ssh 退出码取 tail 的 0，
+# deep_check 失败会被吞掉——必须 set -o pipefail 让验收失败令部署失败。
+ssh "$REMOTE" "set -o pipefail; SLIDEX_BASE=http://$MESH_IP:8077 $SUDO $VENV/bin/python $CHECK_DIR/deep_check.py 2>&1 | tail -2"
 
 echo "✔ deployed $VERSION"

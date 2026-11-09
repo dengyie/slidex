@@ -368,6 +368,28 @@ def test_preflight_malformed_threshold_env_falls_back_to_default(tmp_path, monke
     assert "无成功记录" in reason
 
 
+def test_preflight_float_format_env_tolerated(tmp_path, monkeypatch):
+    """与 _env 宽容规则对齐："1800.0"/"300.0" 浮点写法按值生效，不回落默认。"""
+    monkeypatch.setenv("XY_SLIDER_RISK_WINDOW", "300.0")
+    s = _build()
+    s.risk_trigger_scene = "token_refresh"
+    s.failure_history_file = str(tmp_path / "f.json")
+    _write_failure_history(
+        tmp_path / "f.json",
+        [{
+            "timestamp": time.time() - 600,
+            "trigger_scene": "token_refresh",
+            "verification_feedback": {"fail_code": "nc_block"},
+        }],
+    )
+    # 10 分钟前的硬拒绝：300s 窗口外 → 放行（若回落默认 1800 则会延迟）
+    assert s._evaluate_slider_preflight_risk() == (True, "")
+
+    monkeypatch.setenv("XY_SLIDER_RISK_WINDOW", "1800.0")
+    allowed, _ = s._evaluate_slider_preflight_risk()
+    assert not allowed
+
+
 # ── 人工接管分支（run() manual_headful 路径） ─────────────────────────────
 
 

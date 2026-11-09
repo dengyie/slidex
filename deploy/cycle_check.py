@@ -8,7 +8,9 @@
 """
 
 import json
+import os
 import ssl
+import subprocess
 import sys
 import threading
 import time
@@ -16,7 +18,30 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-BASE = "http://10.144.144.8:8077"  # gz-cvm 服务绑定在 mesh IP，非 127.0.0.1
+
+def _default_base():
+    """默认目标 = 本机 mesh IP（与 deep_check._default_base 同款，SLIDEX_BASE 可覆盖）。
+
+    历史默认写死 gz-cvm(10.144.144.8)，该机到期后会把压测流量打到错误实例
+    （2026-11-10 deep_check 已因此两次误报 1005，同根因一并根修）。
+    """
+    env = os.environ.get("SLIDEX_BASE", "").strip()
+    if env:
+        return env
+    try:
+        out = subprocess.run(
+            ["ip", "-4", "-o", "addr", "show", "to", "10.144.144.0/24"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+        ip = out.split()[3].split("/")[0]
+        if ip:
+            return f"http://{ip}:8077"
+    except Exception:
+        pass
+    return "http://127.0.0.1:8077"
+
+
+BASE = _default_base()
 KEY = ""
 for line in open("/etc/slidex-captcha.env", encoding="utf-8"):
     if line.startswith("SLIDEX_CAPTCHA_KEYS="):

@@ -314,20 +314,16 @@ def _is_runtime_detached_error(error: Exception) -> bool:
 def _parse_int_env(name: str, default: int, floor: int) -> int:
     """读整型 env，clamp 语义（合法值钳到 floor，非法值回落 default）。
 
-    与 _env.env_int 的 fallback 语义刻意不同：风控窗口/阈值要的是
-    ``max(floor, int(v))``（上游 b838cd1 语义），非法值不能让整条门控失效，
-    也不能把小值放大成 default——钳到 floor 并告警。
+    解析复用 ``_env.parse_int`` 的宽容规则（容忍 ``"1800.0"`` 浮点写法、
+    非有限/非法值 warning 后回落默认），钳制留在本层——与 ``env_int`` 的
+    「越界回落 default」语义刻意不同：风控窗口/阈值要的是
+    ``max(floor, v)``（上游 b838cd1 语义），非法值不能让整条门控失效，
+    小值也不能被放大成 default，而是钳到 floor。
     """
     raw = (os.environ.get(name) or "").strip()
     if not raw:
         return default
-    try:
-        return max(floor, int(raw))
-    except ValueError:
-        logger.warning(
-            f"【env】{name}={raw!r} 不是整数，回落默认值 {default}（下限 {floor}）"
-        )
-        return default
+    return max(floor, parse_int(raw, default))
 
 # ============================================================================
 # 分析来源：trajectory_history/*.json 成功记录
@@ -768,7 +764,7 @@ adaptive_strategy_manager = AdaptiveStrategyManager()
 
 # 全局并发控制 — 从共享模块导入
 from slidex._concurrency import SliderConcurrencyManager, concurrency_manager
-from slidex._env import env_int
+from slidex._env import env_int, parse_int
 from slidex._nav import is_nav_timeout
 
 # 策略统计管理器
