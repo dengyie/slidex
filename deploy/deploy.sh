@@ -68,6 +68,7 @@ echo "==> [6/6] deep_check"
 # check 脚本以本仓为唯一真源：每次部署先把 repo 版本同步到目标机，
 # 防止 server 侧热修导致 repo 副本漂移（review P3-3）。
 ssh "$REMOTE" "$SUDO mkdir -p $CHECK_DIR && $SUDO tee $CHECK_DIR/deep_check.py >/dev/null" < deploy/check/deep_check.py
+ssh "$REMOTE" "$SUDO tee $CHECK_DIR/cycle_check.py >/dev/null" < deploy/cycle_check.py
 # 退出码门禁（review P2-1）：remote 无 pipefail 时 ssh 退出码取 tail 的 0，
 # deep_check 失败会被吞掉——必须 set -o pipefail 让验收失败令部署失败。
 ssh "$REMOTE" "set -o pipefail; SLIDEX_BASE=http://$MESH_IP:8077 $SUDO $VENV/bin/python $CHECK_DIR/deep_check.py 2>&1 | tail -2"
