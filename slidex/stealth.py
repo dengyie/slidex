@@ -310,6 +310,25 @@ def _is_runtime_detached_error(error: Exception) -> bool:
     error_text = str(error).lower()
     return 'detached' in error_text or 'disconnected' in error_text
 
+
+def _parse_int_env(name: str, default: int, floor: int) -> int:
+    """读整型 env，clamp 语义（合法值钳到 floor，非法值回落 default）。
+
+    与 _env.env_int 的 fallback 语义刻意不同：风控窗口/阈值要的是
+    ``max(floor, int(v))``（上游 b838cd1 语义），非法值不能让整条门控失效，
+    也不能把小值放大成 default——钳到 floor 并告警。
+    """
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return max(floor, int(raw))
+    except ValueError:
+        logger.warning(
+            f"【env】{name}={raw!r} 不是整数，回落默认值 {default}（下限 {floor}）"
+        )
+        return default
+
 # ============================================================================
 # 分析来源：trajectory_history/*.json 成功记录
 # 分析时间：2026-01-28 优化版本
@@ -873,13 +892,7 @@ class XianyuSliderStealth:
         auto_slider_value = os.environ.get("XY_ENABLE_AUTO_SLIDER", "").strip().lower()
         # 保持旧版默认行为；只有显式关闭时才进入人工接管模式。
         self.auto_slider_enabled = auto_slider_value not in {"0", "false", "no", "off"}
-        try:
-            self.manual_slider_timeout = max(
-                30,
-                int(os.environ.get("XY_MANUAL_SLIDER_TIMEOUT", "180") or 180),
-            )
-        except (TypeError, ValueError):
-            self.manual_slider_timeout = 180
+        self.manual_slider_timeout = _parse_int_env("XY_MANUAL_SLIDER_TIMEOUT", 180, 30)
         # 人工处理必须显示浏览器，否则用户无法接管。
         self.headless = bool(headless) if self.auto_slider_enabled else False
         self.initial_cookies = str(initial_cookies or "").replace("\ufeff", "").strip()
@@ -1229,7 +1242,7 @@ class XianyuSliderStealth:
                 return True, ''
 
             now = time.time()
-            window_seconds = max(300, int(os.environ.get('XY_SLIDER_RISK_WINDOW', '1800') or 1800))
+            window_seconds = _parse_int_env('XY_SLIDER_RISK_WINDOW', 1800, 300)
             recent = []
             hard_rejects = []
             for record in failures:
@@ -1256,7 +1269,7 @@ class XianyuSliderStealth:
             if hard_rejects:
                 return False, f'近{window_seconds // 60}分钟命中过硬拒绝，等待风控冷却后再验证'
 
-            threshold = max(3, int(os.environ.get('XY_SLIDER_RISK_FAILURE_THRESHOLD', '6') or 6))
+            threshold = _parse_int_env('XY_SLIDER_RISK_FAILURE_THRESHOLD', 6, 3)
             if len(recent) >= threshold:
                 recent_successes = 0
                 for record in self._load_success_history():

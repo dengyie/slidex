@@ -255,7 +255,7 @@ def test_outbound_ip_allows_when_context_missing():
     assert s._check_browser_outbound_ip_consistency() == (True, "")
 
 
-def test_outbound_ip_probe_url_disable_switch(tmp_path, monkeypatch):
+def test_outbound_ip_probe_url_disable_switch(monkeypatch):
     monkeypatch.setenv("XY_OUTBOUND_IP_PROBE_URL", "")
     s = _build()
     s.expected_outbound_ip = "5.6.7.8"
@@ -329,3 +329,204 @@ def test_run_defers_on_outbound_ip_mismatch_after_browser_init(tmp_path):
     feedback = s.last_verification_feedback
     assert feedback["status"] == "preflight_deferred"
     assert feedback["source"] == "outbound_ip_mismatch"
+
+
+# ── env 容错（_parse_int_env：非法值回落默认并告警，门控不失效） ──────────
+
+
+def test_preflight_malformed_window_env_falls_back_to_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("XY_SLIDER_RISK_WINDOW", "abc")
+    s = _build()
+    s.risk_trigger_scene = "token_refresh"
+    s.failure_history_file = str(tmp_path / "f.json")
+    # 10 分钟前的硬拒绝：默认 1800s 窗口内 → 仍延迟（门控未因 env 非法而失效）
+    _write_failure_history(
+        tmp_path / "f.json",
+        [{
+            "timestamp": time.time() - 600,
+            "trigger_scene": "token_refresh",
+            "verification_feedback": {"fail_code": "nc_block"},
+        }],
+    )
+    allowed, _ = s._evaluate_slider_preflight_risk()
+    assert not allowed
+
+
+def test_preflight_malformed_threshold_env_falls_back_to_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("XY_SLIDER_RISK_FAILURE_THRESHOLD", "oops")
+    s = _build()
+    s.risk_trigger_scene = "token_refresh"
+    s.failure_history_file = str(tmp_path / "f.json")
+    s.success_history_file = str(tmp_path / "s_missing.json")
+    now = time.time()
+    _write_failure_history(
+        tmp_path / "f.json",
+        [{"timestamp": now, "trigger_scene": "token_refresh", "verification_feedback": {}} for _ in range(6)],
+    )
+    allowed, reason = s._evaluate_slider_preflight_risk()
+    assert not allowed
+    assert "无成功记录" in reason
+
+
+# ── 人工接管分支（run() manual_headful 路径） ─────────────────────────────
+
+
+class _FakeManualMouse:
+    def move(self, *args, **kwargs):
+        pass
+
+
+class _FakeManualPage:
+    """run() 人工分支所需的最小页面桩。"""
+
+    def __init__(self):
+        self.url = "https://passport.goofish.com/punish?action=captcha"
+        self.mouse = _FakeManualMouse()
+
+    def goto(self, url, **kwargs):
+        return None
+
+    def title(self):
+        return "验证码拦截"
+
+    def content(self):
+        return "亲，请按住滑块，拖动到最右边"
+
+    def wait_for_load_state(self, state=None, timeout=None):
+        return None
+
+    def is_closed(self):
+        return False
+
+
+def _setup_manual_run(s, page):
+    """把实例摆到 run() 能走进 manual_headful 分支的状态。"""
+    s.auto_slider_enabled = False
+    s.headless = False
+    s.risk_trigger_scene = "token_refresh"
+    s.failure_history_file = "/nonexistent/failure-history.json"
+    s.page = page
+    s.context = mock.Mock()
+    s.context.pages = []
+
+
+def test_run_manual_branch_success_snapshots_cookies(tmp_path):
+    s = _build()
+    page = _FakeManualPage()
+    _setup_manual_run(s, page)
+    button = object()
+    snapshot = {"_m_h5_tk": "abc", "unb": "123"}
+    cookies_after = {"_m_h5_tk": "abc", "unb": "123", "cookie2": "x"}
+
+    with mock.patch.object(s, "_check_date_validity", return_value=True), \
+         mock.patch.object(s, "init_browser", lambda: None), \
+         mock.patch.object(s, "_warmup_slider_context", lambda url: None), \
+         mock.patch.object(s, "_is_hard_block_page", return_value=False), \
+         mock.patch.object(s, "_simulate_human_page_behavior", lambda: None), \
+         mock.patch.object(s, "find_slider_elements", return_value=(None, button, None)), \
+         mock.patch.object(s, "check_verification_success_fast", return_value=True), \
+         mock.patch.object(s, "_snapshot_context_cookies", return_value=snapshot), \
+         mock.patch.object(s, "_select_monitor_page", return_value=page), \
+         mock.patch.object(s, "_detect_qr_code_verification", return_value=(False, None)), \
+         mock.patch.object(s, "_get_cookies_after_success", return_value=cookies_after) as get_cookies:
+        ok, cookies = s.run("https://example.com/slider")
+
+    assert ok is True
+    assert cookies == cookies_after
+    # 成功瞬间已写过快照；正常收口走 _get_cookies_after_success，快照未被消费
+    assert s._manual_success_cookies == snapshot
+    get_cookies.assert_called_once()
+
+
+def test_run_manual_branch_timeout_clears_snapshot(tmp_path):
+    s = _build()
+    page = _FakeManualPage()
+    _setup_manual_run(s, page)
+    s.manual_slider_timeout = 1.0  # 缩短窗口，测试 ~1s
+    button = object()
+
+    with mock.patch.object(s, "_check_date_validity", return_value=True), \
+         mock.patch.object(s, "init_browser", lambda: None), \
+         mock.patch.object(s, "_warmup_slider_context", lambda url: None), \
+         mock.patch.object(s, "_is_hard_block_page", return_value=False), \
+         mock.patch.object(s, "_simulate_human_page_behavior", lambda: None), \
+         mock.patch.object(s, "find_slider_elements", return_value=(None, button, None)), \
+         mock.patch.object(s, "check_verification_success_fast", return_value=False), \
+         mock.patch.object(s, "_select_monitor_page", return_value=page), \
+         mock.patch.object(s, "_detect_qr_code_verification", return_value=(False, None)), \
+         mock.patch.object(s, "_save_debug_snapshot", return_value=None):
+        ok, cookies = s.run("https://example.com/slider")
+
+    assert ok is False
+    assert cookies is None
+    assert s._manual_success_cookies is None
+
+
+def test_run_manual_branch_no_slider_returns_fast_without_waiting(tmp_path):
+    """无滑块页面不得进入 180s 无意义等待（上游 #111 的反挂死属性）。"""
+    s = _build()
+    page = _FakeManualPage()
+    _setup_manual_run(s, page)
+    s.manual_slider_timeout = 1.0
+
+    import time as _time
+    started = _time.time()
+    with mock.patch.object(s, "_check_date_validity", return_value=True), \
+         mock.patch.object(s, "init_browser", lambda: None), \
+         mock.patch.object(s, "_warmup_slider_context", lambda url: None), \
+         mock.patch.object(s, "_is_hard_block_page", return_value=False), \
+         mock.patch.object(s, "_simulate_human_page_behavior", lambda: None), \
+         mock.patch.object(s, "find_slider_elements", return_value=(None, None, None)), \
+         mock.patch.object(s, "_select_monitor_page", return_value=page), \
+         mock.patch.object(s, "_detect_qr_code_verification", return_value=(False, None)):
+        ok, cookies = s.run("https://example.com/slider")
+    elapsed = _time.time() - started
+
+    assert ok is False
+    assert cookies is None
+    assert elapsed < 5, f"无滑块页应立即返回，实际耗时 {elapsed:.1f}s"
+
+
+def test_run_manual_branch_no_slider_qr_redirect_returns_verification_result(tmp_path):
+    s = _build()
+    page = _FakeManualPage()
+    _setup_manual_run(s, page)
+    qr_result = {"cookie2": "from-qr-flow"}
+
+    with mock.patch.object(s, "_check_date_validity", return_value=True), \
+         mock.patch.object(s, "init_browser", lambda: None), \
+         mock.patch.object(s, "_warmup_slider_context", lambda url: None), \
+         mock.patch.object(s, "_is_hard_block_page", return_value=False), \
+         mock.patch.object(s, "_simulate_human_page_behavior", lambda: None), \
+         mock.patch.object(s, "find_slider_elements", return_value=(None, None, None)), \
+         mock.patch.object(s, "_select_monitor_page", return_value=page), \
+         mock.patch.object(s, "_detect_qr_code_verification", return_value=(True, object())), \
+         mock.patch.object(
+             s, "_process_verification_requirement", return_value=qr_result
+         ) as process_qr:
+        ok, cookies = s.run("https://example.com/slider")
+
+    assert ok is True
+    assert cookies == qr_result
+    process_qr.assert_called_once()
+
+
+# ── _get_cookies_after_success 人工快照兜底（上游 #111 关页场景） ─────────
+
+
+def test_get_cookies_after_success_falls_back_to_manual_snapshot():
+    s = _build()
+
+    class _ClosedPage:
+        @property
+        def url(self):
+            raise RuntimeError("Target page, context or browser has been closed")
+
+    s.page = _ClosedPage()
+    s._manual_success_cookies = {"_m_h5_tk": "snap", "unb": "42"}
+
+    first = s._get_cookies_after_success()
+    assert first == {"_m_h5_tk": "snap", "unb": "42"}
+    # 一次性消费：第二次不得再拿到旧快照
+    assert s._get_cookies_after_success() is None
+    assert s._manual_success_cookies is None
