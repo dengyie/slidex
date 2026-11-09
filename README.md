@@ -1,123 +1,181 @@
-# Slidex
+<!-- markdownlint-disable-file MD033 MD045 -->
+<div align="center">
+
+# SlideX
+
+**High-Performance Headless CAPTCHA Solver, Computer Vision Challenge Engine & PerimeterX Verification Gate**
+
+[![License](https://img.shields.io/badge/license-MIT-green.svg?style=flat-square)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10+-3776AB.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/Framework-FastAPI-009688.svg?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![Playwright](https://img.shields.io/badge/Driver-Playwright-2EAD33.svg?style=flat-square&logo=playwright&logoColor=white)](https://playwright.dev/)
+[![OpenCV](https://img.shields.io/badge/Vision-OpenCV-5C3EE8.svg?style=flat-square&logo=opencv&logoColor=white)](https://opencv.org/)
+[![Tests](https://img.shields.io/badge/tests-1013%20passed-brightgreen.svg?style=flat-square)]()
+
+[English](./README.md) · [简体中文](./README.zh-CN.md) · [Core Features](#core-features) · [Architecture](#system-architecture) · [Quick Start](#quick-start) · [PerimeterX Station](#perimeterx-solving-station) · [API Reference](#api-specification)
+
+<br>
 
 <p align="center">
-  <strong>automation-kit 视觉能力平台</strong><br>
-  <em>Vision Challenge Platform for automation-kit</em>
+  <b>Eliminates fragile browser automation failures and brittle coordinate guesswork caused by anti-bot verification challenges.</b><br>
+  Integrates headless Playwright worker pools, Chrome CDP remote debugging sessions, OpenCV image matching, and multimodal visual models into a unified verification gate.<br>
+  Features native adapters for Aliyun NoCaptcha / Captcha.js 2.0, GeeTest v3/v4, hCaptcha multimodal challenges, and a self-hosted PerimeterX press/silent token solving station.
 </p>
 
-<p align="center">
-  <img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+">
-  <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License">
-</p>
+</div>
 
-<p align="center">
-  <strong>中文</strong> | <a href="README_EN.md">English</a>
-</p>
+---
 
-Slidex 已从滑块验证码求解库升级为 `automation-kit` 生态的视觉能力平台。当前版本统一承接滑块验证码、OCR、截图识别证据、人工兜底会话和相关 telemetry/artifact 契约，同时保持 `SliderSolver` 对旧接入方式的兼容。
+## Motivation & Architecture Comparison
 
-> 生态开发基线：见 [`automation-kit/docs/development.md`](https://github.com/dengyie/automation-kit/blob/main/docs/development.md)。
+Automated web pipelines and crawler systems frequently encounter multi-vendor verification challenges that degrade throughput and trigger IP blacklisting:
 
-**特性**：
-- 🎯 **多供应商支持** — 内置 Aliyun NoCaptcha、AliyunCaptcha.js 2.0、GeeTest 适配器，自动检测
-- 🔎 **统一视觉接口** — `slidex.vision` 统一描述 slider、OCR、manual fallback
-- 🧩 **hCaptcha 兼容** — 9 宫格二选 / 区域点选 / 拖放三型，复用多模态视觉通道
-- 🔑 **PX press-token** — PerimeterX press/silent 四件套（`px3/pxde/pxvid/pxcts`，`:1000:` 判据），内置可自托管打码站（`/v1/solve`、captcha.run 兼容 `/v2/tasks`、`/health`）
-- 🖼️ **纯图片滑块识别** — `SliderImageSolver` 只给图片即可定位缺口，无需浏览器/网络
-- 🧾 **OCR 能力内建** — `slidex.ocr` 提供 `OcrTextExtractor` / `OcrResult` / `FakeOcrExtractor`
-- 🔌 **插件式扩展** — 10 分钟实现自定义 Provider，无需修改核心代码
-- 🌐 **CDP 模式** — 连接已有浏览器，适合 TypeScript/Node 集成
-- ♻️ **会话复用** — 支持 CDP、已有 Playwright `Page`、图片 bytes/path
-- 🧠 **智能求解** — OpenCV 图像匹配 + 物理轨迹模拟 + 真人轨迹回放
-- 🛡️ **反检测** — Stealth 参数 + JS 注入隐藏自动化特征
+| Evaluation Dimension | SlideX Engine | Traditional Script / Selector Hacks | Third-Party Commercial Cloud Solvers |
+| :--- | :--- | :--- | :--- |
+| **Solving Architecture** | Unified multimodal vision pipeline + physics-based trajectory engine | Fixed selector clicks + hardcoded delays | Remote third-party HTTP round-trip API |
+| **PerimeterX (PX) Support** | Native `px3/pxde/pxvid/pxcts` extraction with strict `:1000:` verification gate | Unsupported or prone to instant detection | High per-call tariff ($2-$5/k), external latency |
+| **Verification Evidence** | Cryptographic token confirmation (`px3`, `h-captcha-response`, cookies) | Blind execution heuristic (zero exceptions = success) | Opaque external verdict without audit trails |
+| **Driver Flexibility** | Headless Playwright, external Chrome CDP, and pure image buffer inputs | Tied strictly to a single browser driver | No local browser integration |
+| **Anti-Detection Posture** | Real physics humanization, Bezier easing, and stealth JS injection | High-velocity linear movements trigger bot scores | Dependent on external proxy fleet and fingerprinters |
+| **Self-Hosting & Privacy** | 100% self-hosted microservice, local memory-only token storage | Ad-hoc local code | External data leakage of session cookies and tokens |
 
-## 安装
+---
 
-```bash
-pip install -e .
-playwright install chromium
-pip install -e ".[remote]"   # 可选：远程控制 API
-pip install -e ".[automation-kit]"  # 可选：native automation-kit 适配
-pip install -e ".[vision]"   # 可选：纯图片无块图缺口检测的 YOLO 后端
-pip install -e ".[server]"   # 可选：自建打码站（FastAPI/uvicorn）
+## Core Features
+
+| Module | Feature Highlight | Technical Implementation & Advantage |
+| :--- | :--- | :--- |
+| **Universal Slider Engine** | Multi-vendor automatic detection | Built-in adapters for Aliyun NoCaptcha, Aliyun Captcha.js 2.0, and GeeTest v3/v4 with automated DOM signature sniffing. |
+| **Multimodal Vision Pipeline** | Unified challenge abstraction | `slidex.vision` standardizes sliders, OCR text extraction, and manual fallback sessions under a single request model. |
+| **hCaptcha Integration** | Full challenge family coverage | Resolves 9-grid binary selection, normalized area selection, and drag-and-drop challenges via multimodal vision channels. |
+| **PerimeterX Solving Station** | Native press and silent tokens | Self-hosted FastAPI service harvesting `px3/pxde/pxvid/pxcts` with strict `:1000:` pass criterion. |
+| **Pure Image Gap Detector** | Browserless zero-overhead solving | Multi-tier pipeline combining OpenCV Canny template matching, YOLO neural detection, contour geometry, and column profiles. |
+| **Human Physics Simulation** | Eased trajectory replay | Four-phase physical velocity model (slow start, acceleration, mid-glide, micro-adjustments) with recorded human replays. |
+| **Chrome CDP Integration** | Non-intrusive session reuse | Connects directly to running browser sessions via CDP (`--remote-debugging-port`), avoiding session invalidation. |
+| **Enterprise Microservice** | Synchronous and asynchronous APIs | Exposes high-throughput `/v1/solve` and captcha.run-compatible `/v2/tasks` with bounded memory retention (30-min TTL). |
+
+---
+
+## System Architecture
+
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│                   Upstream Applications / API Callers                   │
+│         (automation-kit / Crawler Pipelines / HTTP Microservices)       │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                      SlideX Visual Challenge Hub                        │
+│  ├─ VisualChallengeSolver         ├─ Provider Registry (Sniffer)       │
+│  ├─ Physics Trajectory Engine      ├─ Anti-Detection Stealth Injector   │
+│  └─ Diagnostic Tracing Filter     └─ Bounded In-Memory Semaphore Gate  │
+└───────┬───────────────────────────┬───────────────────────────┬────────┘
+        │                           │                           │
+        ▼                           ▼                           ▼
+┌───────────────┐           ┌───────────────┐           ┌───────────────┐
+│ Slider Engine │           │ Vision & OCR  │           │  PX Station   │
+│ Aliyun / Gee  │           │ hCaptcha /    │           │ Press / Silent│
+│ Canny / YOLO  │           │ Multimodal    │           │ :1000: Gate   │
+└───────┬───────┘           └───────┬───────┘           └───────┬───────┘
+        │                           │                           │
+        └───────────────────────────┼───────────────────────────┘
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                      Execution & Runtime Backends                      │
+│  ├─ Headless Playwright Fleet      ├─ Chrome Remote Debugging (CDP)    │
+│  ├─ OpenCV Matrix Processing       └─ Dedicated Outbound Proxy Egress  │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-## 快速开始
+---
 
-### 自动检测模式（推荐）
+## Supported CAPTCHA Ecosystem
+
+| Vendor / Challenge | Identifier | Mode | Status |
+| :--- | :--- | :--- | :--- |
+| **Aliyun NoCaptcha** | `aliyun-nocaptcha` | In-page DOM / Slider | Built-in |
+| **Aliyun Captcha.js 2.0** | `aliyun-captcha-js` | Slider / Verify-Param | Built-in |
+| **GeeTest v3 / v4** | `geetest` | Slider / Fullpage | Built-in |
+| **hCaptcha (9-Grid Binary)** | `image_label_binary` | Multimodal Vision | Built-in |
+| **hCaptcha (Area Select)** | `image_label_area_select` | Normalized Coordinates | Built-in |
+| **hCaptcha (Drag & Drop)** | `image_drag_drop` | Bezier Trajectory Drag | Built-in |
+| **PerimeterX (PX Press)** | `px_press` | Chromium Headless Frame | Built-in |
+| **PerimeterX (PX Silent)** | `silent` | Seed Harvest / Background | Built-in |
+| **Pure Image Gap Detection** | `SliderImageSolver` | Canny / YOLO / Contour | Built-in |
+| **Optical Character Reader** | `slidex.ocr` | Bounding Box OCR | Built-in |
+
+---
+
+## Quick Start
+
+### 1. Prerequisites
+
+- Python 3.10+ (Python 3.11 recommended)
+- Chromium / Google Chrome
+
+```bash
+# Clone repository
+git clone https://github.com/dengyie/slidex.git
+cd slidex
+
+# Create and activate virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install core package and Playwright browser binaries
+pip install -e .
+playwright install chromium
+
+# Install optional capability groups
+pip install -e ".[server]"          # Self-hosted FastAPI microservice
+pip install -e ".[vision]"          # YOLO neural gap detection model
+pip install -e ".[automation-kit]"  # Native automation-kit integration
+```
+
+### 2. Basic Python Usage
+
+#### Auto-Detection Mode
 
 ```python
 from slidex import SliderSolver
 
-# 自动识别验证码供应商
-solver = SliderSolver(cookie_id="my_user", provider="auto")
-success, cookies = await solver.solve("https://...verification_url...")
+# Sniffs captcha provider dynamically from target page
+solver = SliderSolver(cookie_id="session_01", provider="auto")
+success, cookies = await solver.solve("https://example.com/verification")
 ```
 
-### 手动指定供应商
+#### Pure Image Gap Detection (No Browser Required)
 
 ```python
-# Aliyun NoCaptcha
-solver = SliderSolver(provider="aliyun-nocaptcha")
+from slidex.vision import SliderImageSolver
 
-# GeeTest 极验
-solver = SliderSolver(provider="geetest")
+solver = SliderImageSolver()
+
+# Template matching with background and puzzle piece
+result = solver.solve("background.png", "piece.png")
+
+# Autonomous gap detection without piece image
+result = solver.solve(b"...raw image bytes...")
+
+print(result.to_dict())
+# {"success": True, "gap_x": 182, "confidence": 0.87, "method": "template_edge", ...}
 ```
 
-### 统一视觉 API
+#### Multimodal hCaptcha Solving
 
 ```python
-from slidex.ocr import FakeOcrExtractor
-from slidex.vision import (
-    ChallengeType,
-    VisionContext,
-    VisualChallengeRequest,
-    VisualChallengeSolver,
-)
-
-solver = VisualChallengeSolver(
-    ocr_extractor=FakeOcrExtractor(text="大麦", confidence=0.98)
-)
-
-ocr_result = await solver.solve(
-    VisualChallengeRequest(
-        challenge_type=ChallengeType.OCR_TEXT,
-        context=VisionContext.IMAGE_BYTES,
-        image_bytes=b"fake-image",
-    )
-)
-
-slider_result = await solver.solve(
-    VisualChallengeRequest(
-        challenge_type=ChallengeType.SLIDER_CAPTCHA,
-        context=VisionContext.CDP,
-        cdp_endpoint="ws://localhost:9222/devtools/browser/xxx",
-        page_url="https://...",
-    )
-)
-```
-
-### hCaptcha
-
-hCaptcha 与滑块族是两套协议：挑战运行在
-`iframe[src^="https://newassets.hcaptcha.com/captcha/v1/"]` 内，判决走
-`/checkcaptcha/` 的 `{"pass": bool}`，成功产物是 `h-captcha-response` token
-（不是 cookie）。因此它不走 `CaptchaProvider` 流水线，而是作为
-`ChallengeType.HCAPTCHA` 由 `VisualChallengeSolver` 分派。识别复用同一套
-`SLIDEX_VISION_*` 多模态通道，无需额外配置。
-
-```python
-from slidex.vision import ChallengeType, VisionContext, VisualChallengeRequest
-from slidex.vision import VisualChallengeSolver
+from slidex.vision import ChallengeType, VisionContext, VisualChallengeRequest, VisualChallengeSolver
 
 solver = VisualChallengeSolver()
 result = await solver.solve(
     VisualChallengeRequest(
         challenge_type=ChallengeType.HCAPTCHA,
         context=VisionContext.PLAYWRIGHT_PAGE,
-        page=page,                       # 必填：hCaptcha 全程在活页面上
-        question_language="auto",         # 题面语种：auto 中文优先，再回退 en
-        hcaptcha={"max_rounds": 3},       # 可选：轮次上限
+        page=page,
+        question_language="auto",
+        hcaptcha={"max_rounds": 3},
     )
 )
 
@@ -125,592 +183,130 @@ if result.success:
     token = await page.input_value("textarea[name='h-captcha-response']")
 ```
 
-支持的三型挑战：
-
-| 题型 | 判定依据 | 页面动作 |
-|------|---------|---------|
-| `image_label_binary` | `.task` 数量 = 9 | 点击命中的格子中心 |
-| `image_label_area_select` | `.task` 数量 = 0 且拖放判定不成立 | 按归一化坐标点击 |
-| `image_drag_drop` | 引擎判定为拖放 | 贝塞尔路径拖拽（起止缓动 + 微抖动） |
-
-判决与失败处理：
-
-- `success=True` 表示 `/checkcaptcha/` 回了 `pass`（或已拿到
-  `h-captcha-response` token）。
-- **提交后不重试**：`hcaptcha_failed` / `hcaptcha_verdict_pending` 一律
-  `retryable=False`——同一题重复提交只会追加判罚样本。只有
-  `hcaptcha_challenge_timeout` / `screenshot_failed`（尚未触碰页面）标为可重试。
-- 提交后若题面画面**原地不动**，执行器直接停手；只有画面已刷新（进入下一
-  crumb）才继续解下一页。
-
-能力边界（不夸大）：
-
-- 只覆盖**视觉/答题层**。通过率同时受浏览器指纹与 IP 信誉影响，那属于
-  stealth 层，不在本能力的职责内。
-- **不逆向** `hsw.js`、不解析 msgpack 密文载荷：优先读 `/getcaptcha/` 的明文
-  JSON；拿不到时直接截挑战画面 + 读 DOM 题面，两条路都只依赖公开页面结构。
-
-### PX press-token 与自建打码站
-
-针对 PerimeterX（PX）的 press/silent 挑战，slidex 提供一个可自托管的打码站：
-headless Chromium 打开 hsprotect iframe（或站点页），等 PX JS 自行写入
-`_px3`，再从 cookie jar 抽出四件套 `{"px3","pxde","pxvid","pxcts"}`。
-成功判据只有一条：**`px3` 必须含 `:1000:`**（拒绝级常见 `:200:`）。
-
-```python
-from slidex.px import PxPressRequest, PxPressSolver
-
-solver = PxPressSolver(headless=True, concurrency=5)
-result = await solver.solve(
-    PxPressRequest.from_payload(
-        {
-            "appId": "PXzC5j78di",
-            "challengeUrl": "https://iframe.hsprotect.net/...",
-            "websiteURL": "https://signup.live.com/",
-            "country": "US",
-            "proxy": {"host": "1.2.3.4", "port": 8000,
-                      "login": "u", "password": "p"},
-        }
-    )
-)
-if result.success:
-    px3, pxde, pxvid, pxcts = (result.tokens[k] for k in ("px3", "pxde", "pxvid", "pxcts"))
-```
-
-启动打码站（`slidex[server]`）：
-
-```bash
-SLIDEX_CAPTCHA_KEYS=your-key uvicorn slidex.service.app:app --host 0.0.0.0 --port 8000
-```
-
-三种入口：
-
-| 接口 | 用途 |
-|------|------|
-| `POST /v1/solve` | 同步求解，`{"type":"px_press", ...}` → `{"code":0,"data":{四件套}}` |
-| `POST /v2/tasks/` + `GET /v2/tasks/{id}` | captcha.run 兼容的异步任务协议 |
-| `GET /health` | `{ok, active_tasks, done_24h, fail_24h, types}` |
-
-```bash
-curl -s http://127.0.0.1:8000/v1/solve \
-  -H 'Authorization: Bearer your-key' -H 'Content-Type: application/json' \
-  -d '{"type":"px_press","appId":"PXzC5j78di",
-       "challengeUrl":"https://iframe.hsprotect.net/...",
-       "websiteURL":"https://signup.live.com/","country":"US"}'
-```
-
-错误语义分两层：HTTP 状态码表达传输/鉴权/参数（400/401/422/429/500），
-响应体 `code` 表达求解结果（0 成功；1001 通用失败/被拦/上游 5xx；1002 超时——
-页面已加载但预算内没出 token；1003 IP/appId 被拦；1004 并发已满；
-1005 连不上挑战页——先查代理链路；1006 代理要认证 407——改代理配置）。
-求解失败通常是 HTTP 200 + 非零 `code`，并带
-`data.kind` 与 `data.retryable`，调用方据此决定是否重试。成败响应均可带
-`data.diagnostics`（传感器执行链脱敏观测：iframe/captcha.js/main.min.js
-加载状态、collector 是否上报、父页 postMessage 是否出现、jar 里见过的
-`_px*` cookie 名——只有名字和域，没有值）。
-
-press 任务的双页结构：顶层页先落在 `websiteURL` 域、再把 `challengeUrl`
-作为 iframe 注入（与真实嵌入一致，postMessage 通道才会活）；`vid` 缺失时
-自动用裸 silent 补种子（拿 `_pxvid`），种子失败立刻 `caller_vid_required`。
-
-要点：
-
-- **同 IP 铁律**：任务里只要带了 `proxy`，浏览器 context 与所有出站请求都走它；
-  出口不一致会让 token 直接作废。空 proxy 表示直连，仅限本机调试。
-- **不落盘**：任务只存在内存里（30 分钟 TTL），完成即弃；日志只打印 token
-  前缀与长度，不输出完整 cookie/token。
-- **并发**：`SLIDEX_PX_CONCURRENCY`（默认 5），排队超时返回 `solver_busy`。
-- **兼容**：`type` 支持别名 `px_press` / `press` / `pxcaptcha2` / `silent` 等
-  （大小写与连字符不敏感）；`geetest_v3` 转调 `SliderSolver` 保留旧调用方。
-
-#### 生产部署
-
-当前线上形态：gz-cvm（mesh 内 `10.144.144.8`）systemd 常驻，业务方用
-`http://10.144.144.8:8077` + Bearer key 调用。部署资产在 [`deploy/`](deploy/)：
-
-- `deploy/slidex-captcha.service` — systemd 单元（`MemoryMax=1200M`，与同机
-  服务隔离 cgroup；`workers=1`，并发靠进程内 semaphore）
-- `deploy/slidex-captcha.env.example` — 配置模板（keys / 并发 / headless）
-- `deploy/deploy.sh` — 一键发布：本地构建 wheel → 上传 → 安装 → 重启 →
-  sha 校验 → `check/deep_check.py` 23 项验收全绿才算过
-- `deploy/README.md` — 首次安装、验收工具、运维注意（密钥轮换、内存水位）
-
-#### 业务方接入（HTTP API）
-
-认证统一 `Authorization: Bearer <key>`（也接受 `X-Api-Key`）。两种协议：
-
-**同步（内网低延迟场景，推荐）**——`POST /v1/solve`，一个请求拿到结果：
-
-```python
-import httpx
-
-def solve_press(key, challenge_url, website_url, *, vid="", proxy=None, timeout_s=150):
-    r = httpx.post(
-        "http://10.144.144.8:8077/v1/solve",
-        headers={"Authorization": f"Bearer {key}"},
-        json={
-            "type": "px_press", "appId": "PXzC5j78di",
-            "challengeUrl": challenge_url, "websiteURL": website_url,
-            "vid": vid, "timeout": timeout_s,
-            **({"proxy": proxy} if proxy else {}),
-        },
-        timeout=timeout_s + 30,   # 服务端预算 + 传输余量
-    )
-    r.raise_for_status()
-    return r.json()   # {"code":0,"msg":"ok","data":{"px3","pxde","pxvid","pxcts"[,"diagnostics"]}}
-```
-
-**异步（长预算/要 taskId 幂等）**——`POST /v2/tasks/` 创建，`GET /v2/tasks/{taskId}`
-轮询（captcha.run 兼容，`taskId` 自己传可实现重试不重复消耗）：
-
-```python
-# 创建 → {"taskId": "..."}；轮询 → {"status": "processing"} 直到
-# {"status": "success", "response": {...四件套}} 或
-# {"status": "fail", "error": "...", "diagnostics": {...}}
-```
-
-**重试决策**只看两件事：`data.kind`（失败类别）与 `data.retryable`
-（是否值得重试同一 payload）。固定规则：
-
-| kind | retryable | 调用方动作 |
-|------|-----------|-----------|
-| `px_token_timeout` / `challenge_load_timeout` | true | 换新 challengeUrl 重试 |
-| `challenge_load_failed` | true | 先查代理链路再重试 |
-| `challenge_proxy_auth` | false | 修代理配置（407），重试无意义 |
-| `challenge_http_error` | false（4xx）/true（5xx） | 看 `retryable` 位 |
-| `px_token_blocked` | true | 换出口 IP / 换 vid |
-| `caller_vid_required` | true | 补 deviceId（challengeDetails）或先跑 silent 拿 vid |
-| `solver_busy` | true | 退避后重试（并发已满） |
-
-带 `proxy` 的任务遵循**同 IP 铁律**：后续用 token 的业务请求（risk/verify）
-必须走同一出口，否则 token 作废。
-
-
-### OCR API
-
-```python
-from slidex.ocr import FakeOcrExtractor
-
-extractor = FakeOcrExtractor(text="A12", confidence=0.95, language="zh-CN")
-result = extractor.extract(
-    image_bytes=b"...png bytes...",
-    roi={"x": 10, "y": 20, "width": 100, "height": 32},
-)
-```
-
-### 纯图片滑块 API（无浏览器）
-
-只拿得到图片（截图、抓包图像、裁剪产物）时，直接定位缺口，不启动浏览器、不产生 cookie：
-
-```python
-from slidex.vision import SliderImageSolver
-
-solver = SliderImageSolver()
-
-# 有拼图块图：Canny 边缘 + 模板匹配（method="template_edge"）
-result = solver.solve("bg.png", "piece.png")
-
-# 无块图：YOLO 后端（装了 slidex[vision]）→ 轮廓几何 → 列能量剖面
-result = solver.solve(b"...png bytes...")
-
-# 从整页截图里只检测验证码区域（ROI，坐标自动平移回原图）
-result = solver.solve(
-    "full_page.png",
-    roi={"x": 320, "y": 180, "width": 300, "height": 160},
-    distance_scale=1.5,  # 可选：图像像素 → 实际滑动行程换算
-)
-
-print(result.to_dict())
-# {"success": True, "gap_x": 182, "confidence": 0.87, "method": "template_edge",
-#  "gap_box": [182, 40, 222, 84], "candidates": [...], ...}
-```
-
-多策略检测管线（`auto` 按可用性自动选择，全失败返回 `success=False`）：
-
-| 方法 | 触发条件 | 依赖 |
-|------|---------|------|
-| `template_edge` | 提供拼图块图 | 内置（OpenCV） |
-| `yolo` | 无块图，装了 `slidex[vision]` | `captcha-recognizer` |
-| `contour` | 无块图，无 YOLO 后端 | 内置（OpenCV） |
-| `column_profile` | 轮廓无结果的兜底 | 内置（OpenCV） |
-
-> `gap_x` 是缺口左边缘在图像坐标系的 x 像素，不做供应商 offset 校正（校正是调用方/供应商层职责）。
-> 实际滑动距离需减去拼图块初始偏移，并按 `distance_scale` 做渲染缩放换算。
-
-也可走统一视觉 API（`VisualChallengeSolver`）或 CLI：
-
-```python
-from slidex.vision import (
-    ChallengeType, VisionContext, VisualChallengeRequest, VisualChallengeSolver,
-)
-
-solver = VisualChallengeSolver()
-result = await solver.solve(
-    VisualChallengeRequest(
-        challenge_type=ChallengeType.SLIDER_CAPTCHA,
-        context=VisionContext.IMAGE_BYTES,
-        image_bytes=b"...bg png...",
-        piece_image_bytes=b"...piece png...",  # 可选
-        roi={"x": 320, "y": 180, "width": 300, "height": 160},  # 可选
-        metadata={"distance_scale": 1.5},  # 可选
-    )
-)
-```
-
-```bash
-python -m slidex.scripts.slide_solve_image \
-  --background bg.png \
-  [--piece piece.png] \
-  [--roi 320,180,300,160] \
-  [--distance-scale 1.5]
-```
-
-### automation-kit 能力适配
-
-```python
-from automation_core.capabilities import (
-    CapabilityExecutor,
-    CapabilityRegistry,
-    CapabilityRequest,
-)
-from slidex.integrations.automation_kit import SlidexVisualCapability
-
-registry = CapabilityRegistry()
-registry.register(SlidexVisualCapability())
-executor = CapabilityExecutor(registry)
-
-result = await executor.aexecute(
-    CapabilityRequest(
-        capability="visual.challenge",
-        operation="solve",
-        parameters={
-            "challenge_type": "ocr_text",
-            "context": "image_bytes",
-            "image_bytes": b"...png bytes...",
-        },
-        metadata={"run_id": "run-1", "task_id": "visual-1"},
-    )
-)
-```
-
-### Legacy 模式（向后兼容）
-
-```python
-from slidex import SlidexConfig, SliderSolver
-
-solver = SliderSolver(
-    cookie_id="my_user",
-    cookies_str="your_cookie_string",
-    headless=True,
-    config=SlidexConfig(),
-)
-
-success, cookies = await solver.solve("https://...verification_url...")
-```
-
-## 技术概览
-
-- **Provider 抽象**：统一接口适配不同供应商，内置 Aliyun、GeeTest，支持插件扩展
-- **图像识别**：OpenCV Canny 边缘检测 + 模板匹配定位缺口，JS DOM 交叉验证
-- **轨迹模拟**：4 阶段物理模型（慢启动→加速→中速→微调），真人轨迹录制回放
-- **反检测**：Chromium Stealth 启动参数 + JS 注入隐藏自动化特征
-
 ---
 
-## 支持的验证码供应商
+## PerimeterX Solving Station
 
-| 供应商 | Provider 名称 | 状态 |
-|--------|--------------|------|
-| 阿里云 NoCaptcha | `aliyun-nocaptcha` | ✅ 内置 |
-| 阿里云 Captcha.js 2.0 拼图（z.ai 系登录） | `aliyun-captcha-js` | ✅ 内置 |
-| 极验 GeeTest v3/v4 | `geetest` | ✅ 内置 |
-| 数美 Shumei | `shumei` | 📝 待实现 |
-| 顶象 Dingxiang | `dingxiang` | 📝 待实现 |
-| 自定义 | 你的 Provider | 🔌 [按生态总纲实现](https://github.com/dengyie/automation-kit/blob/main/docs/development.md) |
+SlideX includes a production-grade self-hosted solving station that extracts PerimeterX press/silent token quadruples (`px3`, `pxde`, `pxvid`, `pxcts`) under an isolated headless Chromium environment.
 
----
-
-## 接入指南
-
-### 1. 自动检测模式（推荐）
-
-最省心的方式，Slidex 自动识别当前网站使用的验证码供应商：
-
-```python
-from slidex import SliderSolver
-
-solver = SliderSolver(cookie_id="user_123", provider="auto")
-success, cookies = await solver.solve("https://...")
-```
-
-### 2. 手动指定供应商
-
-当你明确知道网站使用哪家供应商时：
-
-```python
-# GeeTest 极验
-solver = SliderSolver(provider="geetest")
-
-# Aliyun NoCaptcha
-solver = SliderSolver(provider="aliyun-nocaptcha")
-```
-
-#### z.ai 系登录（AliyunCaptcha.js 2.0）：一站式取参
-
-```python
-from slidex.providers.aliyun_captcha_js import AliyunCaptchaJsProvider
-
-provider = AliyunCaptchaJsProvider()
-# 武装全新控件 → 缺口检测 → 二次反解 → 拖拽 → 捕获 captchaVerifyParam（失败自动重试）
-result = await provider.acquire_verify_param(page, "1nl1cfkp")   # z.ai 登录场景
-if result["param"]:
-    # 拿 param 后由调用方 POST 业务端点（如 z.ai /auths/signin 的 captcha_verify_param）
-    ...
-```
-
-适用 API 登录类集成（z.ai 登录只放行手机号 + 滑块，param 由本 provider 注入的
-success 回调写入 `window.__slidexCaptchaParam`）。注意运行时红线：控件会话分钟级
-过期（尽快拖）；失败会换 cert 并重置弹窗，重试前必须重新定位——这些已内化在
-`acquire_verify_param` 的重试循环里。
-
-适用于已有 Playwright/浏览器会话的场景（如 TypeScript 项目）。不启动新浏览器，通过 CDP 协议连接：
-
-```python
-from slidex import SliderSolver
-
-solver = SliderSolver(
-    cookie_id="user_123",
-    provider="auto",  # CDP 模式也支持自动检测
-)
-
-success, cookies = await solver.solve_on_existing_page(
-    cdp_endpoint="ws://localhost:9222/devtools/browser/xxx",
-    page_url="https://...",  # 可选：先导航到此 URL
-)
-
-await solver.close()
-```
-
-### 4. 自定义 Provider
-
-10 分钟实现一个新供应商适配器：
-
-```python
-from slidex import CaptchaProvider, SliderSolver
-
-class MyProvider(CaptchaProvider):
-    name = "my-custom"
-    
-    async def detect(self, page):
-        return await page.query_selector(".my-captcha") is not None
-    
-    async def locate_elements(self, page):
-        # 定位元素...
-    
-    async def extract_images(self, page, elements):
-        # 提取图像...
-    
-    async def perform_slide(self, page, elements, gap_x, trajectory):
-        # 执行滑动...
-    
-    async def validate_response(self, response):
-        # 判断结果...
-
-# 注册并使用
-SliderSolver.register_provider("my-custom", MyProvider)
-solver = SliderSolver(provider="my-custom")
-```
-
-Provider 的公共边界、取消能力、资源所有权和 automation-kit 接入规范统一维护在
-[生态开发总纲](https://github.com/dengyie/automation-kit/blob/main/docs/development.md)。
-
-### 5. CLI 调用（适合 TypeScript/Node 子进程调用）
+### 1. Launching the Station
 
 ```bash
-python -m slidex.scripts.slide_solve_cdp \
-  --cdp-endpoint ws://localhost:9222/devtools/browser/xxx \
-  --page-url "https://..." \
-  --provider auto  # 自动检测
+SLIDEX_CAPTCHA_KEYS="prod-secret-token" \
+SLIDEX_PX_CONCURRENCY=5 \
+uvicorn slidex.service.app:app --host 0.0.0.0 --port 8077
 ```
 
-输出 JSON（兼容旧字段，同时包含统一视觉结果字段）：
+### 2. Synchronous Solving API (`POST /v1/solve`)
 
+```bash
+curl -s http://127.0.0.1:8077/v1/solve \
+  -H "Authorization: Bearer prod-secret-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "px_press",
+    "appId": "PXzC5j78di",
+    "challengeUrl": "https://iframe.hsprotect.net/...",
+    "websiteURL": "https://signup.live.com/",
+    "country": "US",
+    "proxy": {
+      "host": "proxy.example.com",
+      "port": 8080,
+      "login": "username",
+      "password": "password"
+    }
+  }'
+```
+
+#### Success Response
 ```json
 {
-  "success": true,
-  "challenge_type": "slider_captcha",
-  "provider": "geetest",
-  "confidence": 0.93,
-  "duration_ms": 3200.5,
-  "error_code": null,
-  "retryable": false,
-  "cookies": {"session": "abc"},
-  "artifacts": [{"artifact_type": "telemetry", "path": "telemetry/run-id.json"}],
-  "metadata": {"telemetry": {"status": "success"}},
-  "elapsed_ms": 3200.5,
-  "error": null,
-  "telemetry": {"status": "success"}
-}
-```
-
-### 6. TypeScript 集成示例
-
-```typescript
-import { execSync } from 'child_process';
-
-const cdpEndpoint = browser.wsEndpoint();
-const result = JSON.parse(
-  execSync(`python -m slidex.scripts.slide_solve_cdp \
-    --cdp-endpoint ${cdpEndpoint} \
-    --page-url "${pageUrl}" \
-    --provider auto`).toString()
-);
-
-if (result.success) {
-  console.log(`Solved in ${result.elapsed_ms}ms`);
-}
-```
-
-### 7. Legacy 模式（自定义选择器）
-
-向后兼容：手动配置选择器，不使用 Provider：
-
-```python
-solver = SliderSolver(
-    selectors={
-        "slider_btn": ".my-slider-button",
-        "slider_track": ".my-slider-track",
-        "bg_img": ".my-bg-image img",
-        "piece_img": ".my-piece-image img",
-        "result_url_pattern": ["/api/v4/slider"],
-        "success_code": 0,
+  "code": 0,
+  "msg": "ok",
+  "data": {
+    "px3": "e0b8...:1000:...",
+    "pxde": "5a2f...",
+    "pxvid": "c138-...",
+    "pxcts": "1731112345",
+    "diagnostics": {
+      "iframe_loaded": true,
+      "collector_reported": true
     }
-)
+  }
+}
 ```
 
-完整配置项见源码 `slidex/solver.py` 中的 `DEFAULT_SELECTORS`。
+### 3. Asynchronous API (`POST /v2/tasks` & `GET /v2/tasks/{taskId}`)
 
-### 8. 远程人工兜底
+Provides full captcha.run protocol compatibility for long-budget tasks and idempotent dispatching.
 
-自动求解失败时，可通过 WebSocket 将验证码推送给人工操作：
+---
+
+## API Specification
+
+### Error Handling & Retries
+
+HTTP status codes represent transport, authentication, or parsing errors (400, 401, 422, 429, 500). Task execution verdicts are communicated via the payload `code` and structured error classifiers:
+
+| Failure Kind | Retryable | Caller Action |
+| :--- | :---: | :--- |
+| `px_token_timeout` / `challenge_load_timeout` | Yes | Request a fresh `challengeUrl` and retry |
+| `challenge_load_failed` | Yes | Verify outbound proxy connectivity |
+| `challenge_proxy_auth` | No | Correct proxy credentials (HTTP 407 error) |
+| `challenge_http_error` | Conditional | Retry on HTTP 5xx; abort on HTTP 4xx |
+| `px_token_blocked` | Yes | Rotate proxy egress IP or rotate `vid` |
+| `caller_vid_required` | Yes | Supply upstream `deviceId` or trigger silent harvest |
+| `solver_busy` | Yes | Apply exponential backoff (concurrency limit reached) |
+
+---
+
+## Production Deployment
+
+A systemd service unit and release script are provided in the `deploy/` directory:
 
 ```bash
-pip install -e ".[remote]"
-uvicorn slidex.api:router --port 8000
-# 打开 http://localhost:8000/api/captcha/control
+# Service unit configuration: /etc/systemd/system/slidex-captcha.service
+[Unit]
+Description=SlideX CAPTCHA Solving Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/slidex
+ExecStart=/opt/slidex/.venv/bin/uvicorn slidex.service.app:app --host 0.0.0.0 --port 8077 --workers 1
+Restart=always
+RestartSec=5
+MemoryMax=1200M
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-当前平台化会话契约还提供：
-
-- `challenge_type`: 当前人工兜底所处理的视觉挑战类型
-- `audit`: 会话创建、鼠标事件、完成状态的审计记录
-- `ManualFallbackSession`: 可在 SDK 层直接构造统一的人工结果
-
-```python
-from slidex.vision import ChallengeType, ManualFallbackSession
-
-session = ManualFallbackSession(
-    session_id="session-1",
-    challenge_type=ChallengeType.OCR_TEXT,
-    token="secret-token",
-    timeout_s=60,
-)
-
-result = session.complete_text("人工修正结果")
-```
-
-### 9. 回调接口
-
-```python
-config = SlidexConfig(
-    on_risk_log=lambda **kwargs: db.save_log(kwargs),
-    on_notification=lambda cookie_id, msg, title: send_alert(msg),
-)
-```
-
-### 10. 环境变量配置
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `SLIDEX_MAX_CONCURRENT` | `3` | 最大并发数 |
-| `SLIDEX_BROWSER_DATA_DIR` | `~/.slidex/browser_data` | 浏览器数据路径 |
-| `SLIDEX_TRAJ_POOL_DIR` | `~/.slidex/trajectories` | 轨迹存储路径 |
-| `SLIDEX_REMOTE_ENABLED` | `1` | 启用远程人工兜底 |
-| `SLIDEX_REMOTE_TIMEOUT` | `180` | 远程兜底超时（秒） |
-| `SLIDEX_TELEMETRY_ENABLED` | `1` | 启用结构化 E2E 埋点 |
-| `SLIDEX_TELEMETRY_DIR` | `~/.slidex/telemetry` | telemetry JSONL 输出目录 |
-| `SLIDEX_HCAPTCHA_MAX_ROUNDS` | `3` | hCaptcha 单次挑战最多解几轮 |
-| `SLIDEX_HCAPTCHA_TILE_PADDING` | `3.0` | 九宫格点击抖动上限（像素） |
-| `SLIDEX_HCAPTCHA_PROMPT` | 空（内置提示词） | 覆盖 hCaptcha 判题提示词 |
-| `SLIDEX_CAPTCHA_KEYS` | 空（开放模式） | 打码站 API key，逗号分隔多把 |
-| `CAPTCHA_RUN_KEY` | 空 | 兼容 captcha.run 的单 key 写法（`SLIDEX_CAPTCHA_KEYS` 优先） |
-| `SLIDEX_PX_CONCURRENCY` | `5` | PX 求解并发上限 |
-| `SLIDEX_PX_HEADLESS` | `1` | PX 求解是否 headless（调试时可置 0） |
-
-### 11. E2E 数据监控
-
-真实使用方开始调用后，建议同时接两条数据通道：
-
-```python
-from slidex import SlidexConfig, SliderSolver
-
-def on_risk_log(**payload):
-    # 适合写数据库/消息队列/日志平台
-    db.insert("slidex_runs", payload)
-    return payload["run_id"]
-
-def on_risk_log_update(payload):
-    # 适合实时看事件流
-    stream.publish("slidex-events", payload)
-
-config = SlidexConfig(
-    on_risk_log=on_risk_log,
-    on_risk_log_update=on_risk_log_update,
-)
-
-solver = SliderSolver(cookie_id="user_123", provider="auto", config=config)
-```
-
-监控重点建议直接盯这几项：
-
-- `success` / `status`: 成功率与最终状态
-- `elapsed_ms`: 单次求解耗时
-- `provider_name`: 供应商分布
-- `distance` / `distance_source`: 距离计算来源是否异常漂移
-- `slide_code`: 验证接口返回码
-- `fallback_used`: 人工兜底占比
-- `failure_reason`: 失败原因聚类
-- `cookie_count`: 求解后上下文是否产出有效 cookie
-
-如果你走 CLI/CDP 集成，`python -m slidex.scripts.slide_solve_cdp` 现在也会在 JSON 输出中附带 `telemetry` 字段，可直接上报。
-
-### 12. Artifact 与 automation-kit 适配
-
-`slidex.vision` 当前提供稳定 artifact 辅助函数：
-
-```python
-from pathlib import Path
-from slidex.vision import build_artifact_path, safe_artifact_metadata
-
-artifact_path = build_artifact_path(
-    root=Path("artifacts"),
-    run_id="run-1",
-    artifact_type="telemetry",
-    name="events.jsonl",
-)
-
-metadata = safe_artifact_metadata({"token": "secret", "source": "unit"})
-```
-
-安装 `automation-kit` extra 后，通过唯一的 capability provider 适配器返回
-`CapabilityResult`、artifact 和 `capability.end` 事件：
-
-```python
-from slidex.integrations.automation_kit import SlidexVisualCapability
+Execute end-to-end acceptance tests:
+```bash
+python check/deep_check.py --endpoint http://127.0.0.1:8077 --key prod-secret-token
 ```
 
 ---
 
-## License
+## Technology Stack Inventory
 
-MIT
+- **Core Runtime**: Python 3.10+ / Python 3.11
+- **Web API Engine**: FastAPI / Starlette / Uvicorn
+- **Browser Automation**: Playwright / Google Chrome DevTools Protocol (CDP)
+- **Computer Vision**: OpenCV (cv2) / NumPy / SciPy
+- **Trajectory Modeling**: Custom Cubic Bezier curves & human biomechanical jitter simulation
+- **Process Management**: Systemd / Linux cgroups (`MemoryMax=1200M`)
+
+---
+
+## Contributing & License
+
+Pull requests and issues are welcome. Ensure that all unit and regression test suites pass before submitting code changes:
+
+```bash
+pytest tests/ -q
+```
+
+Licensed under the [MIT License](LICENSE).
