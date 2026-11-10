@@ -263,3 +263,89 @@ def normalize_recorded_delays(
         for idx in range(1, len(parsed)):
             parsed[idx][2] *= scale
     return parsed
+
+
+# ── 录制轨迹的坐标几何校验（0.11.0）─────────────────────────────────────
+# 线上实证（1926782908，2026-11-11）：50 条池内录制里 10 条坐标轴坏掉——
+#   trajectory_1000: 146 点 0→608，末点才 258（distance=258，绝对坐标混入）
+#   trajectory_1001: 234 点、单点间隙 48400ms（墙钟）混进 650ms 位移段
+#   957/958/989-992: 峰值回退 131-254px（双次编码震荡）
+#   997/998: 单次跳变 220px（漏采样，回放=瞬移）
+# 回放侧 upgrade_points_to_cumulative 用 sum(x)≈distance 判"增量编码"。这两条
+# 录制实测 sum(x)=46892(1000)/73636(1001)，离 distance 很远，legacy 分类器靠
+# last_x==distance 就放行了——坏的不是编码方式，是几何本身（0→258 的行程里
+# 混着冲到 608/545 的绝对坐标再弹回）。归一化只调时间轴不碰几何，这类录制必须
+# **在写池时**拒收：宁可少一条，不可让一条坏录制毒化后续所有自动拖动。
+# 加载侧复用同一条规则挡存量脏文件。
+#
+# 阈值来自线上 50 条盲测（见 tests/test_recorded_geometry_verdict.py）：
+#   健康 40 条：max 单步跳变 62px/258 = 24%，回退 <=1px，max|x| <= 259
+#   脏 10 条：  max 单步跳变 >=131px = 51%，回退 131-350px，max|x| >= 270
+# 分界取 35% 与 1.15，两边都有 10% 以上的安全余量。
+RECORDED_JUMP_FRACTION = 0.35           # 单步跳变 / 行程；> 判 jump
+RECORDED_RETRO_RATIO = 0.35             # 峰值回退 / 行程；> 判 non_monotonic
+RECORDED_SPAN_RATIO = 1.15              # max|x| / distance；> 判 overshoot
+
+
+def recorded_geometry_verdict(
+    points: Sequence[Sequence[float]],
+    distance: Optional[float] = None,
+) -> Optional[str]:
+    """一串录制点是否真是"一次人类滑动"：合法返回 None，否则返回原因码。
+
+    点语义：``[dx, dy, delay_ms]``，相对按下的位置；末点是松键位置。
+
+    - ``no_points`` / ``no_motion``：空、或全部同坐标（点一下就松手）。
+    - ``distance_mismatch``：末点 x 与声明的 distance 对不上。说明 points 与
+      distance 来自两套坐标系——远端面板上报绝对坐标时，客户端会把事件 x
+      直接写进 points，却把"松手 x − 按下 x"写成 distance。
+    - ``overshoot``：max|x| 超过 distance 的 RECORDED_SPAN_RATIO。人类按在
+      0、松在 distance，过冲只有几像素。
+    - ``non_monotonic``：从某处峰值回退超过 distance * RECORDED_RETRO_RATIO
+      （混入了绝对坐标 / 面板坐标，轨迹先冲出去再跳回来）。
+    - ``jump``：相邻两点位移超过 distance * RECORDED_JUMP_FRACTION，是拼接
+      出来的轨迹（漏采样 / 双次编码）。
+    - ``invalid_clock``：负间隙或 <=1ms 的位移时间戳，录制时钟不可信。
+
+    只看 x 轴：滑块是水平拖动，y 的抖动是手臂自然颤动，不约束。
+    """
+    rows: List[List[float]] = []
+    for point in points or []:
+        if not point:
+            continue
+        rows.append([
+            float(point[0]),
+            float(point[1]) if len(point) > 1 else 0.0,
+            float(point[2]) if len(point) > 2 else 0.0,
+        ])
+    if len(rows) < 2:
+        return "no_points"
+    xs = [row[0] for row in rows]
+    span = max(xs) - min(xs)
+    if span <= 1e-6:
+        return "no_motion"
+    for idx in range(1, len(rows)):
+        if rows[idx][2] < 0:
+            return "invalid_clock"
+    limit = span
+    if distance is not None:
+        dist = abs(float(distance))
+        if dist > 1e-6:
+            if abs(xs[-1] - dist) > max(1.5, dist * 0.15):
+                return "distance_mismatch"
+            if span > dist * RECORDED_SPAN_RATIO:
+                return "overshoot"
+            limit = max(dist, span) * RECORDED_JUMP_FRACTION
+    peak = xs[0]
+    retro = 0.0
+    for x in xs[1:]:
+        if x >= peak:
+            peak = x
+        else:
+            retro = max(retro, peak - x)
+    if retro > limit:
+        return "non_monotonic"
+    biggest = max(abs(xs[i] - xs[i - 1]) for i in range(1, len(xs)))
+    if biggest > limit:
+        return "jump"
+    return None

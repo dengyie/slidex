@@ -21,6 +21,22 @@ from slidex.config import SlidexConfig
 from slidex.solver import SliderSolver
 
 
+def _human_points(distance, frames=1, steps=14, dy=0.0, t0=100.0, gap=50.0):
+    """Healthy drag point list: `frames` linear legs of `steps` small steps each.
+
+    Step size stays <= distance/8 (far below the 35% jump line), x is monotonic,
+    and the last point is exactly `distance` -- the shape a real recording has,
+    which 0.11.0's geometry gate accepts.
+    """
+    pts = []
+    for f in range(frames):
+        start = distance * f / frames
+        end = distance * (f + 1) / frames
+        for s in range(1, steps + 1):
+            pts.append([start + (end - start) * s / steps, dy, t0 + gap * len(pts)])
+    return pts
+
+
 def _make_solver(tmp_path: Path) -> SliderSolver:
     cfg = SlidexConfig(
         trajectory_pool_base_dir=str(tmp_path / "traj"),
@@ -82,7 +98,7 @@ class TestTrajectoryPoolDegradation:
     def test_load_best_trajectory_survives_last_used_write_failure(self, tmp_path, monkeypatch):
         pool = SliderTrajectoryPool(base_dir=str(tmp_path))
         pool.save_trajectory(
-            [[0, 0, 120], [120, 0, 80]], "u1", 120.0, True, "https://example.test"
+            _human_points(120.0), "u1", 120.0, True, "https://example.test"
         )
         blocked = tmp_path / "blocked"
         blocked.mkdir()
@@ -552,7 +568,7 @@ class TestSaveTrajectoryAtomicCreate:
 
     def test_concurrent_create_does_not_overwrite(self, tmp_path):
         pool = SliderTrajectoryPool(str(tmp_path))
-        first = pool.save_trajectory([[0, 0, 0], [5, 0, 10], [10, 0, 10]], "same_user", 10, True)
+        first = pool.save_trajectory(_human_points(10.0), "same_user", 10, True)
         assert first == "trajectory_001.json"
 
         # 模拟"另一进程在我们选号之后、open 之前"抢先写入同名文件
@@ -567,7 +583,7 @@ class TestSaveTrajectoryAtomicCreate:
             return real_open(path, mode, *a, **kw)
 
         with mock.patch("builtins.open", racing_open):
-            second = pool.save_trajectory([[0, 0, 0]], "same_user", 0, True)
+            second = pool.save_trajectory(_human_points(10.0), "same_user", 10, True)
 
         assert second is not None
         assert second != "trajectory_002.json"
@@ -583,7 +599,7 @@ class TestEvictionOrder:
     def _write(cdir: Path, idx: int, recorded_at: str):
         (cdir / f"trajectory_{idx:03d}.json").write_text(
             json.dumps({"recorded_at": recorded_at, "distance": 100, "success": True,
-                        "points": [[0, 0, 100], [100, 0, 100]]}),
+                        "points": _human_points(100.0)}),
             encoding="utf-8",
         )
 
@@ -596,7 +612,7 @@ class TestEvictionOrder:
         for i in range(1, 50):
             self._write(cdir, i, "2026-10-01T00:00:00")
 
-        name = pool.save_trajectory([[0, 0, 0], [100, 0, 100]], "u1", 100, True)
+        name = pool.save_trajectory(_human_points(100.0), "u1", 100, True)
 
         assert name is not None
         files = {p.name for p in cdir.glob("trajectory_*.json")}

@@ -127,12 +127,45 @@ async def test_trajectory_uses_session_cookie_id_not_request_cookie(monkeypatch,
     request = TrajectorySubmitRequest(
         session_id="s1",
         cookie_id="../../evil",
-        points=[[0, 0, 100], [10, 0, 20], [20, 0, 50]],
+        # 健康录制（0.11.0）：末点 = distance，步长远低于几何校验跳变线
+        points=[
+            [0.0, 0, 100], [2.0, 0, 20], [4.0, 0, 20], [6.0, 0, 20],
+            [8.0, 0, 20], [10.0, 0, 20], [12.0, 0, 20], [14.0, 0, 20],
+            [16.0, 0, 20], [18.0, 0, 20], [20.0, 0, 40],
+        ],
         distance=20,
     )
 
     result = await api.submit_trajectory(request, x_captcha_token="secret")
 
+    assert result["success"] is True
     assert result["cookie_id"] == "owner-user"
     assert (tmp_path / "owner-user").is_dir()
     assert not (tmp_path.parent / "evil").exists()
+
+
+@pytest.mark.asyncio
+async def test_trajectory_with_broken_geometry_is_refused(monkeypatch, tmp_path):
+    # 0.11.0：绝对坐标/回弹录制必须在 HTTP 边界被挡下并回 400，
+    # 不能落盘、也不能回 200 让上报方误以为池里已有一条好数据。
+    pool = api.trajectory_pool
+    monkeypatch.setattr(pool, "base_dir", tmp_path)
+
+    captcha_controller.active_sessions.clear()
+    captcha_controller.active_sessions["s2"] = {
+        "token": "secret",
+        "cookie_id": "owner-user",
+    }
+
+    request = TrajectorySubmitRequest(
+        session_id="s2",
+        cookie_id="owner-user",
+        points=[[0.0, 0, 100], [150.0, 0, 20], [20.0, 0, 50]],
+        distance=20,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await api.submit_trajectory(request, x_captcha_token="secret")
+
+    assert exc.value.status_code == 400
+    assert not any((tmp_path / "owner-user").glob("trajectory_*.json"))

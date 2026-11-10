@@ -13,9 +13,26 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from loguru import logger
 from slidex._sanitize import sanitize_pure_user_id
+from slidex._slide_geometry import recorded_geometry_verdict
 
 
 _TRAJECTORY_INDEX_RE = re.compile(r"trajectory_(\d+)\.json$")
+
+
+def _dirty_geometry(record: Dict[str, Any]) -> Optional[str]:
+    """池内一条录制坐标轴是否坏了；坏了返回原因码，健康返回 None。
+
+    加载侧判据与写入侧同一条（``recorded_geometry_verdict``），只是参数
+    来源是文件本身。存量脏文件挡在回放之前，避免一条坏录制毒化之后每一
+    次自动拖动。
+    """
+    reason = recorded_geometry_verdict(record.get("points") or [], record.get("distance"))
+    if reason:
+        logger.warning(
+            f"[TrajectoryPool] skip dirty recording "
+            f"{os.path.basename(str(record.get('_file') or ''))}: {reason}"
+        )
+    return reason
 
 
 def _trajectory_index(path) -> int:
@@ -153,8 +170,22 @@ class SliderTrajectoryPool:
     def save_trajectory(self, points: List[List[float]], cookie_id: str,
                         distance: float, success: bool, verify_url: str = "",
                         duration_ms: float = 0, source: str = "auto") -> Optional[str]:
-        """持久化一条轨迹，返回文件名，超出上限时淘汰最旧的"""
+        """持久化一条轨迹，返回文件名，超出上限时淘汰最旧的
+
+        落盘前过 ``recorded_geometry_verdict``：坐标轴坏的录制（绝对坐标 /
+        双次编码回退 / 漏采样跳变）一旦进池就会被优先抽中回放，比没有录制更
+        糟。拒收时返回 None，调用方照常降级到生成器轨迹。
+        """
         cookie_id = self._sanitize_cookie_id(cookie_id)
+        if not points:
+            return None
+        reason = recorded_geometry_verdict(points, distance)
+        if reason:
+            logger.warning(
+                f"[TrajectoryPool] reject recording for {cookie_id} "
+                f"(dist={float(distance or 0):.0f}px, {len(points or [])} pts): {reason}"
+            )
+            return None
         cdir = self._cookie_dir(cookie_id)
         self._evict_overflow(cdir)
 
@@ -226,9 +257,14 @@ class SliderTrajectoryPool:
                 with open(fp, "r", encoding="utf-8") as f:
                     d = json.load(f)
                 d["_file"] = str(fp)
-                records.append(d)
             except Exception as e:
                 logger.debug(f"[TrajectoryPool] skip corrupt {fp}: {e}")
+                continue
+            # 存量脏录制（0.11.0 之前写入、写池时还没有几何校验）：坐标轴坏了
+            # 就不参与回放，否则一条脏文件会毒化之后每一次自动拖动。
+            if _dirty_geometry(d):
+                continue
+            records.append(d)
         return records
 
     def load_unused_human(

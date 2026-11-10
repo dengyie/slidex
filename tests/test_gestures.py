@@ -28,6 +28,18 @@ import slidex._gestures as gestures_mod
 DIST = 158.0
 
 
+def _human_points(distance, dy=0, t0=100):
+    """Healthy multi-step drag: 0 -> distance in 1/16 legs of travel.
+
+    0.11.0 refuses recorded traces whose geometry is impossible for a human
+    (a single jump = 100% of travel is a teleport, not a drag). These tests
+    cover family selection, not geometry, so the recording they seed looks
+    like one the pool would actually accept.
+    """
+    n = 16
+    return [[distance * i / n, dy, t0] for i in range(n + 1)]
+
+
 def _xs(plan):
     return [p[0] for p in plan.points]
 
@@ -161,8 +173,8 @@ def test_code_minus_1_does_not_switch_family():
 def test_human_used_file_is_skipped():
     with tempfile.TemporaryDirectory() as tmp:
         pool = SliderTrajectoryPool(tmp)
-        pool.save_trajectory([[0, 0, 100], [DIST, 0, 40]], "u1", DIST, True, source="human_cdp")
-        pool.save_trajectory([[0, 0, 80], [DIST, 1, 40]], "u1", DIST, True, source="human_cdp")
+        pool.save_trajectory(_human_points(DIST), "u1", DIST, True, source="human_cdp")
+        pool.save_trajectory(_human_points(DIST, dy=1), "u1", DIST, True, source="human_cdp")
         first = pool.load_unused_human("u1", DIST, exclude_files=set(), tolerance=0.10)
         assert first is not None
         used = {first["_file"], Path(first["_file"]).name}
@@ -206,7 +218,7 @@ def test_upgrade_diff_trace_uses_last_or_sum_not_mid_abs():
 def test_human_minus_1_replays_same_points():
     with tempfile.TemporaryDirectory() as tmp:
         pool = SliderTrajectoryPool(tmp)
-        pool.save_trajectory([[0, 0, 100], [DIST, 0, 40]], "u1", DIST, True, source="human_cdp")
+        pool.save_trajectory(_human_points(DIST), "u1", DIST, True, source="human_cdp")
         session = GestureSession(pool, "u1", trajectory_mode="recorded")
         a = session.next(DIST, None)
         b = session.next(DIST, -1)
@@ -219,7 +231,7 @@ def test_human_minus_1_replays_same_points():
 def test_human_minus_1_rescales_to_new_distance():
     with tempfile.TemporaryDirectory() as tmp:
         pool = SliderTrajectoryPool(tmp)
-        pool.save_trajectory([[0, 0, 100], [DIST, 0, 40]], "u1", DIST, True, source="human_cdp")
+        pool.save_trajectory(_human_points(DIST), "u1", DIST, True, source="human_cdp")
         session = GestureSession(pool, "u1", trajectory_mode="recorded")
         a = session.next(DIST, None)
         b = session.next(180.0, -1)

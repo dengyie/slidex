@@ -288,9 +288,17 @@ async def submit_trajectory(request: TrajectorySubmitRequest, x_captcha_token: O
     try:
         if not request.points or len(request.points) < 3:
             raise HTTPException(status_code=400, detail="too few points")
-        trajectory_pool.save_trajectory(request.points, cookie_id, request.distance, True, request.verify_url or "")
-        logger.success(f"trajectory saved: cookie={cookie_id}")
-        return {"success": True, "message": "saved", "cookie_id": cookie_id}
+        saved = trajectory_pool.save_trajectory(
+            request.points, cookie_id, request.distance, True, request.verify_url or ""
+        )
+        if not saved:
+            # 0.11.0：坐标轴坏掉的录制在落盘前被几何校验拒收（见
+            # _slide_geometry.recorded_geometry_verdict）。抛 400 而不是假报
+            # saved —— 上报方据此重录，而不是以为池里已经有一条好数据。
+            logger.warning(f"trajectory rejected by geometry check: cookie={cookie_id}")
+            raise HTTPException(status_code=400, detail="rejected by geometry check")
+        logger.success(f"trajectory saved: cookie={cookie_id} ({saved})")
+        return {"success": True, "message": "saved", "cookie_id": cookie_id, "file": saved}
     except HTTPException:
         raise
     except Exception as e:

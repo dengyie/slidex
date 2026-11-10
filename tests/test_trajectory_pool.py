@@ -23,6 +23,25 @@ from datetime import datetime, timedelta
 from slidex._trajectory_pool import SliderTrajectoryPool
 
 
+def _human_points(distance, frames=1, steps=14, dy=0.0, t0=100.0, gap=50.0):
+    """Healthy drag point list: `frames` linear legs of `steps` small steps each.
+
+    These pool tests cover bookkeeping (numbering, eviction, LRU, file format),
+    not geometry -- but since 0.11.0 a recording whose coordinate axis is broken
+    is refused at write time, so a one-shot [[0, 0, 100], [50, ...], [100, ...]]
+    fixture could no longer exercise any of it. Step size stays at
+    distance / (frames*steps) (far below the 35% jump line) and the last point is
+    exactly ``distance``: the shape a real recording has.
+    """
+    pts = []
+    for f in range(frames):
+        start = distance * f / frames
+        end = distance * (f + 1) / frames
+        for s in range(1, steps + 1):
+            pts.append([start + (end - start) * s / steps, dy, t0 + gap * len(pts)])
+    return pts
+
+
 class TestSliderTrajectoryPool:
     """测试轨迹池管理"""
 
@@ -31,7 +50,7 @@ class TestSliderTrajectoryPool:
         with tempfile.TemporaryDirectory() as tmpdir:
             pool = SliderTrajectoryPool(tmpdir)
 
-            points = [[0, 0, 100], [50, -2, 50], [100, -5, 50]]
+            points = _human_points(100, frames=2, steps=7)
             filename = pool.save_trajectory(
                 points=points,
                 cookie_id="test_user",
@@ -55,7 +74,7 @@ class TestSliderTrajectoryPool:
         with tempfile.TemporaryDirectory() as tmpdir:
             pool = SliderTrajectoryPool(tmpdir)
 
-            points = [[0, 0, 100]]
+            points = _human_points(100)
             pool.save_trajectory(points, "new_user", 100, True)
 
             # cookie 子目录应该被创建
@@ -68,7 +87,8 @@ class TestSliderTrajectoryPool:
         with tempfile.TemporaryDirectory() as tmpdir:
             pool = SliderTrajectoryPool(tmpdir)
 
-            points = [[0, 0, 100], [50.123, -2.456, 50.789]]
+            # 两行点列（首行按下、末行=distance）也要能原样落盘：断言的是 JSON 格式本身
+            points = [[80.4, -2.456, 100.0], [100.5, -5.0, 50.0]]
             filename = pool.save_trajectory(
                 points=points,
                 cookie_id="test",
@@ -97,7 +117,7 @@ class TestSliderTrajectoryPool:
             pool = SliderTrajectoryPool(tmpdir)
             pool.max_per_cookie = 3  # 设置小的上限便于测试
 
-            points = [[0, 0, 100]]
+            points = _human_points(100)
 
             # 保存 5 条轨迹
             for i in range(5):
@@ -115,7 +135,7 @@ class TestSliderTrajectoryPool:
             pool = SliderTrajectoryPool(tmpdir)
             pool.max_per_cookie = 3
 
-            points = [[0, 0, 100]]
+            points = _human_points(100)
             filenames = []
             for _ in range(5):
                 filenames.append(pool.save_trajectory(points, "test", 100, True))
@@ -141,11 +161,11 @@ class TestSliderTrajectoryPool:
             cdir.mkdir(parents=True, exist_ok=True)
             for idx in (998, 999, 1000):
                 (cdir / f"trajectory_{idx}.json").write_text(
-                    json.dumps({"distance": 100, "success": True, "points": [[0, 0, 100]]}),
+                    json.dumps({"distance": 100, "success": True, "points": _human_points(100)}),
                     encoding="utf-8",
                 )
 
-            name = pool.save_trajectory([[0, 0, 100]], "test", 100, True)
+            name = pool.save_trajectory(_human_points(100), "test", 100, True)
 
             files = {p.name for p in cdir.glob("trajectory_*.json")}
             assert "trajectory_998.json" not in files      # 最旧编号被淘汰
@@ -158,9 +178,9 @@ class TestSliderTrajectoryPool:
             pool = SliderTrajectoryPool(tmpdir)
 
             # 保存 3 条不同距离的轨迹
-            pool.save_trajectory([[0, 0, 100]], "test", 50, True)
-            pool.save_trajectory([[0, 0, 100]], "test", 100, True)
-            pool.save_trajectory([[0, 0, 100]], "test", 150, True)
+            pool.save_trajectory(_human_points(50), "test", 50, True)
+            pool.save_trajectory(_human_points(100), "test", 100, True)
+            pool.save_trajectory(_human_points(150), "test", 150, True)
 
             # 请求 100px 的轨迹
             traj = pool.load_best_trajectory("test", target_distance=100)
@@ -174,7 +194,7 @@ class TestSliderTrajectoryPool:
             pool = SliderTrajectoryPool(tmpdir)
 
             # 只保存 50px 的轨迹
-            pool.save_trajectory([[0, 0, 100]], "test", 50, True)
+            pool.save_trajectory(_human_points(50), "test", 50, True)
 
             # 请求 70px（在 40% tolerance 内应该匹配）
             traj = pool.load_best_trajectory("test", target_distance=70)
@@ -189,8 +209,8 @@ class TestSliderTrajectoryPool:
             pool = SliderTrajectoryPool(tmpdir)
 
             # 保存失败和成功的轨迹
-            pool.save_trajectory([[0, 0, 100]], "test", 100, False)  # 失败
-            pool.save_trajectory([[0, 0, 100]], "test", 105, True)   # 成功
+            pool.save_trajectory(_human_points(100), "test", 100, False)  # 失败
+            pool.save_trajectory(_human_points(105), "test", 105, True)   # 成功
 
             # 应该优先返回成功的
             traj = pool.load_best_trajectory("test", target_distance=100)
@@ -215,9 +235,9 @@ class TestSliderTrajectoryPool:
             pool = SliderTrajectoryPool(tmpdir)
 
             # 保存 3 条轨迹
-            pool.save_trajectory([[0, 0, 100]], "test", 50, True)
-            pool.save_trajectory([[0, 0, 100]], "test", 100, True)
-            pool.save_trajectory([[0, 0, 100]], "test", 150, True)
+            pool.save_trajectory(_human_points(50), "test", 50, True)
+            pool.save_trajectory(_human_points(100), "test", 100, True)
+            pool.save_trajectory(_human_points(150), "test", 150, True)
 
             # 随机选取
             traj = pool.load_random_trajectory("test")
@@ -240,7 +260,7 @@ class TestSliderTrajectoryPool:
             pool = SliderTrajectoryPool(tmpdir)
 
             # 保存到 default cookie
-            pool.save_trajectory([[0, 0, 100]], "default", 100, True)
+            pool.save_trajectory(_human_points(100), "default", 100, True)
 
             # get_random_trajectory 应该能找到
             traj = pool.get_random_trajectory()
@@ -254,9 +274,9 @@ class TestSliderTrajectoryPool:
             pool = SliderTrajectoryPool(tmpdir)
 
             # 保存 3 条轨迹
-            pool.save_trajectory([[0, 0, 100]], "test", 100, True)
-            pool.save_trajectory([[0, 0, 100]], "test", 105, True)
-            pool.save_trajectory([[0, 0, 100]], "test", 110, True)
+            pool.save_trajectory(_human_points(100), "test", 100, True)
+            pool.save_trajectory(_human_points(105), "test", 105, True)
+            pool.save_trajectory(_human_points(110), "test", 110, True)
 
             # 首次轮转，应该选最久未用的（都未用过）
             traj1 = pool.rotate_trajectory("test", target_distance=100)
@@ -275,9 +295,9 @@ class TestSliderTrajectoryPool:
             pool = SliderTrajectoryPool(tmpdir)
 
             # 保存 2 成功 1 失败
-            pool.save_trajectory([[0, 0, 100]], "test", 100, True, duration_ms=200)
-            pool.save_trajectory([[0, 0, 100]], "test", 100, False, duration_ms=300)
-            pool.save_trajectory([[0, 0, 100]], "test", 100, True, duration_ms=400)
+            pool.save_trajectory(_human_points(100), "test", 100, True, duration_ms=200)
+            pool.save_trajectory(_human_points(100), "test", 100, False, duration_ms=300)
+            pool.save_trajectory(_human_points(100), "test", 100, True, duration_ms=400)
 
             stats = pool.get_pool_stats("test")
 
@@ -307,7 +327,7 @@ class TestSliderTrajectoryPool:
 
             # 保存 3 条
             for i in range(3):
-                pool.save_trajectory([[0, 0, 100]], "test", 100, True)
+                pool.save_trajectory(_human_points(100), "test", 100, True)
 
             stats = pool.get_pool_stats("test")
 
@@ -319,7 +339,7 @@ class TestSliderTrajectoryPool:
             pool = SliderTrajectoryPool(tmpdir)
 
             # 保存一条轨迹
-            filename = pool.save_trajectory([[0, 0, 100]], "test", 100, True)
+            filename = pool.save_trajectory(_human_points(100), "test", 100, True)
             file_path = Path(tmpdir) / "test" / filename
 
             # 手动修改 recorded_at 为 10 天前
@@ -344,7 +364,7 @@ class TestSliderTrajectoryPool:
             pool = SliderTrajectoryPool(tmpdir)
 
             # 保存失败的轨迹
-            filename = pool.save_trajectory([[0, 0, 100]], "test", 100, False)
+            filename = pool.save_trajectory(_human_points(100), "test", 100, False)
             file_path = Path(tmpdir) / "test" / filename
 
             # 清理
@@ -359,7 +379,7 @@ class TestSliderTrajectoryPool:
             pool = SliderTrajectoryPool(tmpdir)
 
             # 保存最近成功的轨迹
-            filename = pool.save_trajectory([[0, 0, 100]], "test", 100, True)
+            filename = pool.save_trajectory(_human_points(100), "test", 100, True)
             file_path = Path(tmpdir) / "test" / filename
 
             # 清理
@@ -381,7 +401,7 @@ class TestSliderTrajectoryPool:
                 f.write("not valid json {{{")
 
             # 保存一个正常的轨迹
-            pool.save_trajectory([[0, 0, 100]], "test", 100, True)
+            pool.save_trajectory(_human_points(100), "test", 100, True)
 
             # 应该能够加载（跳过损坏的文件）
             traj = pool.load_random_trajectory("test")
@@ -396,7 +416,7 @@ class TestSliderTrajectoryPool:
 
             # 尝试保存（可能因权限问题失败，但不应崩溃）
             try:
-                filename = pool.save_trajectory([[0, 0, 100]], "test", 100, True)
+                filename = pool.save_trajectory(_human_points(100), "test", 100, True)
                 # 应该返回 filename 或 None
                 assert filename is None or isinstance(filename, str)
             except Exception as e:
@@ -409,7 +429,7 @@ class TestSliderTrajectoryPool:
 
             # 快速保存多条
             for i in range(10):
-                pool.save_trajectory([[0, 0, 100]], "test", 100 + i, True)
+                pool.save_trajectory(_human_points(100 + i), "test", 100 + i, True)
 
             # 加载应该成功
             traj = pool.load_random_trajectory("test")
@@ -422,7 +442,7 @@ class TestSliderTrajectoryPool:
 
             # 使用包含特殊字符的 cookie_id（合法文件名）
             filename = pool.save_trajectory(
-                [[0, 0, 100]],
+                _human_points(100),
                 "test_user-123",
                 100,
                 True
@@ -440,7 +460,7 @@ class TestSliderTrajectoryPool:
             pool = SliderTrajectoryPool(tmpdir)
 
             filename = pool.save_trajectory(
-                [[0, 0, 100], [10, 0, 50], [20, 0, 50]],
+                _human_points(20, frames=1, steps=10),
                 "../../outside",
                 20,
                 True,
@@ -455,13 +475,11 @@ class TestSliderTrajectoryPool:
         with tempfile.TemporaryDirectory() as tmpdir:
             pool = SliderTrajectoryPool(tmpdir)
 
-            # 保存空 points
+            # 保存空 points：不写文件（0.11.0 几何校验一并拒收，no_points）
             filename = pool.save_trajectory([], "test", 100, True)
 
-            # 应该能保存
-            assert filename is not None
+            assert filename is None
 
-            # 加载应该成功
+            # 池里不应出现空录制
             traj = pool.load_random_trajectory("test")
-            assert traj is not None
-            assert traj["points"] == []
+            assert traj is None

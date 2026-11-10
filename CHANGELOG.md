@@ -1,5 +1,55 @@
 # Changelog
 
+## [0.11.1] - 2026-11-11
+
+录制几何校验：坐标轴坏掉的录制不再进池、不再参与回放（承接 0.11.0 的
+采样密度与池旋钮修复）。
+
+0.11.0 修好了时间轴，但线上池里仍有 10/50 条录制是**几何**坏的：
+`trajectory_1000` 146 点，0→258 的行程里冲到 608 再弹回；`1001` 冲到
+545；`997/998` 单步跳变 220px。`normalize_recorded_delays` 只动时间轴
+不判断拓扑，这些录制照样被抽中回放——观感就是"拖到一半滑块飞出去再跳
+回来"。此前 `upgrade_points_to_cumulative` 也无法识别：两条实测
+`sum(x)` 是 46892 / 73636，离 distance 很远，legacy 分类器靠
+`last_x == distance` 直接原样放行。坏的不是编码方式，是几何本身。
+
+### Added
+- **`recorded_geometry_verdict(points, distance) -> str | None`**
+  （`_slide_geometry`）：单一人体可拖动性判据，只看 x 轴（y 抖动是正常
+  手抖）。返回 `no_points` / `no_motion` / `distance_mismatch` /
+  `overshoot` / `non_monotonic` / `jump` / `invalid_clock`，健康返回 None。
+
+### Fixed
+- **写池拒收**（`_trajectory_pool.save_trajectory`）：几何不合格的录制不
+  分配编号、不落盘（返回 None，打 `reject recording ...: <reason>`）。
+- **加载侧过滤存量**（`_trajectory_pool._load_all`）：0.11.0 之前写进池的
+  脏文件读取时跳过（`skip dirty recording ...: <reason>`），一条脏录制
+  不再毒化之后每一次自动拖动。
+- **HTTP 上报边界不再说谎**（`api.submit_trajectory`）：被拒的录制回
+  HTTP 400，而不是 `{"success": true, "message": "saved"}`——上报方据此
+  重录，而不是以为池里已有一条好数据。
+- **回放分类器收紧**（`_gestures.upgrade_points_to_cumulative`）：末点
+  x 已对上 `distance` 且 x 轴单调（`_x_monotonic_forward`，容忍 ≤1px
+  采样抖动）即认定已是累计坐标，不再被 `sum(x)≈distance` 误判为增量编码。
+
+### Changed
+- 几何阈值改为**证据推导**，不再是经验值：对线上 50 条录制（用户
+  1926782908）做盲测分簇，健康 40 条 / 脏 10 条，取两簇分界并留两侧
+  ≥10% 余量——`RECORDED_JUMP_FRACTION=0.35`（max 相邻步 / 行程）、
+  `RECORDED_RETRO_RATIO=0.35`（峰值回退 / 行程）、
+  `RECORDED_SPAN_RATIO=1.15`（max|x| / distance）。
+
+### Tests
+- 新增 `tests/test_recorded_geometry_verdict.py`（30 条）：阈值钉死、健康
+  轨迹通过、四类坏轨迹逐个命名、健康侧余量 ≥10%、坏轨迹在 60px/120px
+  两种 distance 下都判坏、退化形态（空/单点/tap/负时钟/无 distance）、
+  回放分类器（累计原样、真增量仍累加、绝对轨迹不被 lift）、池两侧闸门
+  （写不进、存量读不出、全脏池返回 None）。
+- `test_trajectory_pool.py` / `test_api_security.py` / `test_gestures.py` /
+  `test_review_fixes.py` 的占位 fixture 改为健康多点录制，并新增
+  `test_trajectory_with_broken_geometry_is_refused`（HTTP 400 + 不落盘）。
+- 全量 1100 passed / 18 skipped。
+
 ## [0.11.0] - 2026-11-10
 
 录制轨迹解码与池配置根修（承接 0.10.2 录制时序归一化、0.10.3 数值编号淘汰）。
