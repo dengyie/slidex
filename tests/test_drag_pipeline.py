@@ -141,37 +141,6 @@ async def test_do_slide_generated_pipelines_when_cdp_available():
     assert calls[-1] == "mouseReleased"
 
 
-@pytest.mark.asyncio
-async def test_replay_recorded_cdp_pipelines_and_releases_at_last_point():
-    """录制回放 CDP 路径同样走流水线；释放位 = 末点（录制自 up 事件）。"""
-    from slidex.solver import SliderSolver
-
-    events = []
-
-    class _Session:
-        async def send(self, method, params=None):
-            events.append(dict(params))
-
-    class _NoMouse:
-        def __getattr__(self, name):
-            raise AssertionError(f"page.{name} touched under pipeline mode")
-
-    s = SliderSolver.__new__(SliderSolver)
-    s.pure_user_id = "t"
-    s._cdp = _Session()
-    s.page = _NoMouse()
-
-    points = [(30.0, 1.0, 600.0), (120.0, 2.0, 40.0), (258.0, 0.0, 60.0)]
-    ok = await s._replay_recorded_cdp(points, 100.0, 50.0)
-
-    assert ok is True
-    types = [e["type"] for e in events]
-    assert types[0] == "mouseMoved" and "mousePressed" in types
-    assert types[-1] == "mouseReleased"
-    assert events[-1]["x"] == pytest.approx(100.0 + 258.0)
-    assert events[-1]["y"] == pytest.approx(50.0 + 0.0)
-
-
 def test_human_events_to_points_conversion():
     events = [
         {"dt": 0, "x": 100.0, "y": 50.0, "buttons": 1},

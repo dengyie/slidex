@@ -431,9 +431,16 @@ class CaptchaRemoteController:
             prev_time = evt["timestamp"]
             prev_x, prev_y = evt["x"], evt["y"]
 
-        final_dt = max(50, (up["timestamp"] - prev_time) * 1000)
         final_dx = up["x"] - start_x
         final_dy = up["y"] - start_y
+        # 50ms 是给"松手前还有一小段位移"留的缓冲。释放点与上一个采样点同坐标时
+        # （松手没再动）这段缓冲是死停顿，归一化缩放后会被算进纯位移段、拉长
+        # 设计带，所以只保留真实间隔（≥5ms，与 move 采样下限一致）。
+        displaced = (
+            abs(final_dx - points[-1][0]) >= 0.5
+            or abs(final_dy - points[-1][1]) >= 0.5
+        )
+        final_dt = max(50 if displaced else 5, (up["timestamp"] - prev_time) * 1000)
         points.append([round(final_dx, 2), round(final_dy, 2), round(final_dt, 1)])
 
         distance = abs(final_dx)
@@ -447,9 +454,13 @@ class CaptchaRemoteController:
         from slidex._slide_geometry import normalize_recorded_delays, recorded_motion_ms
 
         timed = normalize_recorded_delays(points)
-        if timed:
-            points = timed
-            duration_ms = recorded_motion_ms(timed)
+        if not timed:
+            # 无真实位移（在面板里点了一下、或零点拖动）：不入池。否则这种空录制
+            # 会占掉一个 max_per_cookie 名额，把真实的人工录制挤出池外。
+            logger.debug("finish_recording: no displacement, recording discarded")
+            return None
+        points = timed
+        duration_ms = recorded_motion_ms(timed)
 
         return {
             "points": points,

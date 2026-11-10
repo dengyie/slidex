@@ -1,6 +1,5 @@
 """Regression tests for the 2026-09-06 production review fixes.
 
-- CDP recorded-trajectory replay must dispatch press before drag moves
 - Chromium cleanup must be scoped to the solver's own user_data_dir
 - Trajectory pool load must degrade gracefully when last_used write fails
 """
@@ -22,19 +21,6 @@ from slidex.config import SlidexConfig
 from slidex.solver import SliderSolver
 
 
-class _FakeCdp:
-    def __init__(self):
-        self.sent = []
-
-    async def send(self, method, params):
-        self.sent.append(params)
-
-
-class _FakePage:
-    async def evaluate(self, script):
-        return {"timeOrigin": 1000, "now": 500.0}
-
-
 def _make_solver(tmp_path: Path) -> SliderSolver:
     cfg = SlidexConfig(
         trajectory_pool_base_dir=str(tmp_path / "traj"),
@@ -43,52 +29,6 @@ def _make_solver(tmp_path: Path) -> SliderSolver:
         telemetry_enabled=False,
     )
     return SliderSolver(cookie_id="replay_user", config=cfg)
-
-
-class TestCdpReplayOrder:
-    def test_press_before_drag_moves_and_release_at_recorded_end(self, tmp_path):
-        s = _make_solver(tmp_path)
-        s.page = _FakePage()
-        s._cdp = _FakeCdp()
-        # 首点 = 起始驻留，中段 = 拖拽移动，末点 = 录制自 up 事件的释放位
-        points = [[0, 0, 20], [10, 1, 10], [60, 2, 10], [120, 0, 10]]
-
-        ok = asyncio.run(s._replay_recorded_cdp(points, 500.0, 300.0))
-
-        assert ok is True
-        types = [p["type"] for p in s._cdp.sent]
-        pressed = types.index("mousePressed")
-        released = len(types) - 1
-        # 唯一一次按下，且先于全部拖拽 move；最后一个事件是松键（0.6.25 流水线
-        # 语义：事件面含接近移动与末端握持 gap，不再断言精确序列）
-        assert types.count("mousePressed") == 1
-        assert types[released] == "mouseReleased"
-        for p in s._cdp.sent[pressed + 1:released]:
-            assert p["type"] == "mouseMoved"
-            assert p["buttons"] == 1
-        # 释放位置 = 起点 + 末点位移（录制的 up 位置）
-        release = s._cdp.sent[-1]
-        assert release["x"] == pytest.approx(620.0)
-        assert release["y"] == pytest.approx(300.0)
-
-    def test_empty_points_returns_false_without_dispatch(self, tmp_path):
-        s = _make_solver(tmp_path)
-        s.page = _FakePage()
-        s._cdp = _FakeCdp()
-
-        ok = asyncio.run(s._replay_recorded_cdp([], 500.0, 300.0))
-
-        assert ok is False
-        assert s._cdp.sent == []
-
-    def test_no_cdp_returns_false(self, tmp_path):
-        s = _make_solver(tmp_path)
-        s.page = _FakePage()
-        s._cdp = None
-
-        ok = asyncio.run(s._replay_recorded_cdp([[0, 0, 20]], 500.0, 300.0))
-
-        assert ok is False
 
 
 def _fake_proc(pid, name, cmdline):
@@ -549,3 +489,116 @@ class TestControlTicketFlow:
         assert "ticket=" in captured["message"]
         assert "token=" not in captured["message"]
         assert "long-lived-token" not in captured["message"]
+
+
+class TestPoolConfigSurface:
+    """P2-1：``SLIDEX_TRAJ_POOL_*`` 旋钮必须真的落到池实例上。
+
+    此前两个构造点都写 ``SliderTrajectoryPool(base_dir=...)``，max/min/strategy/
+    recorded_only/enabled 恒为类默认值——线上改了 env 没有任何效果。
+    """
+
+    def test_from_env_maps_all_knobs(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SLIDEX_TRAJ_POOL_ENABLED", "0")
+        monkeypatch.setenv("SLIDEX_TRAJ_POOL_MAX", "12")
+        monkeypatch.setenv("SLIDEX_TRAJ_POOL_MIN", "7")
+        monkeypatch.setenv("SLIDEX_TRAJ_POOL_STRATEGY", "Random")
+        monkeypatch.setenv("SLIDEX_TRAJ_POOL_RECORDED_ONLY", "1")
+
+        cfg = SlidexConfig.from_env()
+        pool = SliderTrajectoryPool.from_config(cfg,
+                                                base_dir=str(tmp_path))
+
+        assert pool.enabled is False
+        assert pool.serve_pooled() is False
+        assert pool.max_per_cookie == 12
+        assert pool.min_pool_size == 7
+        assert pool.rotation_strategy == "random"
+        assert pool.recorded_only_mode is True
+
+    def test_zero_max_falls_back_to_default(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SLIDEX_TRAJ_POOL_MAX", "0")
+        cfg = SlidexConfig.from_env()
+        pool = SliderTrajectoryPool.from_config(cfg, base_dir=str(tmp_path))
+        assert pool.max_per_cookie == 50
+
+    def test_apply_config_rejects_sub_floor_values(selfish, tmp_path):
+        pool = SliderTrajectoryPool(str(tmp_path))
+
+        class _Bad:
+            trajectory_pool_max_per_cookie = 0
+            trajectory_pool_min_pool_size = -3
+            trajectory_pool_rotation_strategy = "   "
+
+        pool.apply_config(_Bad())
+        assert pool.max_per_cookie == 50
+        assert pool.min_pool_size == 5
+        assert pool.rotation_strategy == "lru"
+
+    def test_api_module_pool_follows_config(self, monkeypatch):
+        monkeypatch.setenv("SLIDEX_TRAJ_POOL_MAX", "9")
+        monkeypatch.setenv("SLIDEX_TRAJ_POOL_DIR", tempfile.mkdtemp())
+        monkeypatch.setattr(SlidexConfig, "_instance", None, raising=False)
+        import importlib
+
+        import slidex.api as api_mod
+
+        api_mod = importlib.reload(api_mod)
+        assert api_mod.trajectory_pool.max_per_cookie == 9
+
+
+class TestSaveTrajectoryAtomicCreate:
+    """P3-2：编号分配必须独占创建，不能覆盖并发进程写好的录制。"""
+
+    def test_concurrent_create_does_not_overwrite(self, tmp_path):
+        pool = SliderTrajectoryPool(str(tmp_path))
+        first = pool.save_trajectory([[0, 0, 0], [5, 0, 10], [10, 0, 10]], "same_user", 10, True)
+        assert first == "trajectory_001.json"
+
+        # 模拟"另一进程在我们选号之后、open 之前"抢先写入同名文件
+        real_open = open
+        raced = {"done": False}
+
+        def racing_open(path, mode="r", *a, **kw):
+            if not raced["done"] and str(path).endswith("trajectory_002.json") and "x" in mode:
+                raced["done"] = True
+                with real_open(path, "x", encoding="utf-8") as f:
+                    json.dump({"cookie_id": "same_user", "points": [[0, 0, 999]]}, f)
+            return real_open(path, mode, *a, **kw)
+
+        with mock.patch("builtins.open", racing_open):
+            second = pool.save_trajectory([[0, 0, 0]], "same_user", 0, True)
+
+        assert second is not None
+        assert second != "trajectory_002.json"
+        # 对方的文件必须原样还在
+        with open(tmp_path / "same_user" / "trajectory_002.json") as f:
+            assert json.load(f)["points"] == [[0, 0, 999]]
+
+
+class TestEvictionOrder:
+    """P3-3：淘汰按 ``recorded_at``，编号只作并列决胜。"""
+
+    @staticmethod
+    def _write(cdir: Path, idx: int, recorded_at: str):
+        (cdir / f"trajectory_{idx:03d}.json").write_text(
+            json.dumps({"recorded_at": recorded_at, "distance": 100, "success": True,
+                        "points": [[0, 0, 100], [100, 0, 100]]}),
+            encoding="utf-8",
+        )
+
+    def test_restored_old_number_new_recording_survives_eviction(self, tmp_path):
+        pool = SliderTrajectoryPool(str(tmp_path))
+        pool.max_per_cookie = 50
+        cdir = pool._cookie_dir("u1")
+        # 备份恢复：1001 号是新录的，001-049 号是老录制
+        self._write(cdir, 1001, "2026-11-11T22:00:00")
+        for i in range(1, 50):
+            self._write(cdir, i, "2026-10-01T00:00:00")
+
+        name = pool.save_trajectory([[0, 0, 0], [100, 0, 100]], "u1", 100, True)
+
+        assert name is not None
+        files = {p.name for p in cdir.glob("trajectory_*.json")}
+        assert "trajectory_1001.json" in files       # 最新的个人录制留下
+        assert len(files) == 50                      # 其余按时间淘汰到上限

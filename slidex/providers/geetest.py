@@ -168,9 +168,13 @@ class GeeTestProvider(CaptchaProvider):
         if cdp_session is not None:
             from slidex._drag import apply_end_hold_scale, build_drag_events, dispatch_drag_timeline
 
+            # 轨迹里 ts_ms 为 None 的点与下面 Playwright 步径同义：前进 15ms
+            # （生成器只在"需要改节奏"处填值）。此前 CDP 侧按 0 处理，同一份
+            # 轨迹两条路径节奏不同，且一连串 None 会挤到浏览器同一帧里。
             pts_abs = [(start_x, start_y, float(hold_ms))]
             pts_abs.extend(
-                (start_x + float(x), start_y + float(y), float(ts_ms or 0.0))
+                (start_x + float(x), start_y + float(y),
+                 15.0 if ts_ms is None else float(ts_ms))
                 for (x, y, ts_ms) in slide_points
             )
             timeline = build_drag_events(

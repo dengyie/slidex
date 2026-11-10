@@ -7,6 +7,7 @@
 本文件钉住：所有 provider 都接受 cdp_session；有 CDP 会话时派发走流水线。
 """
 import inspect
+import re
 
 import pytest
 
@@ -73,3 +74,56 @@ async def test_geetest_pipelines_when_cdp_available():
     # 事件按设计间隔派发（末次是 25ms 量级，不是 700ms 的 press-hold 重复）
     gaps = [p["type"] for p in sent]
     assert gaps.count("mouseReleased") == 1
+
+
+@pytest.mark.asyncio
+async def test_geetest_none_timestamp_advances_like_playwright_path(monkeypatch):
+    """P3-1: 轨迹里 ts_ms=None 的点，两条派发路径必须同义。
+
+    Playwright 步径按 15ms 前进；CDP 步径曾 float(ts_ms or 0.0) 当成 0。
+    生成器只在"需要改节奏"处填 ts_ms，其余全是 None——按 0 播等于一连串
+    事件挤进同一帧，判题侧读到的就是瞬移/零速度。
+
+    直接截获编译后的 timeline：总时长里混着随机过冲/手抖，差值断言会抖。
+    """
+    import slidex._drag as drag_mod
+    from slidex.providers import ProviderElements
+
+    captured = {}
+
+    async def _noop(session, timeline):
+        captured["timeline"] = [(gap, dict(p)) for gap, p in timeline]
+
+    monkeypatch.setattr(drag_mod, "dispatch_drag_timeline", _noop)
+
+    class _Box:
+        async def bounding_box(self):
+            return {"x": 100.0, "y": 60.0, "width": 40.0, "height": 40.0}
+
+    class _Page:
+        def __getattr__(self, name):
+            raise AssertionError(f"page.{name} touched under pipeline mode")
+
+    provider = GeeTestProvider.__new__(GeeTestProvider)
+    provider.bind_response_listener = lambda page: None
+
+    elements = ProviderElements(
+        slider_btn=_Box(), slider_track=_Box(), bg_img=None,
+        piece_img=None, track_width_px=300, metadata={},
+    )
+    slide = [(float(i * 20), 0.0, None) for i in range(1, 13)]
+
+    await provider.perform_slide(
+        _Page(), elements, 240, [(0.0, 0.0, 300.0)] + slide,
+        cdp_session=object(), extra_overshoot=False, end_hold_scale=1.0,
+    )
+
+    timeline = captured["timeline"]
+    pressed = next(i for i, (_, p) in enumerate(timeline) if p["type"] == "mousePressed")
+    moved = [(g, p) for g, p in timeline[pressed + 1:] if p["type"] == "mouseMoved"]
+    # 首条是 press-hold 的空转移动（吃掉 hold_ms），其后每个位移点一条
+    assert len(moved) == len(slide) + 1
+    assert moved[0][0] == pytest.approx(300.0, abs=1e-6)
+    # 每个 None 点都推进 15ms（旧实现全是 0.0，整串事件压在同一帧）
+    for gap, _ in moved[1:]:
+        assert gap == pytest.approx(15.0, abs=1e-6)

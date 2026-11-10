@@ -1,5 +1,61 @@
 # Changelog
 
+## [0.11.0] - 2026-11-10
+
+录制轨迹解码与池配置根修（承接 0.10.2 录制时序归一化、0.10.3 数值编号淘汰）。
+
+0.10.2 把慢录制的时间轴压回 650ms 设计带，但只压时间、不减点数：线上
+234 点 / 48.4s 的录制压完后是 **360 events/s**（真人约 5Hz，池内其余 49 条
+p50 70Hz）——时间轴正确了，采样形态仍是一条"机器轨迹"。同一轮审计还发现
+池的左旋配置面（`SLIDEX_TRAJ_POOL_MAX/MIN/STRATEGY/ENABLED/RECORDED_ONLY`）
+在 config 里存在、构造点却一律 `SliderTrajectoryPool(base_dir=...)`，改了
+env 毫无效果；以及 GeeTest 的 CDP 派发路径把 `ts_ms=None` 当成 0ms。
+
+### Fixed
+- **采样密度上限**（`_slide_geometry.normalize_recorded_delays`）：压缩后按
+  `RECORDED_GAP_MIN_MS`（8ms，⇒ ≤125Hz）贪心抽稀，保首点（press-hold）与
+  末点（释放位），被丢点的间隙累加到下一个保留点。总位移时长、终点几何
+  逐字不变；同坐标的合并按死停顿上限收口，二次归一化零改动（线上 50 条
+  录制：非幂等 0/50，≤92 events/s，端点漂移 0.000px）。
+- **远程面板释放点不再虚构 50ms**（`remote.finish_recording`）：`up` 与上
+  一采样点同坐标（松手没再动）时只保留真实间隔，原先那 50ms 缓冲会被缩放
+  计入纯位移段，把设计带拉长到 651.6ms。真有位移才留缓冲。
+- **池旋钮真正生效**（`_trajectory_pool.from_config/apply_config`，`api`
+  与 `solver` 两个构造点统一）：`max_per_cookie` / `min_pool_size` /
+  `rotation_strategy` / `recorded_only_mode` / `enabled`，非法值回落类默认。
+  `SLIDEX_TRAJ_POOL_RECORDED_ONLY` 补进 `SlidexConfig.from_env`；
+  `SLIDEX_TRAJ_POOL_MAX` 的 0 由 `parse_int(minimum=1)` 落到 50（此前会
+  让池永远爆满、每条新录制都立刻淘汰自己）。
+- **GeeTest CDP 派发与 Playwright 步径同义**（`providers/geetest.py`）：
+  `ts_ms=None` 的点前进 15ms（原为 `float(ts_ms or 0.0)` = 0）。生成器只在
+  需要改节奏处填 ts_ms，按 0 播等于整串事件挤进浏览器同一帧，判题侧读到的
+  是瞬移/零速度。
+- **淘汰按 `recorded_at` 优先**（`_eviction_order`）：数值编号只作并列决胜。
+  编号会被跨机器/备份恢复复用（线上池 951/1001/1002 号段就是痕迹），按编号
+  淘汰会删掉"编号小但刚录"的条目。
+- **`save_trajectory` 原子建号**：`open(..., "x")`，并发进程撞号时让位重试
+  （3 次），不再覆盖对方刚写好的录制。
+- **`duration_kind: "motion"` 落盘约束**：`get_pool_stats` 的均值只统计带这个
+  标记的条目（0.10.1 及更早落盘的是录制墙钟 13-48s），跨版本升级后均值不会
+  被旧墙钟拉到一个不存在的量级。
+
+### Removed
+- **`SliderSolver._replay_recorded_cdp`**：生产不可达（PDB 正确的 provider 路径
+  自建 timeline），且带 `or list(points)` 旁路语义，与 provider 路径分叉。
+  连带删掉它的 `_FakeCdp`/`_FakePage` 测试替身。
+
+### Changed
+- 时序阈值全部可经 env 覆盖（`SLIDEX_RECORDED_MOTION_MS/TOLERANCE/GAP_MAX_MS/
+  GAP_MIN_MS/DEAD_HOLD_MS/PRESS_HOLD_MS`、`SLIDEX_SLIDE_END_HOLD_MIN/MAX`）；
+  xianyu-auto-bot 的 `docker-compose.yml` 已透传，留空走内置默认。
+
+### Tests
+- 新增 `tests/test_remote_recording_normalize.py`（4 条，远程面板入库口）。
+- `tests/test_recorded_timing.py` 增加密度抽稀 6 条；`test_review_fixes.py`
+  增加池配置面 4 条、原子建号 1 条、按时间淘汰 1 条；
+  `test_provider_cdp_signature.py` 增加 GeeTest None 时间戳 1 条。
+- 全量 1069 passed / 18 skipped。
+
 ## [0.10.3] - 2026-11-10
 
 轨迹池淘汰序根修：池满时删的是**最新**录制。线上实证（1926782908）：池

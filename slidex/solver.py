@@ -154,7 +154,7 @@ class SliderSolver(ProviderSolverMixin):
         self.selectors = {**DEFAULT_SELECTORS, **(selectors or {})}
 
         traj_dir = self._config.get_trajectory_dir()
-        self._trajectory_pool = SliderTrajectoryPool(base_dir=traj_dir)
+        self._trajectory_pool = SliderTrajectoryPool.from_config(self._config, base_dir=traj_dir)
 
         profile_root = Path(self._config.get_browser_data_dir())
         self.profile_dir = profile_root / f"slider_{self.pure_user_id}"
@@ -1344,34 +1344,6 @@ class SliderSolver(ProviderSolverMixin):
         p.parent.mkdir(parents=True, exist_ok=True)
         with open(p, "w") as f:
             json.dump(self._calibration, f)
-
-    # ════════════════════════════════════════════════════════════
-    #  轨迹回放方法
-    # ════════════════════════════════════════════════════════════
-    async def _replay_recorded_cdp(self, points, sx, sy):
-        cdp = getattr(self, "_cdp", None)
-        if not cdp:
-            return False
-        if not points:
-            return False
-        try:
-            # 0.6.25: 统一走流水线派发（_drag）——旧内联实现逐事件 await cdp.send，
-            # CDP 模式下节奏被隧道 RTT 撕碎（用户实测卡顿）。录制点序的语义保持：
-            # hover → pressed → moved×N → 末端握持 → released（末点即释放位）。
-            # 0.10.2: 时序归一化在派发口再做一次——池里存量录制（线上 50 条
-            # 13.8-17.3s、单点间隙 1.24s）必须回到设计带，否则回放是十几秒的
-            # 走走停停（用户侧"轨迹很卡"）。
-            from slidex._drag import build_drag_events, dispatch_drag_timeline
-            from slidex._slide_geometry import normalize_recorded_delays
-
-            timed = normalize_recorded_delays(points) or list(points)
-            pts_abs = [(sx + float(dx), sy + float(dy), float(delay or 0.0)) for (dx, dy, delay) in timed]
-            timeline = build_drag_events(sx, sy, pts_abs, extra_overshoot=False)
-            await dispatch_drag_timeline(cdp, timeline)
-            return True
-        except Exception as e:
-            logger.warning(f"[{self.pure_user_id}] CDP replay error: {e}")
-            return False
 
     # ════════════════════════════════════════════════════════════
     #  浏览器初始化与页面加载

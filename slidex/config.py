@@ -90,9 +90,9 @@ class SlidexConfig:
         return self.telemetry_dir or self._default_dir("telemetry")
 
     @classmethod
-    def _safe_int(cls, value: str, default: int) -> int:
-        # 委托 _env.parse_int（0.6.42 收口为全库唯一容错契约）：非法/非有限回落。
-        return parse_int(value, default)
+    def _safe_int(cls, value: str, default: int, minimum: Optional[int] = None) -> int:
+        # 委托 _env.parse_int（0.6.42 收口为全库唯一容错契约）：非法/非有限/越界回落。
+        return parse_int(value, default, minimum=minimum)
 
     @classmethod
     def _safe_float(cls, value: str, default: float) -> float:
@@ -118,9 +118,10 @@ class SlidexConfig:
             max_concurrent=cls._safe_int(os.environ.get("SLIDEX_MAX_CONCURRENT", "3"), 3),
             wait_timeout=cls._safe_int(os.environ.get("SLIDEX_WAIT_TIMEOUT", "60"), 60),
             trajectory_pool_enabled=os.environ.get("SLIDEX_TRAJ_POOL_ENABLED", "1") == "1",
-            trajectory_pool_max_per_cookie=cls._safe_int(os.environ.get("SLIDEX_TRAJ_POOL_MAX", "50"), 50),
-            trajectory_pool_min_pool_size=cls._safe_int(os.environ.get("SLIDEX_TRAJ_POOL_MIN", "5"), 5),
+            trajectory_pool_max_per_cookie=cls._safe_int(os.environ.get("SLIDEX_TRAJ_POOL_MAX"), 50, minimum=1),
+            trajectory_pool_min_pool_size=cls._safe_int(os.environ.get("SLIDEX_TRAJ_POOL_MIN"), 5, minimum=0),
             trajectory_pool_rotation_strategy=os.environ.get("SLIDEX_TRAJ_POOL_STRATEGY", "lru"),
+            trajectory_pool_recorded_only_mode=os.environ.get("SLIDEX_TRAJ_POOL_RECORDED_ONLY", "0") == "1",
             trajectory_pool_base_dir=os.environ.get("SLIDEX_TRAJ_POOL_DIR") or None,
             remote_captcha_enabled=os.environ.get("SLIDEX_REMOTE_ENABLED", "1") == "1",
             remote_captcha_timeout=cls._safe_int(os.environ.get("SLIDEX_REMOTE_TIMEOUT", "180"), 180),

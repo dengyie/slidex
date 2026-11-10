@@ -90,11 +90,10 @@ def points_from_recorded(
     rec_dist = recorded.get("distance", target_distance)
     return scale_recorded_points(raw, rec_dist, target_distance, tolerance)
 
-
-# ── 录制轨迹的时序归一化（0.10.2）───────────────────────────────────────
+# ── 录制轨迹的时序归一化（0.10.2，密度上限 0.11.0）─────────────────────
 # 录制器记的是「用户从按下到松开的世界时钟」：CDP 真机模式下人是在远端画面里
-# 拖的，一次手动救场拖动跨 13-17s 很常见（线上池 50 条全部如此，单点间隙最大
-# 1.24s）。回放侧只缩放 x、原样保留 delay，于是自动拖动变成 16.7s 的走走停停
+# 拖的，一次手动救场拖动跨 13-48s 很常见（线上池 50 条全部如此，单点间隙最大
+# 1.24s）。回放侧只缩放 x、原样保留 delay，于是自动拖动变成十几秒的走走停停
 # ——用户侧看到的就是"轨迹很卡"。
 #
 # 几何（形状、终点、过冲）是录制最值钱的部分，必须原样保留；只有时间轴需要
@@ -103,12 +102,29 @@ def points_from_recorded(
 #      （保留停顿存在，去掉落体感冻结的 1s+ 空档）
 #   2. 慢录制压缩：纯位移段超出设计带时整体按比例压缩（只压缩不放慢）
 #   3. 单点间隙上限：归一化后仍超过 GAP_MAX_MS 的一律夹紧
+#   4. 采样密度上限（0.11.0）：压缩把整条时间轴等比缩到 650ms 而点数不变，
+#      采样率被同比例放大——线上 234 点 / 48.4s 的录制压缩后是 360 events/s
+#      （真人约 5Hz，池内其余 49 条 p50 70Hz）。压缩后按 GAP_MIN_MS
+#      （8ms ⇒ ≤125Hz）抽稀：保首点（press-hold）与末点（释放位），被丢点的
+#      间隙累加到下一个保留点，总位移时长与终点不变。
 # 归一化幂等：二次调用不再改动。
+#
+# 阈值可经 env 覆盖（按站点节奏微调，无需发版）：
+#   SLIDEX_RECORDED_MOTION_MS / _TOLERANCE / _GAP_MAX_MS / _DEAD_HOLD_MS /
+#   _PRESS_HOLD_MS / _GAP_MIN_MS
 RECORDED_MOTION_TARGET_MS = 650.0
 RECORDED_MOTION_BAND_TOLERANCE = 1.15
 RECORDED_GAP_MAX_MS = 120.0
 RECORDED_DEAD_HOLD_MAX_MS = 40.0
 RECORDED_PRESS_HOLD_MAX_MS = 1200.0
+RECORDED_GAP_MIN_MS = 8.0
+
+
+def _recorded_knob(name: str, default: float) -> float:
+    """读 ``SLIDEX_RECORDED_<NAME>`` 覆盖；非法值回落默认（_env 统一容错）。"""
+    from slidex._env import env_float
+
+    return env_float(f"SLIDEX_RECORDED_{name}", default, minimum=0.0)
 
 
 def recorded_motion_ms(points: Sequence[Sequence[float]]) -> float:
@@ -133,11 +149,12 @@ def recorded_motion_ms(points: Sequence[Sequence[float]]) -> float:
 
 def normalize_recorded_delays(
     points: Sequence[Sequence[float]],
-    target_total_ms: float = RECORDED_MOTION_TARGET_MS,
-    tolerance: float = RECORDED_MOTION_BAND_TOLERANCE,
-    gap_max_ms: float = RECORDED_GAP_MAX_MS,
-    dead_hold_max_ms: float = RECORDED_DEAD_HOLD_MAX_MS,
-    press_hold_max_ms: float = RECORDED_PRESS_HOLD_MAX_MS,
+    target_total_ms: Optional[float] = None,
+    tolerance: Optional[float] = None,
+    gap_max_ms: Optional[float] = None,
+    dead_hold_max_ms: Optional[float] = None,
+    press_hold_max_ms: Optional[float] = None,
+    gap_min_ms: Optional[float] = None,
 ) -> List[List[float]]:
     """把录制轨迹的时间轴拉回设计带（几何不动）。返回新列表，不改入参。
 
@@ -145,6 +162,11 @@ def normalize_recorded_delays(
     同坐标的死停顿夹到 dead-hold 上限。录制已经够快（纯位移段 <=
     target*tolerance）时保持原节奏，只做间隙夹紧；慢录制整体压缩。
     没有真实位移时返回空列表（调用方当次弃用该录制）。
+
+    压缩后按 ``gap_min_ms`` 抽稀采样密度：保首末点，丢点间隙累加到下一个
+    保留点，总位移时长与终点不变。
+
+    各阈值参数为 ``None`` 时读 ``SLIDEX_RECORDED_*`` env，仍无则用模块默认。
 
     归一化幂等：二次调用不再改动。
     """
@@ -162,13 +184,31 @@ def normalize_recorded_delays(
     if not parsed:
         return []
 
+    # 阈值解析：显式实参优先（严格 > 0），其次 env 覆盖，最后模块默认。
+    def _pick(value: Optional[float], name: str, default: float, minimum: float) -> float:
+        if value is not None and float(value) > 0:
+            return float(value)
+        return max(minimum, _recorded_knob(name, default))
+
+    def _pick_opt(value: Optional[float], name: str, default: float) -> float:
+        if value is not None:
+            return max(0.0, float(value))
+        return max(0.0, _recorded_knob(name, default))
+
+    target = _pick(target_total_ms, "MOTION_MS", RECORDED_MOTION_TARGET_MS, 1.0)
+    tol = _pick(tolerance, "TOLERANCE", RECORDED_MOTION_BAND_TOLERANCE, 1.0)
+    cap = _pick(gap_max_ms, "GAP_MAX_MS", RECORDED_GAP_MAX_MS, 1.0)
+    dead = _pick_opt(dead_hold_max_ms, "DEAD_HOLD_MS", RECORDED_DEAD_HOLD_MAX_MS)
+    press = _pick(press_hold_max_ms, "PRESS_HOLD_MS", RECORDED_PRESS_HOLD_MAX_MS, 1.0)
+    floor = _pick_opt(gap_min_ms, "GAP_MIN_MS", RECORDED_GAP_MIN_MS)
+
     # 1) 首点 = 按下停顿；其余点里同坐标的间隙是死停顿
-    parsed[0][2] = min(parsed[0][2], max(1.0, float(press_hold_max_ms)))
+    parsed[0][2] = min(parsed[0][2], press)
     prev_x, prev_y = parsed[0][0], parsed[0][1]
     for idx in range(1, len(parsed)):
         x, y, gap = parsed[idx]
         if abs(x - prev_x) <= 1e-6 and abs(y - prev_y) <= 1e-6:
-            parsed[idx][2] = min(gap, dead_hold_max_ms)
+            parsed[idx][2] = min(gap, dead)
         prev_x, prev_y = x, y
 
     motion = recorded_motion_ms(parsed)
@@ -176,14 +216,50 @@ def normalize_recorded_delays(
         return []
 
     # 2) 慢录制压缩到设计带（只压缩，不放慢）
-    target = max(1.0, float(target_total_ms or RECORDED_MOTION_TARGET_MS))
-    if motion > target * max(1.0, float(tolerance)):
+    if motion > target * tol:
         scale = target / motion
         for idx in range(1, len(parsed)):
             parsed[idx][2] *= scale
 
     # 3) 单点间隙上限（首点的 press-hold 不受这道夹）
-    cap = max(1.0, float(gap_max_ms))
     for idx in range(1, len(parsed)):
         parsed[idx][2] = min(parsed[idx][2], cap)
+
+    # 4) 采样密度上限：按 floor 换算该时长能容纳的点数，超出则贪心合并——
+    #    相邻保留点的时间间隔 >= floor（丢点间隙累加到下一个保留点），
+    #    首点（press-hold）与末点（释放位）必留。末尾不足 floor 的残余并回
+    #    最后一个保留点：它原本是死停顿被压掉的碎间隙，若单独成点既会拉出
+    #    一个 < floor 的位移间隙、也会让点数比上限多一。总位移时长、终点
+    #    几何都不变（残余点与末点同坐标时，并回末点不增加位移时长）。
+    if floor > 0 and len(parsed) > 2:
+        span = recorded_motion_ms(parsed)
+        if span > 0 and int(span / floor) + 1 < len(parsed):
+            kept: List[List[float]] = [parsed[0]]
+            acc = 0.0
+            last = len(parsed) - 1
+            for idx in range(1, len(parsed)):
+                acc += parsed[idx][2]
+                if idx != last and acc < floor - 1e-9:
+                    continue
+                x, y = parsed[idx][0], parsed[idx][1]
+                if abs(x - kept[-1][0]) <= 1e-6 and abs(y - kept[-1][1]) <= 1e-6:
+                    # 被抽掉的点与上一保留点同坐标 = 死停顿（用户中途停手）。
+                    # 它的时间累加后可能超过 dead，二次归一化会再夹一次——
+                    # 这里就按同一条规则收口，保持幂等。
+                    kept[-1][2] = min(kept[-1][2] + acc, dead)
+                else:
+                    if idx == last and acc < floor - 1e-9 and len(kept) > 1:
+                        # 尾部残余不足 floor：并回上一个保留点，避免碎帧。
+                        acc += kept.pop()[2]
+                    kept.append([x, y, acc])
+                acc = 0.0
+            parsed = kept
+
+    # 5) 抽稀改变不了纯位移总时长（丢点的间隙被保留点接手），但若尾部残余被
+    #    并回末点，位移间隙可能超过设计带——再压一次（只压缩，不改点数/端点）。
+    motion = recorded_motion_ms(parsed)
+    if motion > target * tol:
+        scale = target / motion
+        for idx in range(1, len(parsed)):
+            parsed[idx][2] *= scale
     return parsed

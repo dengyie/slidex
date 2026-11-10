@@ -10,7 +10,7 @@ import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from loguru import logger
 from slidex._sanitize import sanitize_pure_user_id
 
@@ -36,8 +36,40 @@ def _sorted_trajectories(cdir: Path) -> List[Path]:
     return sorted(cdir.glob("trajectory_*.json"), key=_trajectory_index)
 
 
+def _recorded_at_value(path) -> Optional[datetime]:
+    """读文件的 recorded_at（ISO 秒级）；读不到返回 None（按"未知"处理）。"""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f).get("recorded_at")
+        return datetime.strptime(str(raw), "%Y-%m-%dT%H:%M:%S")
+    except Exception:
+        return None
+
+
+def _eviction_order(paths: List[Path]) -> List[Path]:
+    """淘汰序：真实录制时间最早在前，无时间戳的排最前；同时间按数值编号。
+
+    0.10.3 只按数值编号（修的是字典序把 1000 排在 951 前的问题）。编号仍是
+    主键时的次要风险：跨机器/备份恢复会复用编号，于是"编号小但刚录"的条目
+    会被当成最旧删掉。线上池里同时存在 951/1001/1002 这类号段就是这种痕迹。
+    """
+    def _key(fp: Path):
+        ts = _recorded_at_value(fp)
+        return (ts is None, ts or datetime.min, _trajectory_index(fp))
+
+    return sorted(paths, key=_key)
+
+
 class SliderTrajectoryPool:
     """管理真机滑块轨迹的录制、存储、回放与轮转"""
+
+    #: 本类认得的构造参数名（供 solver/api 只挑出池相关的配置项传进来）。
+    _CONFIG_KEYS = (
+        "max_per_cookie",
+        "min_pool_size",
+        "rotation_strategy",
+        "recorded_only_mode",
+    )
 
     def __init__(self, base_dir: str = None):
         if base_dir is None:
@@ -52,6 +84,52 @@ class SliderTrajectoryPool:
         self.min_pool_size = 5
         self.rotation_strategy = "lru"
         self.recorded_only_mode = False
+        self.enabled = True
+
+    @classmethod
+    def from_config(cls, config: Any, base_dir: str = None) -> "SliderTrajectoryPool":
+        """按 SlidexConfig 的 trajectory_pool_* 字段构造池（0.11.0）。
+
+        0.10.x 起 config 暴露了 ``SLIDEX_TRAJ_POOL_MAX/MIN/STRATEGY/
+        POOL_RECORDED_ONLY`` 等旋钮，但构造方一律 ``SliderTrajectoryPool(base_dir=...)``，
+        字段从未下沉到池实例——线上设了 env 也不生效。这里统一收口。
+        """
+        pool = cls(base_dir=base_dir)
+        if config is None:
+            return pool
+        pool.apply_config(config)
+        return pool
+
+    def apply_config(self, config: Any) -> "SliderTrajectoryPool":
+        """把 SlidexConfig 上的池字段写到实例（缺字段/非法值保持当前值）。"""
+        def _int(name: str, current: int, floor: int) -> int:
+            raw = getattr(config, name, None)
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                return current
+            return value if value >= floor else current
+
+        self.max_per_cookie = _int("trajectory_pool_max_per_cookie", self.max_per_cookie, 1)
+        self.min_pool_size = _int("trajectory_pool_min_pool_size", self.min_pool_size, 0)
+        strategy = getattr(config, "trajectory_pool_rotation_strategy", None)
+        if isinstance(strategy, str) and strategy.strip():
+            self.rotation_strategy = strategy.strip().lower()
+        mode = getattr(config, "trajectory_pool_recorded_only_mode", None)
+        if mode is not None:
+            self.recorded_only_mode = bool(mode)
+        enabled = getattr(config, "trajectory_pool_enabled", None)
+        if enabled is not None:
+            self.enabled = bool(enabled)
+        return self
+
+    def serve_pooled(self) -> bool:
+        """是否允许从池里取轨迹回放（``SLIDEX_TRAJ_POOL_ENABLED=0`` 可整体关闭）。
+
+        关闭只是不回放池内录制；solver 仍会采集真人轨迹并自动生成手势，
+        随时可再打开（池内容不丢）。
+        """
+        return bool(self.enabled)
 
     # ── cookie 子目录 ──────────────────────────────────────────
     @staticmethod
@@ -78,13 +156,7 @@ class SliderTrajectoryPool:
         """持久化一条轨迹，返回文件名，超出上限时淘汰最旧的"""
         cookie_id = self._sanitize_cookie_id(cookie_id)
         cdir = self._cookie_dir(cookie_id)
-        existing = _sorted_trajectories(cdir)
-        if len(existing) >= self.max_per_cookie:
-            for old in existing[: len(existing) - self.max_per_cookie + 1]:
-                try:
-                    os.remove(str(old))
-                except Exception:
-                    pass
+        self._evict_overflow(cdir)
 
         remaining = _sorted_trajectories(cdir)
         idx = 1
@@ -103,17 +175,47 @@ class SliderTrajectoryPool:
             "success": bool(success),
             "source": str(source or "auto"),
             "duration_ms": round(float(duration_ms), 1),
+            "duration_kind": "motion",
             "points": [[round(float(p[0]), 2), round(float(p[1]), 2), round(float(p[2]), 1)]
                        for p in points],
         }
-        try:
-            with open(fpath, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            logger.info(f"[TrajectoryPool] saved {fname} for {cookie_id} (dist={distance:.0f}px, ok={success})")
-            return fname
-        except (OSError, IOError, PermissionError) as e:
-            logger.debug(f"[TrajectoryPool] cannot save trajectory: {e}")
-            return None
+        stub = fname[: -len(".json")]
+        for attempt in range(3):
+            try:
+                with open(fpath, "x", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                logger.info(f"[TrajectoryPool] saved {fname} for {cookie_id} (dist={distance:.0f}px, ok={success})")
+                return fname
+            except FileExistsError:
+                # 并发进程抢到同一编号：让位重试，不覆盖对方已写好的录制
+                idx += 1
+                stub = f"trajectory_{idx:03d}"
+                fname = f"{stub}.json"
+                fpath = cdir / fname
+                continue
+            except (OSError, IOError, PermissionError) as e:
+                logger.debug(f"[TrajectoryPool] cannot save trajectory: {e}")
+                return None
+        logger.debug(f"[TrajectoryPool] cannot save trajectory: {stub} kept colliding")
+        return None
+
+    def _evict_overflow(self, cdir: Path) -> None:
+        """池满时淘汰最旧的。
+
+        0.10.3 按 numeric 编号升序淘汰；0.11.0 起改为 ``recorded_at`` 优先、
+        编号作并列决胜——编号可能被并发/人工提交跨机器复用（例如备份恢复
+        后新录制沿用了 1001/1002 号），按编号淘汰会把"编号小但刚录"
+        的条目误删。
+        """
+        existing = _sorted_trajectories(cdir)
+        if len(existing) < self.max_per_cookie:
+            return
+        victims = existing[: len(existing) - self.max_per_cookie + 1]
+        for old in _eviction_order(victims):
+            try:
+                os.remove(str(old))
+            except Exception:
+                pass
 
     # ── 加载 ──────────────────────────────────────────────────
     def _load_all(self, cookie_id: str) -> List[dict]:
@@ -268,13 +370,17 @@ class SliderTrajectoryPool:
     def get_pool_stats(self, cookie_id: str) -> dict:
         records = self._load_all(cookie_id)
         successful = [r for r in records if r.get("success")]
+        # 只对声明为 "motion"（归一化后的纯位移段）的时长求均值：0.10.1 及更早
+        # 落盘的是录制墙钟（13-48s），混进来会把均值拉到一个不存在的量级。
+        motion = [r for r in records if r.get("duration_kind") == "motion"]
         return {
             "total": len(records),
             "successful": len(successful),
             "failed": len(records) - len(successful),
             "success_rate": len(successful) / len(records) if records else 0,
-            "avg_duration_ms": (sum(r.get("duration_ms", 0) for r in records) / len(records)
-                                if records else 0),
+            "avg_duration_ms": (sum(float(r.get("duration_ms") or 0.0) for r in motion) / len(motion)
+                                if motion else 0),
+            "durations_sampled": len(motion),
             "pool_ready": len(records) >= self.min_pool_size,
         }
 

@@ -17,8 +17,12 @@ from slidex.remote import captcha_controller
 from slidex._trajectory_pool import SliderTrajectoryPool
 
 # 与 solver 同源：轨迹池目录跟随 SlidexConfig（含 SLIDEX_TRAJ_POOL_DIR 等环境变量），
-# 避免人工面板提交的轨迹落到与 solver 读取不一致的目录。
-trajectory_pool = SliderTrajectoryPool(SlidexConfig.from_env().get_trajectory_dir())
+# 避免人工面板提交的轨迹落到与 solver 读取不一致的目录；池上限/轮转策略同样跟随
+# 配置（0.11.0，此前只取目录、其余旋钮恒为类默认值）。
+_slidex_config = SlidexConfig.from_env()
+trajectory_pool = SliderTrajectoryPool.from_config(
+    _slidex_config, base_dir=_slidex_config.get_trajectory_dir()
+)
 
 # 创建路由器
 router = APIRouter(prefix="/api/captcha", tags=["captcha"])

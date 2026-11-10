@@ -343,6 +343,10 @@ class GestureSession:
             if name == ARCHETYPE_HUMAN:
                 if self.trajectory_mode == "generated":
                     continue
+                if not getattr(self.pool, "enabled", True):
+                    continue
+                if getattr(self.pool, "recorded_only_mode", False):
+                    continue
                 if self._peek_human(distance) is None:
                     continue
                 return name
