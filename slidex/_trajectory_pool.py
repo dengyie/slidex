@@ -6,12 +6,34 @@ import hashlib
 import json
 import os
 import random
+import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from loguru import logger
 from slidex._sanitize import sanitize_pure_user_id
+
+
+_TRAJECTORY_INDEX_RE = re.compile(r"trajectory_(\d+)\.json$")
+
+
+def _trajectory_index(path) -> int:
+    """trajectory_<n>.json 的数值编号；不匹配的名字返回 -1（排最前，优先淘汰）。"""
+    m = _TRAJECTORY_INDEX_RE.search(os.path.basename(str(path)))
+    return int(m.group(1)) if m else -1
+
+
+def _sorted_trajectories(cdir: Path) -> List[Path]:
+    """按**数值**编号排序，不用字典序。
+
+    字典序把 ``trajectory_1000.json`` 排在 ``trajectory_951.json`` 前面
+    （'1' < '9'）。池满 ``max_per_cookie`` 时"淘汰最旧"取的就是这个序列的
+    头部——于是淘汰掉的是**最新**的一条，新录制还复用同一个编号把它覆盖：
+    线上 2026-11-10 实证（1926782908），22:27 的 48s 真人录制被 23:17 的
+    新录制静默吃掉。
+    """
+    return sorted(cdir.glob("trajectory_*.json"), key=_trajectory_index)
 
 
 class SliderTrajectoryPool:
@@ -56,7 +78,7 @@ class SliderTrajectoryPool:
         """持久化一条轨迹，返回文件名，超出上限时淘汰最旧的"""
         cookie_id = self._sanitize_cookie_id(cookie_id)
         cdir = self._cookie_dir(cookie_id)
-        existing = sorted(cdir.glob("trajectory_*.json"))
+        existing = _sorted_trajectories(cdir)
         if len(existing) >= self.max_per_cookie:
             for old in existing[: len(existing) - self.max_per_cookie + 1]:
                 try:
@@ -64,7 +86,7 @@ class SliderTrajectoryPool:
                 except Exception:
                     pass
 
-        remaining = sorted(cdir.glob("trajectory_*.json"))
+        remaining = _sorted_trajectories(cdir)
         idx = 1
         for fp in remaining:
             try:
@@ -97,7 +119,7 @@ class SliderTrajectoryPool:
     def _load_all(self, cookie_id: str) -> List[dict]:
         cdir = self._cookie_dir(cookie_id)
         records = []
-        for fp in sorted(cdir.glob("trajectory_*.json")):
+        for fp in _sorted_trajectories(cdir):
             try:
                 with open(fp, "r", encoding="utf-8") as f:
                     d = json.load(f)
@@ -141,7 +163,9 @@ class SliderTrajectoryPool:
                 records.append((d, r))
         if not records:
             return None
-        records.sort(key=lambda item: (item[0], item[1].get("_file") or ""))
+        # 同距离时按数值编号取最旧的一条：避免 1000 号（字典序最小）被反复
+        # 抽中而 951 号永远轮不到。
+        records.sort(key=lambda item: (item[0], _trajectory_index(item[1].get("_file") or "")))
         best = records[0][1]
         logger.info(
             f"[TrajectoryPool] unused human for dist={target_distance:.0f}: "

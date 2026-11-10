@@ -127,6 +127,31 @@ class TestSliderTrajectoryPool:
             assert len(set(filenames)) == 5
             assert files == ["trajectory_003.json", "trajectory_004.json", "trajectory_005.json"]
 
+    def test_save_trajectory_rotation_at_four_digit_indices(self):
+        """编号进 4 位后淘汰仍按数值序：不能删掉最新的 1000、也不能复用它的名字。
+
+        线上实证（1926782908，2026-11-10）：字典序把 trajectory_1000 排在
+        trajectory_951 前面，池满 50 条时"淘汰最旧"删的是最新录制，新录制再
+        复用 1000 这个名字把它覆盖——一条 48s 真人轨迹就这么静默消失了。
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pool = SliderTrajectoryPool(tmpdir)
+            pool.max_per_cookie = 3
+            cdir = Path(tmpdir) / "test"
+            cdir.mkdir(parents=True, exist_ok=True)
+            for idx in (998, 999, 1000):
+                (cdir / f"trajectory_{idx}.json").write_text(
+                    json.dumps({"distance": 100, "success": True, "points": [[0, 0, 100]]}),
+                    encoding="utf-8",
+                )
+
+            name = pool.save_trajectory([[0, 0, 100]], "test", 100, True)
+
+            files = {p.name for p in cdir.glob("trajectory_*.json")}
+            assert "trajectory_998.json" not in files      # 最旧编号被淘汰
+            assert {"trajectory_999.json", "trajectory_1000.json"} <= files
+            assert name == "trajectory_1001.json"          # 不复用 1000
+
     def test_load_best_trajectory_exact_match(self):
         """测试精确距离匹配"""
         with tempfile.TemporaryDirectory() as tmpdir:

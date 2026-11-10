@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.10.3] - 2026-11-10
+
+轨迹池淘汰序根修：池满时删的是**最新**录制。线上实证（1926782908）：池
+`max_per_cookie=50`、编号已到 `trajectory_1000`，`save_trajectory` 用
+`sorted(glob(...))` 挑"最旧"——字典序里 `trajectory_1000.json` 排在
+`trajectory_951.json` **前面**（'1' < '9'），于是 22:27 那条 48.4s 真人
+录制被当成最旧删除，23:17 的新录制还复用 1000 这个名字把它覆盖。只要编号
+进 4 位，每次保存都会吃掉最新一条。
+
+### Fixed
+- **淘汰/加载按数值编号排序**（`_trajectory_pool._sorted_trajectories`）：
+  淘汰取最小数值编号；新录制编号取 max+1，不复用；`_load_all` 顺序也随之
+  按数值（影响 `load_best_trajectory` 的同距离 tie-break）。
+- **同距离轮转 tie-break 按数值编号**：`load_unused_human` 原先按文件名字
+  典序取，1000 号永远排最前被反复抽中，951 号轮不到。
+
+### Tests
+- 新增 `test_save_trajectory_rotation_at_four_digit_indices`：池内
+  998/999/1000 三条、上限 3 时保存，必须淘汰 998、保留 1000、新文件名为
+  1001。修复前该用例失败（旧逻辑删 1000 并复用其名）。
+- 全量 1057 passed / 18 skipped。
+
 ## [0.10.2] - 2026-11-10
 
 拖动卡顿根修：录制轨迹的时间轴不再原样回放。线上实证（1926782908，
