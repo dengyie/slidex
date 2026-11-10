@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.10.2] - 2026-11-10
+
+拖动卡顿根修：录制轨迹的时间轴不再原样回放。线上实证（1926782908，
+2026-11-10 19:55）：CDP 真机模式里人是在远端画面里手动拖的，
+`DRAG_RECORDER_JS` 记的是"按下到松开的世界时钟"——轨迹池 50 条 human
+全部 13.8-17.3s、单点间隙最大 1.24s。回放侧（`scale_recorded_points` /
+`_replay_recorded_cdp`）只缩放几何、原样保留 delay，且
+`FIRST_TRY_ORDER` 把 human 放第一位，于是**每次自动拖动**的时间线是
+16.7 秒的走走停停（设计带 0.66s、末端握持 0.45-1.10s）。用户侧观感
+就是"轨迹很卡"，而它跟网络无关，是录制数据本身的时间轴。
+
+### Fixed
+- **录制轨迹时序归一化**（`_slide_geometry.normalize_recorded_delays`）：
+  几何（每点 x/y、终点、点序）逐字保留；首点按 press-hold 夹到 1.2s；
+  同坐标死停顿夹到 40ms；纯位移段超过设计带（650ms×1.15）时整体压缩；
+  单点间隙上限 120ms；幂等。静态录制（无位移）返回空 → 当次弃用。
+  三处接入：ingest（`human_events_to_points`，池里存的就是归一化后的点）、
+  池加载（`GestureSession._plan_from_human_rec`，**存量脏文件自愈**）、
+  派发口（`SliderSolver._replay_recorded_cdp`）。
+- **真人录制重复入库**：`_export_human_drag_recording` 读到记录后立即从
+  `sessionStorage` 消费。原实现在成功路径与兜底路径各调一次，线上实测两条
+  记录相隔 25ms 全部入库。
+- **GeeTest 拖动静默降级**：`perform_slide` 补 `cdp_session` 形参 + 流水线
+  分支。`_call_perform_slide` 按签名注入，缺形参的 provider 只能逐点
+  `await`（每点吃一次 RTT）——这是 CDP 真机模式下唯一还在依赖网络的拖动
+  路径。实测证据：40ms 单向延迟 + 抖动时，逐点路径事件间隔 108ms（设计
+  25ms）、150ms 延迟下 317ms；流水线路径 34.7ms。
+- **降级不再静默**：`_call_perform_slide` 在 `_cdp` 存在但 provider 无
+  `cdp_session` 时打 warning + `provider_no_cdp_pipeline` 遥测。
+- **派发保真度可观测**：`dispatch_drag_timeline` 每次输出
+  `events= design= wall=`（wall-design ≈ 一次 ack 往返），线上无需靠手感
+  判断"轨迹是不是又被网络拖慢了"。
+
+### Tests
+- 新增 `tests/test_recorded_timing.py`（10 例）钉住：慢录制压缩进设计带、
+  几何/终点不变、幂等、快录制不被拉长、死停顿折叠、静态录制弃用、池内存量
+  脏文件加载后仍在设计带、派发口兜底。
+- 新增 `tests/test_provider_cdp_signature.py`（4 例）钉住：三个 provider 都
+  接受 `cdp_session`；GeeTest 有会话时走流水线且不触碰 `page.mouse`。
+- 改写 `test_human_events_to_points_conversion`：旧断言（松键前 640ms 死停顿
+  原样保留、duration=1500 墙钟）正是本缺陷的规格化，按新语义改写。
+- 全量 1056 passed / 18 skipped，零回归。
+
 ## [0.10.1] - 2026-11-10
 
 打包根修：恢复 stealth.py 随 wheel 分发。setup.py 的 build_py 排除钩子

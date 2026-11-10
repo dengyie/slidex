@@ -943,13 +943,20 @@ class SliderSolver(ProviderSolverMixin):
 
         录制器（DRAG_RECORDER_JS）记录可信鼠标事件；读取最近一次完成的拖动，
         转换入池（success=True，source=human_cdp）。非真实拖动自动跳过。
+
+        0.10.2：读到的记录立即从 sessionStorage 消费掉——本方法在成功路径与
+        兜底路径都会被调一次，原实现因此把同一条拖动重复入库（线上实测两条
+        相隔 25ms）。时序归一化在 human_events_to_points 里完成（录制墙钟
+        13-17s 会被压回设计带，几何不变）。
         """
         if not (getattr(self, "page", None) and getattr(self, "_trajectory_pool", None)):
             return
         try:
             from slidex._drag import human_events_to_points
             raw = await self.page.evaluate(
-                "() => { try { return JSON.parse(sessionStorage.getItem('__slidexLastDrag') || 'null'); } catch (e) { return null; } }"
+                "() => { try { const v = sessionStorage.getItem('__slidexLastDrag'); "
+                "sessionStorage.removeItem('__slidexLastDrag'); "
+                "return JSON.parse(v || 'null'); } catch (e) { return null; } }"
             )
             if not raw or not raw.get("done"):
                 return
@@ -962,7 +969,8 @@ class SliderSolver(ProviderSolverMixin):
             )
             logger.info(
                 f"[{self.pure_user_id}] human drag trajectory saved to pool "
-                f"(dist={distance:.0f}px, {len(pts)} pts, {duration:.0f}ms) — 自动拖动将优先回放真人轨迹"
+                f"(dist={distance:.0f}px, {len(pts)} pts, normalized motion={duration:.0f}ms) "
+                "— 自动拖动将优先回放真人轨迹"
             )
         except Exception as e:
             logger.debug(f"[{self.pure_user_id}] human drag export failed: {e}")
@@ -1350,8 +1358,14 @@ class SliderSolver(ProviderSolverMixin):
             # 0.6.25: 统一走流水线派发（_drag）——旧内联实现逐事件 await cdp.send，
             # CDP 模式下节奏被隧道 RTT 撕碎（用户实测卡顿）。录制点序的语义保持：
             # hover → pressed → moved×N → 末端握持 → released（末点即释放位）。
+            # 0.10.2: 时序归一化在派发口再做一次——池里存量录制（线上 50 条
+            # 13.8-17.3s、单点间隙 1.24s）必须回到设计带，否则回放是十几秒的
+            # 走走停停（用户侧"轨迹很卡"）。
             from slidex._drag import build_drag_events, dispatch_drag_timeline
-            pts_abs = [(sx + float(dx), sy + float(dy), float(delay or 0.0)) for (dx, dy, delay) in points]
+            from slidex._slide_geometry import normalize_recorded_delays
+
+            timed = normalize_recorded_delays(points) or list(points)
+            pts_abs = [(sx + float(dx), sy + float(dy), float(delay or 0.0)) for (dx, dy, delay) in timed]
             timeline = build_drag_events(sx, sy, pts_abs, extra_overshoot=False)
             await dispatch_drag_timeline(cdp, timeline)
             return True

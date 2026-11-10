@@ -225,6 +225,17 @@ class ProviderSolverMixin:
             params = {}
         if "cdp_session" in params:
             kwargs["cdp_session"] = getattr(self, "_cdp", None)
+        elif getattr(self, "_cdp", None) is not None:
+            # 静默降级：签名门不注入 cdp_session 时 provider 只能逐点 await（每点
+            # 吃一次 RTT），CDP 真机模式下就是走走停停。变成显性告警，新增
+            # provider 漏形参能立刻暴露。
+            logger.warning(
+                f"[{self.pure_user_id}] provider {self._provider.name} lacks cdp_session "
+                "param — dragging point-by-point over the wire instead of the CDP pipeline"
+            )
+            self._emit_telemetry_event(
+                "provider_no_cdp_pipeline", provider_name=self._provider.name, reason="signature"
+            )
         if "extra_overshoot" in params:
             kwargs["extra_overshoot"] = bool(plan.extra_overshoot)
         if "end_hold_scale" in params:

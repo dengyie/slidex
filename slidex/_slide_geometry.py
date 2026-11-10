@@ -89,3 +89,101 @@ def points_from_recorded(
         return None
     rec_dist = recorded.get("distance", target_distance)
     return scale_recorded_points(raw, rec_dist, target_distance, tolerance)
+
+
+# ── 录制轨迹的时序归一化（0.10.2）───────────────────────────────────────
+# 录制器记的是「用户从按下到松开的世界时钟」：CDP 真机模式下人是在远端画面里
+# 拖的，一次手动救场拖动跨 13-17s 很常见（线上池 50 条全部如此，单点间隙最大
+# 1.24s）。回放侧只缩放 x、原样保留 delay，于是自动拖动变成 16.7s 的走走停停
+# ——用户侧看到的就是"轨迹很卡"。
+#
+# 几何（形状、终点、过冲）是录制最值钱的部分，必须原样保留；只有时间轴需要
+# 回到生成器同一设计带（~0.6-0.8s 的纯位移段）。规则：
+#   1. 死停顿折叠：连续同坐标之间的间隙不是"移动"，压到 ≤ DEAD_HOLD_MAX_MS
+#      （保留停顿存在，去掉落体感冻结的 1s+ 空档）
+#   2. 慢录制压缩：纯位移段超出设计带时整体按比例压缩（只压缩不放慢）
+#   3. 单点间隙上限：归一化后仍超过 GAP_MAX_MS 的一律夹紧
+# 归一化幂等：二次调用不再改动。
+RECORDED_MOTION_TARGET_MS = 650.0
+RECORDED_MOTION_BAND_TOLERANCE = 1.15
+RECORDED_GAP_MAX_MS = 120.0
+RECORDED_DEAD_HOLD_MAX_MS = 40.0
+RECORDED_PRESS_HOLD_MAX_MS = 1200.0
+
+
+def recorded_motion_ms(points: Sequence[Sequence[float]]) -> float:
+    """纯位移段时间：只计"位置真的变了"的点所带的间隙（死停顿不计）。
+
+    首点是按下到第一次采样的间隔（press-hold），不是位移，不计入。
+    """
+    total = 0.0
+    prev_x = prev_y = None
+    for idx, point in enumerate(points):
+        if not point:
+            continue
+        x = float(point[0])
+        y = float(point[1]) if len(point) > 1 else 0.0
+        gap = float(point[2]) if len(point) > 2 else 0.0
+        moved = prev_x is None or abs(x - prev_x) > 1e-6 or abs(y - prev_y) > 1e-6
+        if idx > 0 and moved:
+            total += gap
+        prev_x, prev_y = x, y
+    return total
+
+
+def normalize_recorded_delays(
+    points: Sequence[Sequence[float]],
+    target_total_ms: float = RECORDED_MOTION_TARGET_MS,
+    tolerance: float = RECORDED_MOTION_BAND_TOLERANCE,
+    gap_max_ms: float = RECORDED_GAP_MAX_MS,
+    dead_hold_max_ms: float = RECORDED_DEAD_HOLD_MAX_MS,
+    press_hold_max_ms: float = RECORDED_PRESS_HOLD_MAX_MS,
+) -> List[List[float]]:
+    """把录制轨迹的时间轴拉回设计带（几何不动）。返回新列表，不改入参。
+
+    只有纯位移段参与压缩判据：首点（按下停顿）单独夹到 press-hold 上限，
+    同坐标的死停顿夹到 dead-hold 上限。录制已经够快（纯位移段 <=
+    target*tolerance）时保持原节奏，只做间隙夹紧；慢录制整体压缩。
+    没有真实位移时返回空列表（调用方当次弃用该录制）。
+
+    归一化幂等：二次调用不再改动。
+    """
+    if not points:
+        return []
+    parsed: List[List[float]] = []
+    for point in points:
+        if not point:
+            continue
+        parsed.append([
+            float(point[0]),
+            float(point[1]) if len(point) > 1 else 0.0,
+            max(0.0, float(point[2]) if len(point) > 2 else 0.0),
+        ])
+    if not parsed:
+        return []
+
+    # 1) 首点 = 按下停顿；其余点里同坐标的间隙是死停顿
+    parsed[0][2] = min(parsed[0][2], max(1.0, float(press_hold_max_ms)))
+    prev_x, prev_y = parsed[0][0], parsed[0][1]
+    for idx in range(1, len(parsed)):
+        x, y, gap = parsed[idx]
+        if abs(x - prev_x) <= 1e-6 and abs(y - prev_y) <= 1e-6:
+            parsed[idx][2] = min(gap, dead_hold_max_ms)
+        prev_x, prev_y = x, y
+
+    motion = recorded_motion_ms(parsed)
+    if motion <= 0:
+        return []
+
+    # 2) 慢录制压缩到设计带（只压缩，不放慢）
+    target = max(1.0, float(target_total_ms or RECORDED_MOTION_TARGET_MS))
+    if motion > target * max(1.0, float(tolerance)):
+        scale = target / motion
+        for idx in range(1, len(parsed)):
+            parsed[idx][2] *= scale
+
+    # 3) 单点间隙上限（首点的 press-hold 不受这道夹）
+    cap = max(1.0, float(gap_max_ms))
+    for idx in range(1, len(parsed)):
+        parsed[idx][2] = min(parsed[idx][2], cap)
+    return parsed

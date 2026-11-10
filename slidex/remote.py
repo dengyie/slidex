@@ -441,6 +441,16 @@ class CaptchaRemoteController:
 
         self.session_recordings.pop(session_id, None)
 
+        # 0.10.2：远程面板里的拖动同样走 WebSocket 往返，时间戳是墙钟——面板/链路
+        # 慢的时候一次拖动跨十几秒。入池前把时间轴归一化回设计带（几何不动），
+        # 否则回放会把这段墙钟当成"人形节奏"（线上 16.7s 走走停停的同一根因）。
+        from slidex._slide_geometry import normalize_recorded_delays, recorded_motion_ms
+
+        timed = normalize_recorded_delays(points)
+        if timed:
+            points = timed
+            duration_ms = recorded_motion_ms(timed)
+
         return {
             "points": points,
             "distance": round(distance, 1),

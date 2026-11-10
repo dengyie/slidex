@@ -22,7 +22,7 @@ from typing import List, Optional, Sequence, Set, Tuple
 
 from loguru import logger
 
-from slidex._slide_geometry import points_from_recorded
+from slidex._slide_geometry import normalize_recorded_delays, points_from_recorded
 from slidex._trajectory_pool import SliderTrajectoryPool
 
 Point = Tuple[float, float, float]
@@ -401,7 +401,10 @@ class GestureSession:
         raw = rec.get("points") or []
         rec_dist = float(rec.get("distance") or distance or 0.0)
         upgraded = upgrade_points_to_cumulative(raw, rec_dist)
-        scaled = points_from_recorded({**rec, "points": upgraded}, distance, tolerance=0.10)
+        timed = normalize_recorded_delays(upgraded)
+        if not timed:
+            return None
+        scaled = points_from_recorded({**rec, "points": timed}, distance, tolerance=0.10)
         if not scaled:
             return None
         return GesturePlan(

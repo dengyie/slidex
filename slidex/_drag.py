@@ -111,13 +111,24 @@ async def dispatch_drag_timeline(session: Any, timeline: List[Tuple[float, Dict[
 
     任一次 send 失败会 raise ``DragDispatchError``：调用方不得把它折成
     code=-1（那会锁死同一手势家族重试）。会话已死时应中止，而不是再拖一遍。
+
+    0.10.2：派发后打一条 design vs wall 计时（wall 含末次 ack 的一次往返，
+    所以良性的 wall ≈ design + RTT）。这是"轨迹不依赖网络"的线上可观测证据：
+    出现 wall 远大于 design 时日志里能直接看到，不必再靠用户手感反馈。
     """
+    design_ms = sum(gap for gap, _ in timeline)
+    started = asyncio.get_running_loop().time()
     tasks = []
     for gap_ms, params in timeline:
         if gap_ms > 0:
             await asyncio.sleep(gap_ms / 1000.0)
         tasks.append(asyncio.create_task(session.send("Input.dispatchMouseEvent", params)))
     results = await asyncio.gather(*tasks, return_exceptions=True)
+    wall_ms = (asyncio.get_running_loop().time() - started) * 1000.0
+    logger.info(
+        f"drag timeline: events={len(tasks)} design={design_ms:.0f}ms wall={wall_ms:.0f}ms "
+        f"(wall-design={wall_ms - design_ms:+.0f}ms ≈ 一次 ack 往返)"
+    )
     failed = [r for r in results if isinstance(r, BaseException)]
     if failed:
         logger.warning(f"drag timeline: {len(failed)}/{len(tasks)} dispatches failed: {failed[0]}")
@@ -161,11 +172,19 @@ DRAG_RECORDER_JS = r"""
 
 
 def human_events_to_points(events: List[Dict[str, Any]]) -> Tuple[List[List[float]], float, float]:
-    """把录制的人类拖动事件序列转为轨迹池格式。
+    """把录制的人类拖动事件序列转为轨迹池格式（0.10.2：时序已归一化）。
 
     events: [{dt, x, y, buttons}]（首事件=按下位置，末事件=松键位置）。
     返回 (points, distance, duration_ms)：points 是相对 events[0] 的累计
     位移 [[dx, dy, delay_ms]]（与 remote.py 录制同一套语义），末点即释放位。
+    duration_ms 是**归一化后**的纯位移段时长，不是录制墙钟时长。
+
+    0.10.2 根因：录制墙钟时长不可信——CDP 真机模式里人是在远端画面里拖的，
+    线上轨迹池 50 条 human 全部 13.8-17.3s、单点间隙最大 1.24s。回放侧原样
+    保留 delay，于是每次自动拖动都是 16.7s 的走走停停（用户侧"轨迹很卡"）。
+    几何（形状/终点）是录制最有价值的部分，必须保留；只把时间轴走
+    ``normalize_recorded_delays`` 回到生成器同一设计带。
+
     非真实拖动（位移 < 50px 或事件 < 5 个）返回 ([], 0, 0)。
     """
     if not events or len(events) < 5:
@@ -184,7 +203,17 @@ def human_events_to_points(events: List[Dict[str, Any]]) -> Tuple[List[List[floa
         ])
         prev_dt = dt
     distance = float(events[-1]["x"]) - ox
-    duration = float(events[-1]["dt"])
     if abs(distance) < 50:
         return [], 0.0, 0.0
-    return pts, distance, duration
+
+    from slidex._slide_geometry import normalize_recorded_delays, recorded_motion_ms
+
+    normalized = normalize_recorded_delays(pts)
+    if not normalized:
+        return [], 0.0, 0.0
+    duration = recorded_motion_ms(normalized)
+    logger.info(
+        f"human drag normalized: {len(pts)} pts, recorded wall {float(events[-1]['dt']):.0f}ms "
+        f"→ motion {duration:.0f}ms"
+    )
+    return normalized, distance, duration

@@ -2,7 +2,7 @@
 
 import json
 import random
-from typing import Iterable, List, Optional, Tuple
+from typing import Any, Iterable, List, Optional, Tuple
 from urllib.parse import urlparse
 from playwright.async_api import Page, Response
 from loguru import logger
@@ -139,10 +139,17 @@ class GeeTestProvider(CaptchaProvider):
         elements: ProviderElements,
         gap_x: int,
         trajectory: List[Tuple[int, int, int]],
+        cdp_session: Optional[Any] = None,
         extra_overshoot: bool = True,
         end_hold_scale: float = 1.0,
     ) -> None:
-        """执行滑动。trajectory 为相对位移 (dx, dy, delay_ms)。"""
+        """执行滑动。trajectory 为相对位移 (dx, dy, delay_ms)。
+
+        cdp_session 可用时走流水线派发（slidex._drag）：事件按设计间隔直达
+        浏览器，节奏不被网络 RTT 撕碎。修之前本方法缺这个形参，
+        _call_perform_slide 的签名门会静默不注入——CDP 真机模式下 GeeTest 是
+        唯一还在"每个点等一次往返"的 provider，拖动在用户侧就是走走停停。
+        """
         self.bind_response_listener(page)
 
         btn_box = await elements.slider_btn.bounding_box()
@@ -152,14 +159,30 @@ class GeeTestProvider(CaptchaProvider):
         start_x = btn_box["x"] + btn_box["width"] / 2
         start_y = btn_box["y"] + btn_box["height"] / 2
 
-        await page.mouse.move(start_x, start_y)
-        await page.mouse.down()
-
         hold_ms = 100.0
         slide_points = trajectory
         if trajectory and trajectory[0][0] == 0 and trajectory[0][1] == 0 and trajectory[0][2] > 0:
             hold_ms = float(trajectory[0][2])
             slide_points = trajectory[1:]
+
+        if cdp_session is not None:
+            from slidex._drag import apply_end_hold_scale, build_drag_events, dispatch_drag_timeline
+
+            pts_abs = [(start_x, start_y, float(hold_ms))]
+            pts_abs.extend(
+                (start_x + float(x), start_y + float(y), float(ts_ms or 0.0))
+                for (x, y, ts_ms) in slide_points
+            )
+            timeline = build_drag_events(
+                start_x, start_y, pts_abs, extra_overshoot=bool(extra_overshoot)
+            )
+            apply_end_hold_scale(timeline, end_hold_scale)
+            await dispatch_drag_timeline(cdp_session, timeline)
+            return
+
+        await page.mouse.move(start_x, start_y)
+        await page.mouse.down()
+
         await page.wait_for_timeout(int(hold_ms))
 
         for x, y, ts_ms in slide_points:

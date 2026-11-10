@@ -184,8 +184,13 @@ def test_human_events_to_points_conversion():
     assert len(pts) == 4
     assert pts[0] == [0.0, 0.0, 800.0]                  # press-hold 原生保留
     assert pts[1][0] == 30.0 and pts[1][2] == 30.0
-    assert pts[-1] == [158.0, 0.0, 640.0]              # 末点=相对起点累计释放位
-    assert distance == 158.0 and duration == 1500.0
+    assert pts[2] == [158.0, 0.0, 30.0]                # 末个位移点=释放位
+    # 0.10.2：松键前那段 640ms 是同坐标死停顿（不是移动），夹到 dead-hold 上限。
+    # 旧断言要求原样保留 640ms、duration=1500（墙钟）——那正是把线上 16s 录制
+    # 回放成 16s 走走停停的根因，按新语义改写。
+    assert pts[3][2] == 40.0
+    assert distance == 158.0
+    assert duration == 60.0                             # 归一化后纯位移段
 
 
 def test_human_events_to_points_rejects_non_drags():
