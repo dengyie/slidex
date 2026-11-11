@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.11.5] - 2026-11-11
+
+布尔解析全库收口：`_env` 成为唯一词表，且告警终于能指出是哪个旋钮写错了。
+
+### Changed
+- **11 个布尔开关全部改走 `_env.env_bool`**（0.11.4 只做了 `config.py` 的 4 个，
+  库里还散着三种手搓词表）：
+  - `solver.py`：`XY_SLIDER_FINGERPRINT_AUDIT`、`SLIDEX_CDP_PRE_ACTIVATE`、
+    `SLIDEX_CDP_PROBE_FROZEN`、`SLIDEX_CDP_REBUILD_FROZEN`。后两个正是 xianyu
+    compose 用 `${VAR:-}` 传的旋钮，容器里就是空串。
+  - `stealth.py`：`DOCKER_ENV`、`XY_KEEP_VERIFICATION_SCREENSHOT`、
+    `XY_SLIDER_HEADLESS_WARMUP`。最后一个原先写成 `not in {...}`——**空串判 True**，
+    与「空值视同未设置」正好反向；收口后写成
+    `not env_bool(..., False)`，未设/空串/显式假都是 `disable=True`，显式真才是
+    `False`，与 0.11.4 之前的行为逐字一致（不是行为变更，是补契约）。
+  - `service/app.py`：删除本地 `_env_bool` / `_env_int`，改 import `_env`。
+    副产品：`_env_int` 走 `int(float(x))`，`SLIDEX_PX_CONCURRENCY=5.0` 这类浮点
+    写法不再被静默丢成默认值。
+- `env_bool` 从「零生产调用」变成唯一入口（0.11.4 新增它却没人用，属死代码）。
+
+### Fixed
+- **`_reject` 的告警缺变量名**：`parse_*` 把 `str(raw)` 当 `source`，于是日志是
+  `[env] maybe='maybe' 不是合法布尔值…` ——14 个旋钮一起注入时根本看不出是哪个键
+  写错。`parse_float` / `parse_int` / `parse_bool` 新增可选 `source=` 关键参，
+  三个 `env_*` 统一传变量名，告警变成
+  `[env] SLIDEX_TRAJ_POOL_ENABLED='maybe' …`。直接调用 `parse_*` 的旧行为不变。
+
+### Tests
+- 新增 `tests/test_bool_env_knobs.py`（32 例）：`disable_headless_warmup` 的极性
+  （字段名否定、开关名肯定）逐条钉死、三个 CDP 开关的空串/未设默认关闭、
+  `service` 工厂默认值。
+- `tests/test_env_parsing.py` 补 `parse_bool` 直调、未知字面量必须留 WARNING、
+  以及 `TestNoParallelBoolParser`——扫源码禁止 `strip().lower() in {...}` 与
+  `== "1"` 形式回流。全量 1183 passed / 18 skipped（0.11.4 为 1147 / 18）。
+
+### Note
+- **升级提醒**：0.11.3 及更早把 `true/yes/on` 等字面量一律判 False（静默失效），
+  0.11.4 起这些写法才生效。升级前请确认部署配置里这类键的取值是**本意**——
+  尤其是 `SLIDEX_TRAJ_POOL_RECORDED_ONLY=true` 这种"当初写了但没生效"的开关。
+
 ## [0.11.4] - 2026-11-11
 
 布尔开关的空串契约：`SLIDEX_TRAJ_POOL_ENABLED=` 不再被当成"关闭"。

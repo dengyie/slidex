@@ -75,39 +75,47 @@ def _bounds_ok(value: float, source: str, raw: str, default, *,
 
 def parse_float(raw: str, default: float, *, minimum: Optional[float] = None,
                 maximum: Optional[float] = None,
-                exclusive_minimum: Optional[float] = None) -> float:
-    """解析浮点字符串；空串视同未设置（静默回落）；非法/非有限/越界回落并告警。"""
+                exclusive_minimum: Optional[float] = None,
+                source: Optional[str] = None) -> float:
+    """解析浮点字符串；空串视同未设置（静默回落）；非法/非有限/越界回落并告警。
+
+    ``source`` 是告警里显示的来源名（``env_*`` 传变量名）。不传时退回原始字符串
+    ——那样告警只剩 ``[env] abc=...``，14 个旋钮一起注入时根本看不出是哪个键写错。
+    """
     if raw is None or str(raw).strip() == "":
         return default
+    label = source or str(raw)
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        return _reject(str(raw), raw, default, "不是合法数字")
-    if _bounds_ok(value, str(raw), raw, default, minimum=minimum, maximum=maximum,
+        return _reject(label, raw, default, "不是合法数字")
+    if _bounds_ok(value, label, raw, default, minimum=minimum, maximum=maximum,
                   exclusive_minimum=exclusive_minimum):
         return value
     return default
 
 
 def parse_int(raw: str, default: int, *, minimum: Optional[int] = None,
-              maximum: Optional[int] = None) -> int:
+              maximum: Optional[int] = None,
+              source: Optional[str] = None) -> int:
     """解析整型字符串；空串视同未设置（静默回落）；容忍 ``"5000.0"``。"""
     if raw is None or str(raw).strip() == "":
         return default
+    label = source or str(raw)
     try:
         value = int(float(raw))
     except (TypeError, ValueError, OverflowError):
-        return _reject(str(raw), raw, default, "不是合法整数")
+        return _reject(label, raw, default, "不是合法整数")
     if minimum is not None and value < minimum:
-        _reject(source=str(raw), raw=raw, default=default, why=f"低于下限 {minimum}")
+        _reject(source=label, raw=raw, default=default, why=f"低于下限 {minimum}")
         return default
     if maximum is not None and value > maximum:
-        _reject(source=str(raw), raw=raw, default=default, why=f"高于上限 {maximum}")
+        _reject(source=label, raw=raw, default=default, why=f"高于上限 {maximum}")
         return default
     return value
 
 
-def parse_bool(raw: str, default: bool) -> bool:
+def parse_bool(raw: str, default: bool, *, source: Optional[str] = None) -> bool:
     """解析布尔字符串；空串视同未设置（静默回落）；未知字面量回落并告警。"""
     if raw is None or str(raw).strip() == "":
         return default
@@ -116,7 +124,8 @@ def parse_bool(raw: str, default: bool) -> bool:
         return True
     if word in _FALSE_WORDS:
         return False
-    return _reject(str(raw), raw, default, "不是合法布尔值（用 1/0、true/false、on/off）")
+    return _reject(source or str(raw), raw, default,
+                   "不是合法布尔值（用 1/0、true/false、on/off）")
 
 
 def env_bool(name: str, default: bool) -> bool:
@@ -130,7 +139,7 @@ def env_bool(name: str, default: bool) -> bool:
     raw = _raw(name)
     if raw is None:
         return default
-    return parse_bool(raw, default)
+    return parse_bool(raw, default, source=name)
 
 
 def env_float(name: str, default: float, *, minimum: Optional[float] = None,
@@ -141,7 +150,7 @@ def env_float(name: str, default: float, *, minimum: Optional[float] = None,
     if raw is None:
         return default
     return parse_float(raw, default, minimum=minimum, maximum=maximum,
-                       exclusive_minimum=exclusive_minimum)
+                       exclusive_minimum=exclusive_minimum, source=name)
 
 
 def env_int(name: str, default: int, *, minimum: Optional[int] = None,
@@ -150,4 +159,4 @@ def env_int(name: str, default: int, *, minimum: Optional[int] = None,
     raw = _raw(name)
     if raw is None:
         return default
-    return parse_int(raw, default, minimum=minimum, maximum=maximum)
+    return parse_int(raw, default, minimum=minimum, maximum=maximum, source=name)

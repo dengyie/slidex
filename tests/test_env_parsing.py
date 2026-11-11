@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -224,6 +225,69 @@ class TestEnvBool:
         assert cfg.trajectory_pool_recorded_only_mode is False
         assert cfg.trajectory_pool_rotation_strategy == "lru"
         assert cfg.remote_captcha_enabled is True
+
+    @pytest.mark.parametrize("default", [True, False])
+    def test_parse_bool_direct(self, default):
+        """parse_bool 是 env_bool 的底层实现，直接覆盖面别只靠上层。"""
+        from slidex._env import parse_bool
+
+        assert parse_bool(None, default) is default
+        assert parse_bool("", default) is default
+        assert parse_bool("  ", default) is default
+        # 显式字面量优先于 default，两个方向都要验
+        assert parse_bool("1", not default) is True
+        assert parse_bool("0", not default) is False
+
+    def test_unknown_literal_warns(self, monkeypatch):
+        """未知字面量必须留 WARNING：静默回落会让"拼错的开关"永远查不出来。"""
+        from loguru import logger
+
+        from slidex._env import env_bool
+
+        monkeypatch.setenv(self.BOOL_KEY, "maybe")
+        captured = []
+        handler = logger.add(lambda m: captured.append(m), level="WARNING")
+        try:
+            assert env_bool(self.BOOL_KEY, True) is True
+        finally:
+            logger.remove(handler)
+        text = "".join(str(m) for m in captured)
+        assert "maybe" in text and self.BOOL_KEY in text, text
+
+
+class TestNoParallelBoolParser:
+    """全库只允许 `_env` 一套布尔词表（0.11.5 收口）。
+
+    0.11.4 新增 `env_bool` 时只改了 config，solver/stealth/service 里还散着
+    `os.environ.get(...).strip().lower() in {...}` 三种词表——其中
+    ``not in {...}`` 那处的空串语义与「空值=未设置」正好相反。这里直接扫源码，
+    防止下一个开关又手搓一份。
+    """
+
+    PATTERNS = (
+        "strip().lower() in {",
+        "strip().lower() not in {",
+        '== "1"',
+        "== '1'",
+    )
+
+    def test_no_adhoc_bool_env_parsing(self):
+        import slidex
+
+        root = Path(slidex.__file__).parent
+        offenders = []
+        for path in sorted(root.rglob("*.py")):
+            if path.name == "_env.py":  # 唯一实现所在
+                continue
+            for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if "environ" not in line and "getenv" not in line:
+                    continue
+                if any(pat in line for pat in self.PATTERNS):
+                    offenders.append("%s:%d: %s" % (path.relative_to(root), lineno, line.strip()))
+        assert not offenders, (
+            "布尔 env 请走 _env.env_bool / parse_bool，不要另起词表：\n  "
+            + "\n  ".join(offenders)
+        )
 
     def test_config_explicit_off_still_works(self, monkeypatch):
         from slidex.config import SlidexConfig

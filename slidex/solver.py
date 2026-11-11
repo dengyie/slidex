@@ -36,7 +36,7 @@ def _resolve_browser_channel() -> Optional[str]:
 
 from slidex._stealth_patch import STEALTH_LAUNCH_ARGS, STEALTH_INIT_SCRIPT, ENV_CONSISTENCY_LAUNCH_ARGS, MEMORY_GUARD_LAUNCH_ARGS
 from slidex._drag import DragDispatchError
-from slidex._env import env_float
+from slidex._env import env_bool, env_float
 from slidex._nav import is_nav_timeout
 from slidex._gestures import GestureSession, generate_archetype
 from slidex._trajectory import slide_end_hold_range
@@ -1485,7 +1485,7 @@ class SliderSolver(ProviderSolverMixin):
         一次性 evaluate + 一行 INFO，XY_SLIDER_FINGERPRINT_AUDIT=0 可关。
         成功链路记录（_success_record）复用此处快照作为成功时补采失败的回退。
         """
-        if os.environ.get("XY_SLIDER_FINGERPRINT_AUDIT", "1").strip().lower() in {"0", "false", "off", "no"}:
+        if not env_bool("XY_SLIDER_FINGERPRINT_AUDIT", True):
             return
         if not getattr(self, "page", None):
             return
@@ -1520,9 +1520,7 @@ class SliderSolver(ProviderSolverMixin):
         关掉(见宿主 scripts/cdp_tunnel.ps1),而不是每次求解都靠切前台去唤醒。
         仅在无法关闭内存节省时才开启此开关作为兜底。
         """
-        return os.environ.get("SLIDEX_CDP_PRE_ACTIVATE", "").strip().lower() in {
-            "1", "true", "yes", "on",
-        }
+        return env_bool("SLIDEX_CDP_PRE_ACTIVATE", False)
 
     @staticmethod
     def _cdp_probe_frozen_enabled() -> bool:
@@ -1535,9 +1533,7 @@ class SliderSolver(ProviderSolverMixin):
         connect **之前**:这正是 0.6.32 那把"默认关闭、只在吃满 45s 超时后才兜底"所缺
         的一环 —— 前置自愈,不白等一个完整握手超时。
         """
-        return os.environ.get("SLIDEX_CDP_PROBE_FROZEN", "").strip().lower() in {
-            "1", "true", "yes", "on",
-        }
+        return env_bool("SLIDEX_CDP_PROBE_FROZEN", False)
 
     @staticmethod
     def _cdp_rebuild_frozen_enabled() -> bool:
@@ -1547,9 +1543,7 @@ class SliderSolver(ProviderSolverMixin):
         SLIDEX_CDP_REBUILD_FROZEN=1 才启用;且只对"激活解冻后仍探活失败"的目标动手,
         绝不因为探针一次判负就关标签。
         """
-        return os.environ.get("SLIDEX_CDP_REBUILD_FROZEN", "").strip().lower() in {
-            "1", "true", "yes", "on",
-        }
+        return env_bool("SLIDEX_CDP_REBUILD_FROZEN", False)
 
     # /json/activate 兜底的预算:单请求 1s、最多 4 路并发、整体 3s。超出整体预算
     # 就不再等剩余结果(线程池收尾时各任务最多再各耗 1s)。

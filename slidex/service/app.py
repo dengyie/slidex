@@ -63,6 +63,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from loguru import logger
 
+from slidex._env import env_bool, env_int
 from slidex.px import PxPressSolver
 
 from . import codes
@@ -73,22 +74,6 @@ from .registry import HandlerFailure, HandlerRegistry, normalize_type
 _HARD_SOLVE_BUDGET_S = 170.0
 _TASK_TTL_S = 30 * 60
 _COUNTER_WINDOW_S = 24 * 3600
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None or not raw.strip():
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on", "y"}
-
-
-def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
-    raw = os.environ.get(name)
-    try:
-        value = int(str(raw).strip())
-    except (TypeError, ValueError):
-        return default
-    return value if value >= minimum else default
 
 
 def _configured_keys() -> Tuple[str, ...]:
@@ -361,8 +346,8 @@ def create_app(
 ) -> FastAPI:
     """构造服务。所有依赖可注入，测试零网络/零浏览器。"""
     px_solver = solver or PxPressSolver(
-        headless=_env_bool("SLIDEX_PX_HEADLESS", True),
-        concurrency=_env_int("SLIDEX_PX_CONCURRENCY", 5),
+        headless=env_bool("SLIDEX_PX_HEADLESS", True),
+        concurrency=env_int("SLIDEX_PX_CONCURRENCY", 5),
     )
     handlers = [
         PxPressHandler(px_solver),

@@ -764,7 +764,7 @@ adaptive_strategy_manager = AdaptiveStrategyManager()
 
 # 全局并发控制 — 从共享模块导入
 from slidex._concurrency import SliderConcurrencyManager, concurrency_manager
-from slidex._env import env_int, parse_int
+from slidex._env import env_bool, env_int, parse_int
 from slidex._nav import is_nav_timeout
 
 # 策略统计管理器
@@ -903,7 +903,7 @@ class XianyuSliderStealth:
             self.project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         self.playwright_browser_name = os.environ.get("XY_SLIDER_PLAYWRIGHT_BROWSER", "chromium").strip() or "chromium"
         existing_playwright_cache_dir = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "").strip()
-        is_docker_env = os.environ.get("DOCKER_ENV", "").strip().lower() in {"1", "true", "yes", "on"}
+        is_docker_env = env_bool("DOCKER_ENV", False)
         self.is_docker_env = is_docker_env
         if existing_playwright_cache_dir and existing_playwright_cache_dir != "0":
             self.playwright_browser_cache_dir = existing_playwright_cache_dir
@@ -924,12 +924,10 @@ class XianyuSliderStealth:
             5,
             env_int("XY_VERIFICATION_WAIT_TIMEOUT", 450),
         )
-        self.keep_verification_screenshots = (
-            os.environ.get("XY_KEEP_VERIFICATION_SCREENSHOT", "").strip().lower() in {"1", "true", "yes", "on"}
-        )
-        self.disable_headless_warmup = (
-            os.environ.get("XY_SLIDER_HEADLESS_WARMUP", "").strip().lower() not in {"1", "true", "yes", "on"}
-        )
+        self.keep_verification_screenshots = env_bool("XY_KEEP_VERIFICATION_SCREENSHOT", False)
+        # 开关名是「是否启用 warmup」，字段名却是「是否禁用」：内置默认取 False
+        # （未设/空串 = 不启用 warmup = disable=True），与 0.11.4 之前的行为一致。
+        self.disable_headless_warmup = not env_bool("XY_SLIDER_HEADLESS_WARMUP", False)
         backend_env = os.environ.get("XY_SLIDER_AUTOMATION_BACKEND", "").strip().lower()
         if backend_env in {"patchright", "playwright"}:
             self.automation_backend = backend_env
