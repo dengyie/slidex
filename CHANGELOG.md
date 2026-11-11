@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.11.7] - 2026-11-12
+
+`SLIDEX_TRAJ_POOL_STRATEGY=lru` 接线：选轨跨会话按 last_used 轮换（兑现旋钮承诺）。
+
+### Fixed
+- **`load_unused_human` 在 `rotation_strategy == "lru"`（默认）下改为
+  「同距离候选里最久未用优先」**（未用过最先，同为未用按编号）。其余策略维持
+  「同距离取最旧编号」的旧行为。
+  2026-11-12 生产实证（接线前，strategy 一直是 lru 却无人消费）：dist=258 的
+  候选里 `trajectory_959` 两天被选 **18 次**（每个会话都从它开始），同距离家族的
+  951/953/955/956 各只放过 2 次——同一条人类轨迹反复重放正是池要避免的指纹。
+  距离差仍是第一排序键：LRU 只在距离匹配的候选内部轮换，不会为了轮换选远距离。
+- 前置依赖：`last_used` 记账在 0.11.6（peek 不写盘）后才真正准确——探测不再
+  打乱轮换节奏。
+
+### Tests
+- 新增 `tests/test_trajectory_pool_lru.py`（6 例）：跨会话轮换不回头、未用优先于
+  刚用、距离差压过 LRU、非 lru 策略保持旧行为、last_used 缺失退化编号序、
+  默认策略即 lru。fixture 注意：同 distance+同 dy 的 payload 会被 0.11.3 幂等
+  去重并成同一文件。全量 1195 passed / 18 skipped（0.11.6 为 1189 / 18）。
+
+### Note
+- 0.11.6 Note 里记录的「STRATEGY 无消费者」就此关闭：旋钮现在真实驱动选轨。
+  显式设过 `SLIDEX_TRAJ_POOL_STRATEGY` 为非 lru 值的部署行为不变。
+
 ## [0.11.6] - 2026-11-12
 
 轨迹池 peek 语义：只读探测不再按消费记账。

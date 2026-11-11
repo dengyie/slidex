@@ -373,9 +373,23 @@ class SliderTrajectoryPool:
                 records.append((d, r))
         if not records:
             return None
-        # 同距离时按数值编号取最旧的一条：避免 1000 号（字典序最小）被反复
-        # 抽中而 951 号永远轮不到。
-        records.sort(key=lambda item: (item[0], _trajectory_index(item[1].get("_file") or "")))
+        if self.rotation_strategy == "lru":
+            # strategy="lru"（默认）：同距离候选里**最久未用优先**（未用过最先，
+            # 同为未用按编号）。2026-11-12 生产实证：旧的「同距离取最旧编号」
+            # 是确定性首选——每次会话都从同一条开始，trajectory_959 两天内被
+            # 回放 18 次，而同距离家族的 951/953/955/956 各只放过 2 次；同一条
+            # 人类轨迹反复重放正是池要避免的指纹。last_used 记账在 peek 修复
+            # （0.11.6）后已准确，这里兑现旋钮一直承诺的语义。
+            lu = self._read_last_used(cookie_id)
+            records.sort(key=lambda item: (
+                item[0],
+                float(lu.get(os.path.basename(item[1].get("_file") or ""), 0.0)),
+                _trajectory_index(item[1].get("_file") or ""),
+            ))
+        else:
+            # 其余策略维持「同距离取最旧编号」：避免 1000 号（字典序最小）被
+            # 反复抽中而 951 号永远轮不到。
+            records.sort(key=lambda item: (item[0], _trajectory_index(item[1].get("_file") or "")))
         best = records[0][1]
         best_fname = os.path.basename(best.get("_file", ""))
         if peek:
