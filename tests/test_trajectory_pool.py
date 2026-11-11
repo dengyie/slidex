@@ -69,6 +69,52 @@ class TestSliderTrajectoryPool:
             file_path = Path(tmpdir) / "test_user" / filename
             assert file_path.exists()
 
+    def test_save_trajectory_same_payload_is_idempotent(self):
+        """同一份 payload 二次落盘必须复用首条文件，不再新增。
+
+        线上 2026-10-12..14 实证：50 个文件里 20 对完全相同（同秒双写），
+        池位被挤占、该几何被抽中的概率翻倍。去重后文件名不变、文件数不变。
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pool = SliderTrajectoryPool(tmpdir)
+            points = _human_points(100, frames=2, steps=7)
+
+            first = pool.save_trajectory(points, "dup_user", 100, True, duration_ms=200)
+            second = pool.save_trajectory(points, "dup_user", 100, True, duration_ms=200)
+
+            assert first == second
+            files = list((Path(tmpdir) / "dup_user").glob("trajectory_*.json"))
+            assert len(files) == 1
+
+    def test_save_trajectory_different_payload_still_written(self):
+        """不同距离（几何不同）不能被去重吞掉。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pool = SliderTrajectoryPool(tmpdir)
+
+            a = pool.save_trajectory(_human_points(100, frames=2, steps=7), "u", 100, True)
+            b = pool.save_trajectory(_human_points(120, frames=2, steps=7), "u", 120, True)
+
+            assert a != b
+            assert len(list((Path(tmpdir) / "u").glob("trajectory_*.json"))) == 2
+
+    def test_dedupe_ignores_dirty_existing_recording(self):
+        """存量同 payload 文件若加载侧判脏，不能顶替新录制（否则新录制被
+        "去重"成永远加载不出来的废条目）。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pool = SliderTrajectoryPool(tmpdir)
+            points = _human_points(100, frames=2, steps=7)
+            first = pool.save_trajectory(points, "dirty_user", 100, True)
+
+            # 手动把已存文件改成 load 侧判脏的形状（非单调折返），但保留相同 payload 数值
+            path = Path(tmpdir) / "dirty_user" / first
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["points"] = [[0.0, 0.0, 0.0], [50.0, 0.0, 100.0], [10.0, 0.0, 300.0]]
+            path.write_text(json.dumps(data), encoding="utf-8")
+
+            restored = pool.save_trajectory(points, "dirty_user", 100, True)
+            assert restored != first
+            assert (Path(tmpdir) / "dirty_user" / restored).exists()
+
     def test_save_trajectory_creates_cookie_dir(self):
         """测试自动创建 cookie 子目录"""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -117,11 +163,11 @@ class TestSliderTrajectoryPool:
             pool = SliderTrajectoryPool(tmpdir)
             pool.max_per_cookie = 3  # 设置小的上限便于测试
 
-            points = _human_points(100)
-
-            # 保存 5 条轨迹
+            # 5 条**几何不同**的录制：同 payload 会被幂等去重合并（见
+            # test_save_trajectory_same_payload_is_idempotent），而这里要测的是
+            # 淘汰序本身。
             for i in range(5):
-                pool.save_trajectory(points, "test", 100, True)
+                pool.save_trajectory(_human_points(100 + i), "test", 100 + i, True)
                 time.sleep(0.01)  # 确保文件创建时间不同
 
             # 应该始终保留 max_per_cookie 条最新轨迹
@@ -137,8 +183,9 @@ class TestSliderTrajectoryPool:
 
             points = _human_points(100)
             filenames = []
-            for _ in range(5):
-                filenames.append(pool.save_trajectory(points, "test", 100, True))
+            for i in range(5):
+                # 每次几何不同（同 payload 会被去重，见上一条测试）
+                filenames.append(pool.save_trajectory(_human_points(100 + i), "test", 100 + i, True))
 
             cookie_dir = Path(tmpdir) / "test"
             files = sorted(p.name for p in cookie_dir.glob("trajectory_*.json"))
@@ -294,10 +341,10 @@ class TestSliderTrajectoryPool:
         with tempfile.TemporaryDirectory() as tmpdir:
             pool = SliderTrajectoryPool(tmpdir)
 
-            # 保存 2 成功 1 失败
+            # 保存 2 成功 1 失败（距离各不相同：同 payload 会被幂等去重）
             pool.save_trajectory(_human_points(100), "test", 100, True, duration_ms=200)
-            pool.save_trajectory(_human_points(100), "test", 100, False, duration_ms=300)
-            pool.save_trajectory(_human_points(100), "test", 100, True, duration_ms=400)
+            pool.save_trajectory(_human_points(104), "test", 104, False, duration_ms=300)
+            pool.save_trajectory(_human_points(108), "test", 108, True, duration_ms=400)
 
             stats = pool.get_pool_stats("test")
 
@@ -325,9 +372,9 @@ class TestSliderTrajectoryPool:
             pool = SliderTrajectoryPool(tmpdir)
             pool.min_pool_size = 3
 
-            # 保存 3 条
+            # 保存 3 条（距离各不相同：同 payload 会被幂等去重）
             for i in range(3):
-                pool.save_trajectory(_human_points(100), "test", 100, True)
+                pool.save_trajectory(_human_points(100 + i), "test", 100 + i, True)
 
             stats = pool.get_pool_stats("test")
 

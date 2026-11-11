@@ -216,6 +216,30 @@ class SliderTrajectoryPool:
             )
             return None
         cdir = self._cookie_dir(cookie_id)
+        new_points = [[round(x, 2), round(y, 2), round(t, 1)] for x, y, t in rows]
+        new_distance = round(float(distance or 0), 1)
+        # 幂等去重：同一份 payload 反复落盘只会挤占池位，并让这条几何被抽中的
+        # 概率翻倍（线上 2026-10-12..14 实证：50 个文件里 20 对完全相同的录制，
+        # 同秒双写）。命中时复用已存在的文件名，调用方无感。
+        # 只在存量文件本身健康时复用——脏文件不能顶替一条新录制，否则新录制被
+        # "去重"成永远加载不出来的废条目。
+        for fp in _sorted_trajectories(cdir):
+            try:
+                with open(fp, encoding="utf-8") as f:
+                    existing = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if (
+                existing.get("points") == new_points
+                and existing.get("distance") == new_distance
+            ):
+                existing["_file"] = str(fp)
+                if _dirty_geometry(existing):
+                    continue
+                logger.debug(
+                    f"[TrajectoryPool] duplicate recording for {cookie_id} — reuse {fp.name}"
+                )
+                return fp.name
         self._evict_overflow(cdir)
 
         remaining = _sorted_trajectories(cdir)
@@ -236,7 +260,7 @@ class SliderTrajectoryPool:
             "source": str(source or "auto"),
             "duration_ms": round(float(duration_ms), 1),
             "duration_kind": "motion",
-            "points": [[round(x, 2), round(y, 2), round(t, 1)] for x, y, t in rows],
+            "points": new_points,
         }
         stub = fname[: -len(".json")]
         for attempt in range(3):

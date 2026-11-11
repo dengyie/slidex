@@ -583,7 +583,9 @@ class TestSaveTrajectoryAtomicCreate:
             return real_open(path, mode, *a, **kw)
 
         with mock.patch("builtins.open", racing_open):
-            second = pool.save_trajectory(_human_points(10.0), "same_user", 10, True)
+            # 几何必须与第一条不同：同 payload 现在走幂等去重、不会进入选号，
+            # 这条测试测的是"选号之后被抢写"，不是去重。
+            second = pool.save_trajectory(_human_points(20.0), "same_user", 20, True)
 
         assert second is not None
         assert second != "trajectory_002.json"
