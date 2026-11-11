@@ -95,10 +95,13 @@ class TestProfileScopedChromiumCleanup:
 
 
 class TestTrajectoryPoolDegradation:
-    def test_load_best_trajectory_survives_last_used_write_failure(self, tmp_path, monkeypatch):
+    def test_load_unused_human_survives_last_used_write_failure(self, tmp_path, monkeypatch):
+        """last_used 写失败（目录不可写）不得打断选轨——降级契约从已删除的
+        load_best_trajectory 迁移到生产唯一加载入口 load_unused_human。"""
         pool = SliderTrajectoryPool(base_dir=str(tmp_path))
         pool.save_trajectory(
-            _human_points(120.0), "u1", 120.0, True, "https://example.test"
+            _human_points(120.0), "u1", 120.0, True, "https://example.test",
+            source="human_cdp",
         )
         blocked = tmp_path / "blocked"
         blocked.mkdir()
@@ -106,7 +109,7 @@ class TestTrajectoryPoolDegradation:
             SliderTrajectoryPool, "_last_used_path", lambda self, cid: blocked
         )
 
-        best = pool.load_best_trajectory("u1", 120.0)
+        best = pool.load_unused_human("u1", 120.0)
 
         assert best is not None
         assert best["distance"] == pytest.approx(120.0)
@@ -518,7 +521,8 @@ class TestPoolConfigSurface:
         monkeypatch.setenv("SLIDEX_TRAJ_POOL_ENABLED", "0")
         monkeypatch.setenv("SLIDEX_TRAJ_POOL_MAX", "12")
         monkeypatch.setenv("SLIDEX_TRAJ_POOL_MIN", "7")
-        monkeypatch.setenv("SLIDEX_TRAJ_POOL_STRATEGY", "Random")
+        # "random" 随 load_random_trajectory 一起废除；合法值 lru/index（0.11.8）
+        monkeypatch.setenv("SLIDEX_TRAJ_POOL_STRATEGY", "Index")
         monkeypatch.setenv("SLIDEX_TRAJ_POOL_RECORDED_ONLY", "1")
 
         cfg = SlidexConfig.from_env()
@@ -529,7 +533,7 @@ class TestPoolConfigSurface:
         assert pool.serve_pooled() is False
         assert pool.max_per_cookie == 12
         assert pool.min_pool_size == 7
-        assert pool.rotation_strategy == "random"
+        assert pool.rotation_strategy == "index"
         assert pool.recorded_only_mode is True
 
     def test_zero_max_falls_back_to_default(self, monkeypatch, tmp_path):

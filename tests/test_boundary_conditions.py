@@ -27,12 +27,8 @@ class TestBoundaryConditions:
         with tempfile.TemporaryDirectory() as tmpdir:
             pool = SliderTrajectoryPool(tmpdir)
 
-            # 空池应该返回 None
-            result = pool.get_random_trajectory()
-            assert result is None
-
-            # load_random_trajectory 也应该返回 None
-            result = pool.load_random_trajectory("test_user")
+            # 空池应该返回 None（生产唯一加载入口）
+            result = pool.load_unused_human("test_user", 100.0)
             assert result is None
 
     def test_trajectory_pool_with_empty_points(self):
@@ -59,7 +55,7 @@ class TestBoundaryConditions:
                 filename = pool.save_trajectory(invalid_points, "test", 100, True)
                 # 如果成功保存，后续加载应该能处理
                 if filename:
-                    loaded = pool.load_random_trajectory("test")
+                    loaded = pool.load_unused_human("test", 100.0)
                     # 加载可能失败或成功，但不应该崩溃
                     assert loaded is None or isinstance(loaded, dict)
             except (IndexError, ValueError, TypeError):

@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.11.8] - 2026-11-12
+
+评审清理批：删死代码、last_used 对账与原子写、策略校验（评审 P3 全项 + Delete List）。
+
+### Removed（Delete List 全项）
+- **删除四个无生产调用方的加载方法**：`load_best_trajectory`（tolerance 逐级放宽 +
+  failed 回退——0.11.7 起生产选轨唯一入口是 `load_unused_human`）、
+  `load_random_trajectory` / `get_random_trajectory`（注释声称「provider 模式」，
+  全库零调用）、`rotate_trajectory`（LRU 能力已被 `load_unused_human` 的 lru 分支
+  原生实现，且评分公式与实际选轨不一致，留着误导）。`import random` 一并清除。
+  随删 8 个测试用例 + manual 脚本引用；`_drag.py` 注释同步。
+
+### Fixed
+- **`_evict_overflow` 淘汰后对账 `last_used`**：死键不再无界累积（0.11.7 起 LRU
+  每次选轨都读它），并自愈清理历史死键。不变式 = `lu keys ⊆ live`
+  （淘汰在新录制落盘前执行，新文件没有 last_used 键是正确的——它只记被消费过的）。
+- **`last_used.json` 原子落盘**：`_write_last_used` 走同目录 tmp + `os.replace`，
+  消除 O_TRUNC 原地写的半截 JSON 窗口（坏 JSON 会被 `_read_last_used` 当
+  `{}`，等于丢整本账、LRU 从零重排）。
+- **策略值校验**：`SLIDEX_TRAJ_POOL_STRATEGY` 拼错值（如 `lur`）从「静默走 legacy
+  分支」改为 WARNING（带变量名）+ 回落 `lru`，与本库「未知值告警回落」契约对齐。
+  合法值：`lru`（默认）/ `index`（旧编号序）。大小写归一。
+- **`GestureSession.next()` 重试路径去掉重复预探测**：耗尽判定与 `_first_available`
+  的探测输入完全相同，每次重试少扫一遍全池；耗尽时两入口殊途同归地跳过 human。
+
+### Tests
+- 全量 1190 passed / 18 skipped（0.11.7 为 1195 / 18：-9 死方法用例 +5 新用例）。
+  新增：策略校验（未知值告警回落、大小写归一）、淘汰清账（死键 + 历史键自愈）、
+  原子写无 tmp 残留；「last_used 写失败不打断选轨」降级契约从 `load_best_trajectory`
+  迁移到 `load_unused_human`。修正 `tests/manual` 里自 0.11.1 起就被几何闸门拒收
+  却因 `norecursedirs` 不进收集而无人看见的 fixture（步长 80% > 35% 上限）。
+
 ## [0.11.7] - 2026-11-12
 
 `SLIDEX_TRAJ_POOL_STRATEGY=lru` 接线：选轨跨会话按 last_used 轮换（兑现旋钮承诺）。

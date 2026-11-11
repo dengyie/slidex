@@ -6,7 +6,7 @@
 
 测试内容:
     1. Provider 模式基本功能
-    2. 录制轨迹回放 (get_random_trajectory)
+    2. 录制轨迹回放 (load_unused_human)
     3. 文件系统错误降级
     4. 生命周期钩子
     5. 自定义 find_gap 钩子
@@ -161,37 +161,39 @@ async def test_provider_mode():
 # 测试 2: 录制轨迹回放
 # ═══════════════════════════════════════════════════════════════
 def test_trajectory_pool_alias():
-    """测试 2: get_random_trajectory() 别名"""
+    """测试 2: load_unused_human() 池加载"""
     print("\n" + "="*60)
-    print("测试 2: 录制轨迹回放 (get_random_trajectory)")
+    print("测试 2: 录制轨迹回放 (load_unused_human)")
     print("="*60)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         pool = SliderTrajectoryPool(tmpdir)
 
-        # 保存一条测试轨迹 (需要 3 个值: x, y, timestamp)
-        points = [[0, 0, 0], [10, 0, 100], [20, 0, 200], [100, 0, 1000]]
+        # 保存一条测试轨迹 (需要 3 个值: x, y, timestamp)。
+        # 步长必须 ≤ 距离的 35%（0.11.1 写池几何闸门；均匀 5 步 ×20px=20%），
+        # 旧的 4 点 fixture（20→100 一跳 80px）在 0.11.1 起就被拒收，本脚本又
+        # 不进默认收集（norecursedirs=manual），红了好几个版本没人看见。
+        points = [[x * 20, 0, x * 100.0] for x in range(6)]
         filename = pool.save_trajectory(
             points=points,
             cookie_id="default",
             distance=100,
             success=True,
-            verify_url="https://test.com"
+            verify_url="https://test.com",
+            source="human_cdp",
         )
         assert filename is not None, "轨迹保存失败"
         print(f"✓ 轨迹已保存: {filename}")
 
         # 测试新方法
-        traj = pool.get_random_trajectory()
-        assert traj is not None, "get_random_trajectory() 返回 None"
+        traj = pool.load_unused_human("default", 100.0)
+        assert traj is not None, "load_unused_human() 返回 None"
         assert "points" in traj, "轨迹缺少 points 字段"
-        assert len(traj["points"]) == 4, "轨迹点数不正确"
-        print(f"✓ get_random_trajectory() 工作正常: {len(traj['points'])} 个点")
+        assert len(traj["points"]) == 6, "轨迹点数不正确"
+        print(f"✓ load_unused_human() 工作正常: {len(traj['points'])} 个点")
 
         # 验证别名和原方法等价
-        traj2 = pool.load_random_trajectory("default")
-        assert traj2 is not None, "load_random_trajectory() 失败"
-        print("✓ get_random_trajectory() 和 load_random_trajectory() 等价")
+        print("✓ load_unused_human() 走 peek 之外的消费路径正常")
 
     print("\n✅ 测试 2 通过: 录制轨迹回放正常\n")
 
@@ -214,9 +216,9 @@ def test_filesystem_error_graceful_degradation():
         print(f"✓ Pool 创建成功 (即使路径无效): {pool.base_dir}")
 
         # 尝试获取轨迹 (应该返回 None，不崩溃)
-        traj = pool.get_random_trajectory()
+        traj = pool.load_unused_human("default", 300.0)
         assert traj is None, "应该返回 None (没有轨迹)"
-        print("✓ get_random_trajectory() 返回 None (优雅降级)")
+        print("✓ load_unused_human() 返回 None (优雅降级)")
 
         # 尝试保存轨迹 (应该静默失败)
         points = [[0, 0, 0], [10, 0, 100]]  # 正确格式

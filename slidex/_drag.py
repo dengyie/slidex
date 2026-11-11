@@ -140,7 +140,7 @@ async def dispatch_drag_timeline(session: Any, timeline: List[Tuple[float, Dict[
 # ═══ 人类拖动轨迹学习 ═══
 # 用户在 CDP 标签页里手动拖动时录制其真实动作（press-hold 时序、速度曲线、
 # 过冲回拖全是原生的），成功后入轨迹池；此后自动拖动优先回放人类轨迹
-# （load_best_trajectory 优先 success 记录 + 按距离缩放 + 0.6.25 流水线平滑回放）。
+# （GestureSession 经 load_unused_human 按距离+lru 选轨，0.6.25 起流水线平滑回放）。
 
 DRAG_RECORDER_JS = r"""
 (() => {

@@ -277,11 +277,11 @@ class GestureSession:
             return plan
 
         if last_code is not None and last_code != _PACKET_MISS:
-            # 合成家族 consume 后永不回绕；human 只排除已用文件，池中还有未用条则继续 human。
+            # 合成家族 consume 后永不回绕。human 不在这里预判耗尽：_first_available
+            # 会以完全相同的输入（_used_human_files 未变）再探测一次，这里提前判
+            # 等于每次重试多扫一遍全池；耗尽时两个入口殊途同归地跳过 human。
             if self._current_archetype and self._current_archetype != ARCHETYPE_HUMAN:
                 self._used_archetypes.add(self._current_archetype)
-            elif self._current_archetype == ARCHETYPE_HUMAN and self._peek_human(dist) is None:
-                self._used_archetypes.add(ARCHETYPE_HUMAN)
             self._current_plan = None
             self._current_archetype = None
             self._current_human_rec = None

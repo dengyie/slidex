@@ -8,7 +8,8 @@
 后果有二：
 
 * 日志说谎：一条求解被记成两次「loaded」，排障时无法区分探测与消费；
-* 只读探测推进 LRU 时钟：``last_used`` 是 ``rotate_trajectory`` 的打分输入，
+* 只读探测推进 LRU 时钟：``last_used`` 是 0.11.7 起 ``load_unused_human``
+  选轨与轮换的输入，
   只读审计跑一遍就刷新两个文件的 last_used（2026-11-11 22:41 的线上审计
   实际改写了生产池的记账）。
 
@@ -103,17 +104,6 @@ def test_peek_logs_debug_only_consume_logs_info():
         assert "loaded dist=260px file=%s" % files[1] in info
     finally:
         logger.remove(handler)
-
-
-def test_load_best_trajectory_peek_does_not_touch():
-    tmp, pool, files = _pool_with_human()
-    with tmp:
-        lu = Path(tmp.name) / "u" / "last_used.json"
-        rec = pool.load_best_trajectory("u", 258.0, distance_tolerance=0.25, peek=True)
-        assert rec is not None
-        assert not lu.exists(), "load_best_trajectory(peek=True) 不得写 last_used.json"
-        pool.load_best_trajectory("u", 258.0, distance_tolerance=0.25)
-        assert lu.exists()
 
 
 def test_selection_identical_with_or_without_peek():

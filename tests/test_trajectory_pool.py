@@ -2,16 +2,15 @@
 测试轨迹池完整功能
 
 覆盖:
-1. save_trajectory() - 保存轨迹，超出上限淘汰
-2. load_best_trajectory() - 按距离匹配，tolerance 回退
-3. load_random_trajectory() - 随机选取
-4. get_random_trajectory() - provider 模式别名
-5. rotate_trajectory() - LRU 轮转
-6. get_pool_stats() - 统计信息
-7. clean_stale() - 清理过期轨迹
-8. 并发读写（多进程安全）
-9. 损坏文件处理
-10. 池满时清理
+1. save_trajectory() - 保存轨迹，幂等去重，超出上限淘汰
+2. get_pool_stats() - 统计信息
+3. clean_stale() - 清理过期轨迹
+4. 并发读写（多进程安全）
+5. 损坏文件处理
+6. cookie_id 净化 / 边界
+加载语义（peek / LRU / 淘汰对账）见 tests/test_trajectory_pool_lru.py 与
+tests/test_trajectory_pool_peek.py ——生产唯一加载入口是 load_unused_human
+（load_best/load_random/get_random/rotate 四个死方法已随 0.11.8 删除）。
 """
 
 import pytest
@@ -167,7 +166,8 @@ class TestSliderTrajectoryPool:
             # test_save_trajectory_same_payload_is_idempotent），而这里要测的是
             # 淘汰序本身。
             for i in range(5):
-                pool.save_trajectory(_human_points(100 + i), "test", 100 + i, True)
+                pool.save_trajectory(_human_points(100 + i), "test", 100 + i, True,
+                                     source="human_cdp")
                 time.sleep(0.01)  # 确保文件创建时间不同
 
             # 应该始终保留 max_per_cookie 条最新轨迹
@@ -185,7 +185,8 @@ class TestSliderTrajectoryPool:
             filenames = []
             for i in range(5):
                 # 每次几何不同（同 payload 会被去重，见上一条测试）
-                filenames.append(pool.save_trajectory(_human_points(100 + i), "test", 100 + i, True))
+                filenames.append(pool.save_trajectory(_human_points(100 + i), "test", 100 + i, True,
+                                     source="human_cdp"))
 
             cookie_dir = Path(tmpdir) / "test"
             files = sorted(p.name for p in cookie_dir.glob("trajectory_*.json"))
@@ -218,120 +219,6 @@ class TestSliderTrajectoryPool:
             assert "trajectory_998.json" not in files      # 最旧编号被淘汰
             assert {"trajectory_999.json", "trajectory_1000.json"} <= files
             assert name == "trajectory_1001.json"          # 不复用 1000
-
-    def test_load_best_trajectory_exact_match(self):
-        """测试精确距离匹配"""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            pool = SliderTrajectoryPool(tmpdir)
-
-            # 保存 3 条不同距离的轨迹
-            pool.save_trajectory(_human_points(50), "test", 50, True)
-            pool.save_trajectory(_human_points(100), "test", 100, True)
-            pool.save_trajectory(_human_points(150), "test", 150, True)
-
-            # 请求 100px 的轨迹
-            traj = pool.load_best_trajectory("test", target_distance=100)
-
-            assert traj is not None
-            assert traj["distance"] == 100
-
-    def test_load_best_trajectory_tolerance_fallback(self):
-        """测试 tolerance 回退机制"""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            pool = SliderTrajectoryPool(tmpdir)
-
-            # 只保存 50px 的轨迹
-            pool.save_trajectory(_human_points(50), "test", 50, True)
-
-            # 请求 70px（在 40% tolerance 内应该匹配）
-            traj = pool.load_best_trajectory("test", target_distance=70)
-
-            # 应该找到 50px 的轨迹
-            assert traj is not None
-            assert traj["distance"] == 50
-
-    def test_load_best_trajectory_prefers_successful(self):
-        """测试优先选择成功的轨迹"""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            pool = SliderTrajectoryPool(tmpdir)
-
-            # 保存失败和成功的轨迹
-            pool.save_trajectory(_human_points(100), "test", 100, False)  # 失败
-            pool.save_trajectory(_human_points(105), "test", 105, True)   # 成功
-
-            # 应该优先返回成功的
-            traj = pool.load_best_trajectory("test", target_distance=100)
-
-            assert traj is not None
-            assert traj["success"] is True
-            assert traj["distance"] == 105
-
-    def test_load_best_trajectory_no_match_returns_none(self):
-        """测试无匹配时返回 None"""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            pool = SliderTrajectoryPool(tmpdir)
-
-            # 空池
-            traj = pool.load_best_trajectory("test", target_distance=100)
-
-            assert traj is None
-
-    def test_load_random_trajectory(self):
-        """测试随机选取"""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            pool = SliderTrajectoryPool(tmpdir)
-
-            # 保存 3 条轨迹
-            pool.save_trajectory(_human_points(50), "test", 50, True)
-            pool.save_trajectory(_human_points(100), "test", 100, True)
-            pool.save_trajectory(_human_points(150), "test", 150, True)
-
-            # 随机选取
-            traj = pool.load_random_trajectory("test")
-
-            assert traj is not None
-            assert traj["distance"] in [50, 100, 150]
-
-    def test_load_random_trajectory_empty_pool(self):
-        """测试空池随机选取"""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            pool = SliderTrajectoryPool(tmpdir)
-
-            traj = pool.load_random_trajectory("test")
-
-            assert traj is None
-
-    def test_get_random_trajectory_uses_default_cookie(self):
-        """测试 get_random_trajectory 使用 default cookie"""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            pool = SliderTrajectoryPool(tmpdir)
-
-            # 保存到 default cookie
-            pool.save_trajectory(_human_points(100), "default", 100, True)
-
-            # get_random_trajectory 应该能找到
-            traj = pool.get_random_trajectory()
-
-            assert traj is not None
-            assert traj["cookie_id"] == "default"
-
-    def test_rotate_trajectory_lru(self):
-        """测试 LRU 轮转"""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            pool = SliderTrajectoryPool(tmpdir)
-
-            # 保存 3 条轨迹
-            pool.save_trajectory(_human_points(100), "test", 100, True)
-            pool.save_trajectory(_human_points(105), "test", 105, True)
-            pool.save_trajectory(_human_points(110), "test", 110, True)
-
-            # 首次轮转，应该选最久未用的（都未用过）
-            traj1 = pool.rotate_trajectory("test", target_distance=100)
-            assert traj1 is not None
-
-            # 再次轮转，应该选另一个未用的
-            traj2 = pool.rotate_trajectory("test", target_distance=100)
-            assert traj2 is not None
 
             # 两次应该返回不同的轨迹（LRU）
             # (可能相同，但概率很低)
@@ -374,7 +261,8 @@ class TestSliderTrajectoryPool:
 
             # 保存 3 条（距离各不相同：同 payload 会被幂等去重）
             for i in range(3):
-                pool.save_trajectory(_human_points(100 + i), "test", 100 + i, True)
+                pool.save_trajectory(_human_points(100 + i), "test", 100 + i, True,
+                                     source="human_cdp")
 
             stats = pool.get_pool_stats("test")
 
@@ -448,10 +336,11 @@ class TestSliderTrajectoryPool:
                 f.write("not valid json {{{")
 
             # 保存一个正常的轨迹
-            pool.save_trajectory(_human_points(100), "test", 100, True)
+            pool.save_trajectory(_human_points(100), "test", 100, True,
+                                 source="human_cdp")
 
             # 应该能够加载（跳过损坏的文件）
-            traj = pool.load_random_trajectory("test")
+            traj = pool.load_unused_human("test", 100.0)
 
             assert traj is not None
             assert traj["distance"] == 100
@@ -476,10 +365,11 @@ class TestSliderTrajectoryPool:
 
             # 快速保存多条
             for i in range(10):
-                pool.save_trajectory(_human_points(100 + i), "test", 100 + i, True)
+                pool.save_trajectory(_human_points(100 + i), "test", 100 + i, True,
+                                     source="human_cdp")
 
             # 加载应该成功
-            traj = pool.load_random_trajectory("test")
+            traj = pool.load_unused_human("test", 100.0)
             assert traj is not None
 
     def test_cookie_id_with_special_chars(self):
@@ -492,13 +382,14 @@ class TestSliderTrajectoryPool:
                 _human_points(100),
                 "test_user-123",
                 100,
-                True
+                True,
+                source="human_cdp",
             )
 
             assert filename is not None
 
             # 应该能加载
-            traj = pool.load_random_trajectory("test_user-123")
+            traj = pool.load_unused_human("test_user-123", 100.0)
             assert traj is not None
 
     def test_cookie_id_path_traversal_is_sanitized(self):
@@ -528,5 +419,5 @@ class TestSliderTrajectoryPool:
             assert filename is None
 
             # 池里不应出现空录制
-            traj = pool.load_random_trajectory("test")
+            traj = pool.load_unused_human("test", 100.0)
             assert traj is None

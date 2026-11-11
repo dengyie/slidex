@@ -6,7 +6,6 @@ import hashlib
 import json
 import math
 import os
-import random
 import re
 import time
 from datetime import datetime, timedelta
@@ -139,7 +138,17 @@ class SliderTrajectoryPool:
         self.min_pool_size = _int("trajectory_pool_min_pool_size", self.min_pool_size, 0)
         strategy = getattr(config, "trajectory_pool_rotation_strategy", None)
         if isinstance(strategy, str) and strategy.strip():
-            self.rotation_strategy = strategy.strip().lower()
+            cleaned = strategy.strip().lower()
+            # 0.11.7 起 strategy 是承重旋钮（驱动 load_unused_human 的排序分支），
+            # 拼错值静默走 legacy 分支会让「以为在轮换、实际重复回放」无日志可查
+            # ——与本库「未知值告警回落」契约对齐。
+            if cleaned in ("lru", "index"):
+                self.rotation_strategy = cleaned
+            else:
+                logger.warning(
+                    f"[TrajectoryPool] SLIDEX_TRAJ_POOL_STRATEGY={strategy!r} "
+                    f"不是合法策略（用 lru/index），回落默认值 lru"
+                )
         mode = getattr(config, "trajectory_pool_recorded_only_mode", None)
         if mode is not None:
             self.recorded_only_mode = bool(mode)
@@ -294,11 +303,22 @@ class SliderTrajectoryPool:
         if len(existing) < self.max_per_cookie:
             return
         victims = existing[: len(existing) - self.max_per_cookie + 1]
+        removed = False
         for old in _eviction_order(victims):
             try:
                 os.remove(str(old))
+                removed = True
             except Exception:
                 pass
+        if removed:
+            # 淘汰同步对账 last_used：死键不清会无界累积（0.11.7 起 LRU 每次选轨
+            # 都要读它），排障时也是假账。顺带清掉历史遗留的死键（自愈）。
+            # cookie id 就是 cdir.name——_cookie_dir 的最后一段即 sanitize 后的 id。
+            lu = self._read_last_used(cdir.name)
+            live = {fp.name for fp in _sorted_trajectories(cdir)}
+            cleaned = {k: v for k, v in lu.items() if k in live}
+            if cleaned != lu:
+                self._write_last_used(cdir.name, cleaned)
 
     # ── 加载 ──────────────────────────────────────────────────
     def _load_all(self, cookie_id: str) -> List[dict]:
@@ -340,9 +360,14 @@ class SliderTrajectoryPool:
     ) -> Optional[dict]:
         """Next unused human recording within ``tolerance`` of ``target_distance``.
 
-        Unlike ``load_best_trajectory`` this never widens past the given
-        tolerance, never falls back to failed/auto traces, and skips files
-        already consumed by the current ``GestureSession``.
+        匹配语义：``tolerance`` 固定不放宽（0.15/0.25/0.40 那套逐级放宽属已删除的
+        ``load_best_trajectory``）、绝不回退 failed/auto traces（``source`` 必须以
+        ``human`` 开头）、跳过当前 ``GestureSession`` 已消费的文件。
+
+        策略为 ``lru``（默认）时，同距离候选按 ``(距离差, last_used 升序, 编号)``
+        取**最久未用**——跨会话轮换，避免同一条录制被反复重放（0.11.7 接线，
+        之前 ``rotation_strategy`` 只是摆设）；其余策略（``index``）保持
+        「同距离取最旧编号」的旧行为。距离差永远是第一排序键。
 
         ``peek=True`` 表示「只问有没有，不消费」：降为 DEBUG 日志、不写
         last_used。GestureSession 选型前的可用性探测和只读审计都必须走这条路
@@ -405,63 +430,8 @@ class SliderTrajectoryPool:
         self._touch_last_used(cookie_id, best["_file"])
         return best
 
-    def load_best_trajectory(self, cookie_id: str, target_distance: float,
-                             distance_tolerance: float = 0.10,
-                             *, peek: bool = False) -> Optional[dict]:
-        """按距离匹配最佳轨迹（优先成功过的），支持回退放宽 tolerance。
 
-        ``peek=True``：只读探测（审计等），DEBUG 日志且不写 last_used，
-        语义与 :meth:`load_unused_human` 的 peek 一致。
-        """
-        records = [r for r in self._load_all(cookie_id) if r.get("success")]
-        if not records:
-            records = self._load_all(cookie_id)
-        if not records:
-            return None
-
-        def _best(tol):
-            best, best_diff = None, float("inf")
-            for r in records:
-                d = abs(r["distance"] - target_distance)
-                ratio = d / max(target_distance, 1.0)
-                if ratio <= tol and d < best_diff:
-                    best, best_diff = r, d
-            return best
-
-        for tol in (distance_tolerance, 0.15, 0.25, 0.40):
-            best = _best(tol)
-            if best:
-                if peek:
-                    logger.debug(
-                        f"[TrajectoryPool] best match peek for dist={target_distance:.0f}: "
-                        f"file={os.path.basename(best.get('_file', ''))} (tol={tol})"
-                    )
-                else:
-                    logger.info(f"[TrajectoryPool] best match for dist={target_distance:.0f}: "
-                                f"loaded dist={best['distance']:.0f}px (tol={tol})")
-                    self._touch_last_used(cookie_id, best["_file"])
-                return best
-        return None
-
-    def load_random_trajectory(self, cookie_id: str) -> Optional[dict]:
-        """随机选取（防重放检测）"""
-        records = self._load_all(cookie_id)
-        if not records:
-            return None
-        r = random.choice(records)
-        self._touch_last_used(cookie_id, r["_file"])
-        return r
-
-    def get_random_trajectory(self) -> Optional[dict]:
-        """
-        获取随机轨迹（用于 provider 模式）
-
-        这是 load_random_trajectory() 的便捷别名，使用 "default" 作为 cookie_id。
-        Provider 模式下不需要区分不同用户的轨迹池。
-        """
-        return self.load_random_trajectory("default")
-
-    # ── 轮转 ──────────────────────────────────────────────────
+    # ── last_used 记账 ──────────────────────────────────────────
     def _last_used_path(self, cookie_id: str) -> Path:
         return self._cookie_dir(cookie_id) / "last_used.json"
 
@@ -475,36 +445,30 @@ class SliderTrajectoryPool:
                 pass
         return {}
 
+    def _write_last_used(self, cookie_id: str, lu: Dict[str, float]) -> None:
+        """last_used.json 原子落盘：同目录 tmp + ``os.replace``。
+
+        直接 ``open(p, "w")`` 是 O_TRUNC 原地写，写一半被并发读走/进程被杀会留下
+        半截 JSON——``_read_last_used`` 虽容忍坏 JSON 回 ``{}``，但那等于丢整本账，
+        LRU 轮换从零重排。tmp 文件名 ``last_used.json.tmp`` 不匹配
+        ``trajectory_*.json`` glob，不会混进录制列表。
+        """
+        p = self._last_used_path(cookie_id)
+        tmp = p.with_name(p.name + ".tmp")
+        try:
+            with open(tmp, "w") as f:
+                json.dump(lu, f)
+            os.replace(tmp, p)
+        except (OSError, IOError, PermissionError) as e:
+            logger.debug(f"[TrajectoryPool] cannot update last_used: {e}")
+
     def _touch_last_used(self, cookie_id: str, filepath: str):
         try:
             lu = self._read_last_used(cookie_id)
             lu[os.path.basename(filepath)] = time.time()
-            with open(self._last_used_path(cookie_id), "w") as f:
-                json.dump(lu, f)
+            self._write_last_used(cookie_id, lu)
         except (OSError, IOError, PermissionError) as e:
             logger.debug(f"[TrajectoryPool] cannot update last_used: {e}")
-
-    def rotate_trajectory(self, cookie_id: str, target_distance: float) -> Optional[dict]:
-        """LRU 轮转：选最久未用 + 距离匹配"""
-        records = [r for r in self._load_all(cookie_id) if r.get("success")]
-        if not records:
-            return self.load_best_trajectory(cookie_id, target_distance)
-
-        lu = self._read_last_used(cookie_id)
-        scored = []
-        for r in records:
-            fname = os.path.basename(r["_file"])
-            age = time.time() - lu.get(fname, 0)
-            dist_err = abs(r["distance"] - target_distance) / max(target_distance, 1.0)
-            score = age * 0.6 - dist_err * 0.4
-            scored.append((score, r))
-
-        scored.sort(key=lambda x: x[0], reverse=True)
-        if scored:
-            best = scored[0][1]
-            self._touch_last_used(cookie_id, best["_file"])
-            return best
-        return None
 
     # ── 统计 ──────────────────────────────────────────────────
     def get_pool_stats(self, cookie_id: str) -> dict:

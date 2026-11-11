@@ -18,6 +18,9 @@ class SlidexConfig:
     trajectory_pool_max_per_cookie: int = 50
     trajectory_pool_min_pool_size: int = 5
     trajectory_pool_rotation_strategy: str = "lru"
+    # 只录不放：True 时池继续收录录制，但 GestureSession 跳过 human 回放
+    # （0.11.0 起，compose 注释同义）。命名易误读为「只用录制轨迹」——那是
+    # solver 的 trajectory_mode="recorded"。
     trajectory_pool_recorded_only_mode: bool = False
     trajectory_pool_base_dir: Optional[str] = None
 

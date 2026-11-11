@@ -87,3 +87,78 @@ def test_default_pool_strategy_is_lru():
     """旋钮默认值就是 lru：0.11.6 之前它从未被消费，这里钉住接线后的行为来源。"""
     with tempfile.TemporaryDirectory() as tmp:
         assert SliderTrajectoryPool(tmp).rotation_strategy == "lru"
+
+
+# ── 0.11.8：策略校验 / 淘汰对账 / 原子写 ──
+
+def test_apply_config_rejects_unknown_strategy():
+    """拼错的策略值必须告警并回落 lru——0.11.7 起 strategy 是承重旋钮，
+    静默走 legacy 分支会让「以为在轮换、实际重复回放」无日志可查。"""
+    from types import SimpleNamespace
+    from loguru import logger
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pool = SliderTrajectoryPool(tmp)
+        cap = []
+        h = logger.add(lambda m: cap.append(m), level="WARNING")
+        try:
+            pool.apply_config(SimpleNamespace(
+                trajectory_pool_rotation_strategy="lur",
+                trajectory_pool_max_per_cookie=50,
+                trajectory_pool_min_pool_size=5,
+                trajectory_pool_recorded_only_mode=False,
+                trajectory_pool_enabled=True,
+            ))
+        finally:
+            logger.remove(h)
+        assert pool.rotation_strategy == "lru"
+        text = "".join(str(m) for m in cap)
+        assert "SLIDEX_TRAJ_POOL_STRATEGY" in text and "lur" in text, text
+
+
+def test_apply_config_normalizes_case():
+    from types import SimpleNamespace
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pool = SliderTrajectoryPool(tmp)
+        pool.apply_config(SimpleNamespace(trajectory_pool_rotation_strategy="  LRU "))
+        assert pool.rotation_strategy == "lru"
+
+
+def test_eviction_prunes_dead_last_used_keys():
+    """淘汰后 last_used 不得残留指向已删文件的死键（含历史死键自愈）。
+
+    注意淘汰时机：``_evict_overflow`` 在新录制落盘**之前**执行（幸存者 =
+    max-1 条旧文件 + 新文件），所以新文件没有 last_used 键是正确的——
+    last_used 只记「被消费过」的。不变式是 ``lu keys ⊆ live``。
+    """
+    tmp, pool, files = _pool([(258, i) for i in range(4)])
+    with tmp:
+        pool.max_per_cookie = 2
+        # 逐条消费制造 last_used 账目
+        for _ in range(4):
+            pool.load_unused_human("u", 258.0)
+        lu_path = Path(tmp.name) / "u" / "last_used.json"
+        assert set(json.loads(lu_path.read_text())) == set(files)
+        # 注入历史死键（指向不存在的 trajectory_999.json）
+        lu = json.loads(lu_path.read_text())
+        lu["trajectory_999.json"] = 1.0
+        lu_path.write_text(json.dumps(lu))
+        # 池满触发淘汰（新录制用不同 dy，避开幂等去重）
+        pool.save_trajectory(_human_points(258, dy=99), "u", 258, True,
+                             source="human_cdp")
+        live = {p.name for p in Path(tmp.name, "u").glob("trajectory_*.json")}
+        lu_after = json.loads(lu_path.read_text())
+        assert not (set(lu_after) - live), (sorted(lu_after), sorted(live))
+        assert "trajectory_999.json" not in lu_after
+        assert lu_after  # 至少还有幸存者的账
+
+
+def test_touch_leaves_no_tmp_file():
+    """原子写不留 .tmp 残骸（半截 JSON 等于丢整本账）。"""
+    tmp, pool, files = _pool([(258, 0)])
+    with tmp:
+        pool.load_unused_human("u", 258.0)
+        leftovers = list(Path(tmp.name, "u").glob("*.tmp"))
+        assert leftovers == []
+        assert Path(tmp.name, "u", "last_used.json").exists()
