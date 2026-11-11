@@ -13,6 +13,7 @@ Every test here maps to a reproduced failure from the production review:
 
 import json
 import math
+import os
 
 import pytest
 from loguru import logger
@@ -83,7 +84,7 @@ class TestPoolLoadIsolation:
             ' "success": true, "recorded_at": "2026-11-02T00:00:00"}'
         )
         records = pool._load_all("u")
-        assert [r["_file"].rsplit("/", 1)[-1] for r in records] == ["trajectory_001.json"]
+        assert [os.path.basename(r["_file"]) for r in records] == ["trajectory_001.json"]
 
     def test_malformed_points_on_save_returns_none(self, tmp_path):
         pool = self._pool(tmp_path)

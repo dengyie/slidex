@@ -320,8 +320,62 @@ def test_manual_capability_sync_completer_supported():
     assert result.data["metadata"]["text"] == "ok"
 
 
-def test_two_provider_failover_auto_failure_routes_to_manual():
-    """The governance gate proof: auto solver fails -> manual fallback wins."""
+def test_two_provider_failover_image_context_manual_skipped():
+    """Cancellation-consistent failover (kit governance, 2026-11): the image
+    context profile promises ``cancellation="unsupported"`` — the runtime
+    never sets up a wait_for, so failover to the blocking-cooperative manual
+    capability would hang unbounded. The executor must skip it and return
+    the auto provider's business failure untouched (kit-side contract is
+    pinned by automation-kit test_provider_governance.py)."""
+    pytest.importorskip("automation_core")
+    from automation_core import capabilities
+    from automation_core.capabilities import (
+        CapabilityExecutor,
+        CapabilityRegistry,
+        CapabilityResolver,
+    )
+    from slidex.integrations.automation_kit import (
+        SlidexManualCapability,
+        SlidexVisualCapability,
+    )
+
+    class FailingSolver:
+        async def solve(self, request):
+            return VisualChallengeResult(
+                success=False,
+                challenge_type=request.challenge_type,
+                provider="fake-ocr",
+                error_code="slider_not_solved",
+                retryable=False,
+            )
+
+    registry = CapabilityRegistry()
+    registry.register(SlidexVisualCapability(visual_solver=FailingSolver()), name="slidex")
+    manual = SlidexManualCapability(completer=lambda session: {"text": "human"})
+    registry.register(manual, name="slidex-manual")
+    executor = CapabilityExecutor(CapabilityResolver(registry))
+
+    result = asyncio.run(
+        executor.execute(
+            _request(
+                capabilities,
+                challenge_type="slider_captcha",
+                context="image_bytes",
+                image_bytes=b"fake-png",
+            ),
+            _context(),
+        )
+    )
+
+    assert result.success is False
+    assert result.provider == "slidex"
+    assert result.error_code == "slider_not_solved"
+    assert manual.completer is not None  # wiring intact; candidate skipped
+
+
+def test_two_provider_failover_page_context_routes_to_manual():
+    """Cooperative context (live page): both candidates share cancellation
+    semantics, so auto failure must still fail over to manual fallback."""
     pytest.importorskip("automation_core")
     from automation_core import capabilities
     from automation_core.capabilities import (
@@ -357,8 +411,8 @@ def test_two_provider_failover_auto_failure_routes_to_manual():
             _request(
                 capabilities,
                 challenge_type="slider_captcha",
-                context="image_bytes",
-                image_bytes=b"fake-png",
+                context="playwright_page",
+                page=object(),
             ),
             _context(),
         )
