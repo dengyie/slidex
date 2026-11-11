@@ -1,4 +1,4 @@
-"""Recorded-trajectory geometry verdict (0.11.0).
+"""Recorded-trajectory geometry verdict (0.11.1).
 
 Thresholds come from a blind pass over the 50 recordings in the online pool for
 1926782908, not from guesswork. The measured spread (peak/distance is the
@@ -250,7 +250,7 @@ class TestPoolGate:
         assert len(pool._load_all("c1")) == 1
 
     def test_existing_dirty_file_is_filtered_on_load(self, tmp_path):
-        # 存量脏录制（0.11.0 前写入、写池时还没有几何校验）必须先被挡住：
+        # 存量脏录制（0.11.1 前写入、写池时还没有几何校验）必须先被挡住：
         # 它一旦被抽中回放，就是一次飞出。
         pool = self._pool(tmp_path)
         self._write(pool, "trajectory_001.json", _human_trace())

@@ -794,7 +794,9 @@
                     document.getElementById("recordingText").style.color = "#28a745";
                     document.getElementById("recordingText").textContent = "🟢 已保存 (" + normPoints.length + " points)";
                 } else {
-                    log("⚠️ 轨迹保存失败: " + (result.message || "unknown"), "warn");
+                    // FastAPI 的错误体是 {"detail": ...}，没有 message 字段；
+                    // 只读 message 会让界面对一切拒收都显示 "unknown"。
+                    log("⚠️ 轨迹保存失败: " + (result.detail || result.message || "unknown"), "warn");
                 }
             } catch (e) {
                 log("❌ 轨迹提交失败: " + e.message, "error");

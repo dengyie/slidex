@@ -15,6 +15,7 @@ from loguru import logger
 from slidex.config import SlidexConfig
 from slidex.remote import captcha_controller
 from slidex._trajectory_pool import SliderTrajectoryPool
+from slidex._slide_geometry import recorded_geometry_verdict
 
 # 与 solver 同源：轨迹池目录跟随 SlidexConfig（含 SLIDEX_TRAJ_POOL_DIR 等环境变量），
 # 避免人工面板提交的轨迹落到与 solver 读取不一致的目录；池上限/轮转策略同样跟随
@@ -286,24 +287,27 @@ async def submit_trajectory(request: TrajectorySubmitRequest, x_captcha_token: O
     session_data = captcha_controller.active_sessions[request.session_id]
     cookie_id = session_data.get('cookie_id') or request.session_id
     try:
-        if not request.points or len(request.points) < 3:
+        if not request.points or len(request.points) < 2:
             raise HTTPException(status_code=400, detail="too few points")
         saved = trajectory_pool.save_trajectory(
             request.points, cookie_id, request.distance, True, request.verify_url or ""
         )
         if not saved:
-            # 0.11.0：坐标轴坏掉的录制在落盘前被几何校验拒收（见
+            # 0.11.1：坐标轴坏掉的录制在落盘前被几何校验拒收（见
             # _slide_geometry.recorded_geometry_verdict）。抛 400 而不是假报
             # saved —— 上报方据此重录，而不是以为池里已经有一条好数据。
-            logger.warning(f"trajectory rejected by geometry check: cookie={cookie_id}")
-            raise HTTPException(status_code=400, detail="rejected by geometry check")
+            # detail 里带原因码：前端/上报方只读 message 时也能看到为什么。
+            reason = recorded_geometry_verdict(request.points, request.distance) or "unknown"
+            logger.warning(f"trajectory rejected by geometry check: cookie={cookie_id} reason={reason}")
+            raise HTTPException(status_code=400, detail=f"rejected by geometry check: {reason}")
         logger.success(f"trajectory saved: cookie={cookie_id} ({saved})")
         return {"success": True, "message": "saved", "cookie_id": cookie_id, "file": saved}
     except HTTPException:
         raise
     except Exception as e:
+        # 不把内部异常文本回给调用方（可能含路径/句柄），只记日志。
         logger.error(f"trajectory save failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="trajectory save failed")
 
 
 @router.delete("/session/{session_id}")

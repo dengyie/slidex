@@ -964,14 +964,22 @@ class SliderSolver(ProviderSolverMixin):
             if not pts:
                 logger.debug(f"[{self.pure_user_id}] human drag recording skipped (not a real drag)")
                 return
-            self._trajectory_pool.save_trajectory(
+            saved = self._trajectory_pool.save_trajectory(
                 pts, self.pure_user_id, distance, True, verify_url, duration, source="human_cdp"
             )
-            logger.info(
-                f"[{self.pure_user_id}] human drag trajectory saved to pool "
-                f"(dist={distance:.0f}px, {len(pts)} pts, normalized motion={duration:.0f}ms) "
-                "— 自动拖动将优先回放真人轨迹"
-            )
+            if saved:
+                logger.info(
+                    f"[{self.pure_user_id}] human drag trajectory saved to pool "
+                    f"(dist={distance:.0f}px, {len(pts)} pts, normalized motion={duration:.0f}ms) "
+                    "— 自动拖动将优先回放真人轨迹"
+                )
+            else:
+                # 闸门拒收（坐标轴坏 / 非有限数）也是正常路径：不打 success，
+                # 否则靠日志判断"录制已入池"会得出相反结论。
+                logger.info(
+                    f"[{self.pure_user_id}] human drag trajectory NOT pooled "
+                    f"(dist={distance:.0f}px, {len(pts)} pts, rejected by geometry gate)"
+                )
         except Exception as e:
             logger.debug(f"[{self.pure_user_id}] human drag export failed: {e}")
 
@@ -1179,11 +1187,17 @@ class SliderSolver(ProviderSolverMixin):
                         try:
                             recording = captcha_controller.finish_recording(session_id)
                             if recording and recording.get("points"):
-                                self._trajectory_pool.save_trajectory(
+                                saved = self._trajectory_pool.save_trajectory(
                                     recording["points"], self.pure_user_id,
                                     recording.get("distance", 0), True, verify_url,
                                     recording.get("duration_ms", 0))
-                                logger.info(f"[{self.pure_user_id}] trajectory recorded from remote solve")
+                                if saved:
+                                    logger.info(f"[{self.pure_user_id}] trajectory recorded from remote solve")
+                                else:
+                                    logger.info(
+                                        f"[{self.pure_user_id}] remote trajectory NOT pooled "
+                                        "(rejected by geometry gate)"
+                                    )
                         except Exception as e:
                             logger.warning(f"[{self.pure_user_id}] trajectory record failed: {e}")
                         return True, cookies

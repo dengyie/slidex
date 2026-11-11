@@ -26,7 +26,7 @@ def _human_points(distance, frames=1, steps=14, dy=0.0, t0=100.0, gap=50.0):
 
     Step size stays <= distance/8 (far below the 35% jump line), x is monotonic,
     and the last point is exactly `distance` -- the shape a real recording has,
-    which 0.11.0's geometry gate accepts.
+    which 0.11.1's geometry gate accepts.
     """
     pts = []
     for f in range(frames):

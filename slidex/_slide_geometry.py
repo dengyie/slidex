@@ -90,6 +90,87 @@ def points_from_recorded(
     rec_dist = recorded.get("distance", target_distance)
     return scale_recorded_points(raw, rec_dist, target_distance, tolerance)
 
+
+def _x_monotonic_forward(points: Sequence[Sequence[float]]) -> bool:
+    """x 是否单调不降（允许 <=1px 的采样抖动）。人类单向拖动必然如此。"""
+    prev = float(points[0][0])
+    for point in points[1:]:
+        x = float(point[0])
+        if x < prev - 1.0:
+            return False
+        prev = x
+    return True
+
+
+def upgrade_points_to_cumulative(
+    points: Sequence[Sequence[float]],
+    distance: float,
+    tolerance: float = 2.0,
+) -> List[List[float]]:
+    """Lift legacy adjacent-diff traces to origin-relative cumulative x/y.
+
+    Decision uses only last-x vs ``distance`` and sum(x) vs ``distance``.
+    Mid-trace ``|x|`` is never a classifier (those values collide for both
+    encodings) — for exactly that reason a corrupted absolute-coordinate
+    trace can slip through here judged as cumulative. Callers that replay
+    pool recordings must gate on ``recorded_geometry_verdict`` first; the
+    pool does so via ``recorded_trace_verdict``, which decodes first so a
+    legacy delta file is judged on the geometry it actually replays.
+    """
+    if not points:
+        return []
+    parsed: List[List[float]] = []
+    for point in points:
+        if not point:
+            continue
+        x = float(point[0])
+        y = float(point[1]) if len(point) > 1 else 0.0
+        delay = float(point[2]) if len(point) > 2 else 0.0
+        parsed.append([x, y, delay])
+    if not parsed:
+        return []
+    dist = float(distance or 0.0)
+    tol = max(float(tolerance), 0.02 * abs(dist) if dist else float(tolerance))
+    # 末点 x 已对上 distance 且 x 轴单调 → 不必再看 sum(x)。回退是人类的常态
+    # （到点后小幅回校），而 sum(x)≈distance 恰是绝对坐标轨迹的典型特征：线上
+    # trajectory_1001 的 sum=73636、dist=258，若用 sum 判增量编码，回放时会把它
+    # 当位移累加成一串飞点。两个判据并存时，优先信"末点对得上且单调"。
+    if abs(parsed[-1][0] - dist) <= tol and _x_monotonic_forward(parsed):
+        return parsed
+    last_x = parsed[-1][0]
+    sum_x = sum(p[0] for p in parsed)
+    if abs(last_x - dist) <= tol:
+        return parsed
+    if abs(sum_x - dist) <= tol:
+        cx = 0.0
+        cy = 0.0
+        out: List[List[float]] = []
+        for x, y, delay in parsed:
+            cx += x
+            cy += y
+            out.append([cx, cy, delay])
+        return out
+    return parsed
+
+
+def recorded_trace_verdict(
+    points: Sequence[Sequence[float]],
+    distance: Optional[float] = None,
+) -> Optional[str]:
+    """池内录制判定：先按编码解码，再判几何。
+
+    池里同时存在历史增量编码（旧版本写入）与累计编码（0.10.x 起所有生产
+    者）。直接判原始点列会把一条健康的历史增量录制误判成
+    ``distance_mismatch``/``jump``；而只解码不判又会放过绝对坐标垃圾
+    （这一类 sum(x) 与 distance 差得很远，解码是恒等变换）。所以两步都做。
+    """
+    try:
+        decoded = upgrade_points_to_cumulative(points or [], distance)
+    except (TypeError, ValueError, IndexError):
+        return "invalid_points"
+    return recorded_geometry_verdict(decoded, distance)
+
+
 # ── 录制轨迹的时序归一化（0.10.2，密度上限 0.11.0）─────────────────────
 # 录制器记的是「用户从按下到松开的世界时钟」：CDP 真机模式下人是在远端画面里
 # 拖的，一次手动救场拖动跨 13-48s 很常见（线上池 50 条全部如此，单点间隙最大
@@ -282,8 +363,8 @@ def normalize_recorded_delays(
 #   健康 40 条：max 单步跳变 62px/258 = 24%，回退 <=1px，max|x| <= 259
 #   脏 10 条：  max 单步跳变 >=131px = 51%，回退 131-350px，max|x| >= 270
 # 分界取 35% 与 1.15，两边都有 10% 以上的安全余量。
-RECORDED_JUMP_FRACTION = 0.35           # 单步跳变 / 行程；> 判 jump
-RECORDED_RETRO_RATIO = 0.35             # 峰值回退 / 行程；> 判 non_monotonic
+RECORDED_JUMP_FRACTION = 0.35           # 单步跳变（以及峰值回退）/ 行程；> 判 jump / non_monotonic
+RECORDED_RETRO_RATIO = RECORDED_JUMP_FRACTION   # 别名：回退与跳变共用此线，保留旧名字给外部引用
 RECORDED_SPAN_RATIO = 1.15              # max|x| / distance；> 判 overshoot
 
 
@@ -305,7 +386,11 @@ def recorded_geometry_verdict(
       （混入了绝对坐标 / 面板坐标，轨迹先冲出去再跳回来）。
     - ``jump``：相邻两点位移超过 distance * RECORDED_JUMP_FRACTION，是拼接
       出来的轨迹（漏采样 / 双次编码）。
-    - ``invalid_clock``：负间隙或 <=1ms 的位移时间戳，录制时钟不可信。
+    - ``invalid_clock``：负间隙的位移时间戳，录制时钟不可信。
+    - ``invalid_points``：坐标/时间戳不是有限数值（``null``、字符串、NaN、
+      Infinity）。上游 JS 用 ``JSON.stringify`` 序列化，NaN 会变成 ``null``，
+      所以这一码在真实录制里是能出现的——必须拒收，而不是让 NaN 穿过
+      全部比较（NaN 参与的大小判断恒为 False）污染池子。
 
     只看 x 轴：滑块是水平拖动，y 的抖动是手臂自然颤动，不约束。
     """
@@ -313,11 +398,15 @@ def recorded_geometry_verdict(
     for point in points or []:
         if not point:
             continue
-        rows.append([
-            float(point[0]),
-            float(point[1]) if len(point) > 1 else 0.0,
-            float(point[2]) if len(point) > 2 else 0.0,
-        ])
+        try:
+            x = float(point[0])
+            y = float(point[1]) if len(point) > 1 else 0.0
+            t = float(point[2]) if len(point) > 2 else 0.0
+        except (TypeError, ValueError, IndexError):
+            return "invalid_points"
+        if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(t)):
+            return "invalid_points"
+        rows.append([x, y, t])
     if len(rows) < 2:
         return "no_points"
     xs = [row[0] for row in rows]
@@ -329,7 +418,14 @@ def recorded_geometry_verdict(
             return "invalid_clock"
     limit = span
     if distance is not None:
-        dist = abs(float(distance))
+        try:
+            dist = abs(float(distance))
+        except (TypeError, ValueError):
+            return "invalid_points"
+        if not math.isfinite(dist):
+            # NaN 参与任何比较恒为 False，若在这里放行，这个文件会永久
+            # 绕过全部几何检查（实测：整条 NaN 轨迹被判为健康并入库）。
+            return "invalid_points"
         if dist > 1e-6:
             if abs(xs[-1] - dist) > max(1.5, dist * 0.15):
                 return "distance_mismatch"

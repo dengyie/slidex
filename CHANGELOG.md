@@ -1,5 +1,55 @@
 # Changelog
 
+## [0.11.2] - 2026-11-11
+
+生产复核修补：0.11.1 的几何闸门本身有三处会把"防守"变成"故障"的缺口，
+以及日志/接口契约问题。全部按实测复现后修，线上池判定结果不变（40 保留 /
+10 拒收）。
+
+### Fixed
+- **一个坏文件拖垮整个 cookie 的池**（`_trajectory_pool._load_all`）：
+  `_dirty_geometry` 原先在逐文件 try 之外调用，坐标里出现 `null`
+  （JS `JSON.stringify(NaN)` 的产物）时 `float()` 抛 TypeError，整个
+  `_load_all` 中断，连 49 条好录制一起不可读；`_load_human` 只在 DEBUG
+  记录后回退合成轨迹——用户侧表现为"真人回放又没了"。现在逐文件隔离，
+  判定抛错就跳过该条并 WARNING，其余录制照常参与回放。
+- **NaN 穿透闸门**（`recorded_geometry_verdict`）：NaN 参与的大小比较恒为
+  False，`span<=1e-6`、`retro>limit`、`biggest>limit` 全部放行；整条 NaN
+  轨迹会被判为健康、落盘、并在回放时以 `nan` 坐标注入。同理 NaN/Inf 的
+  `distance` 会关闭全部距离判据。新增原因码 `invalid_points`：坐标或
+  时间戳不是有限数值、或 `distance` 非有限，一律拒收。写池侧同样拦下
+  （`save_trajectory` 对非数值坐标返回 None 而不是抛异常）。
+- **调用方假报成功**：`solver.py` 两处写池（`human_cdp` / 远端录制）和
+  xianyu 侧 `/trajectory` 原先无视 `save_trajectory` 的返回值，闸门拒收
+  时仍打 "saved / recorded" 日志；靠日志判断"录制已入池"会得出相反结论。
+  现在按返回值区分 `saved` / `NOT pooled`。
+- **HTTP 边界契约**（`api.submit_trajectory`）：400 的 `detail` 带上原因码
+  （前端此前只读 `message`，一切拒收都显示 "unknown"，现改读
+  `detail || message`）；500 不再回显 `str(e)`（可能含内部路径）；点数
+  下限与闸门统一为 2。
+
+### Changed
+- **闸门与解码器语义对齐**：`upgrade_points_to_cumulative` 与
+  `_x_monotonic_forward` 移入 `_slide_geometry`（`_gestures` 继续再导出，
+  公开 API 不变），新增 `recorded_trace_verdict`：加载侧先解码再判几何。
+  0.11.1 直接用原始点列判定，会把历史增量编码的健康录制判成
+  `distance_mismatch`，使解码器的 legacy 分支永远不可达；现在两者一致，
+  且绝对坐标垃圾解码是恒等变换，仍被拒收（线上 50 条判定零变化）。
+- `RECORDED_RETRO_RATIO` 明确为 `RECORDED_JUMP_FRACTION` 的别名（实测两者
+  共用同一个 `limit`，此前文档暗示存在独立阈值）。
+- 脏录制告警改为每个文件名只打一次（进程内），后续降为 DEBUG：实测每次
+  拖动至少触发一次 `_load_all`，10 条脏文件约占线上日志 9%。
+
+### Tests
+- 新增 `tests/test_review_round2.py`（21 条）：NaN/Inf/非数值坐标与
+  distance、坏文件不遮蔽同池录制、写池坏坐标返回 None、手写 NaN 文件加载
+  侧过滤、脏文件告警只出一次、legacy 增量轨迹解码后放行而绝对坐标仍拒收。
+- 新增 `tests/test_review_round2_callsites.py`（3 条）：闸门拒收时无
+  "saved to pool" 日志且有 "NOT pooled"、HTTP 400 带原因码、HTTP 500 不回显
+  内部异常文本。
+- 测试与注释里指向"几何闸门引入版本"的 0.11.0 统一改为 0.11.1。
+- 全量 1124 passed / 18 skipped。
+
 ## [0.11.1] - 2026-11-11
 
 录制几何校验：坐标轴坏掉的录制不再进池、不再参与回放（承接 0.11.0 的

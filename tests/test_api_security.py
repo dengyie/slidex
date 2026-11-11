@@ -127,7 +127,7 @@ async def test_trajectory_uses_session_cookie_id_not_request_cookie(monkeypatch,
     request = TrajectorySubmitRequest(
         session_id="s1",
         cookie_id="../../evil",
-        # 健康录制（0.11.0）：末点 = distance，步长远低于几何校验跳变线
+        # 健康录制（0.11.1）：末点 = distance，步长远低于几何校验跳变线
         points=[
             [0.0, 0, 100], [2.0, 0, 20], [4.0, 0, 20], [6.0, 0, 20],
             [8.0, 0, 20], [10.0, 0, 20], [12.0, 0, 20], [14.0, 0, 20],
@@ -146,7 +146,7 @@ async def test_trajectory_uses_session_cookie_id_not_request_cookie(monkeypatch,
 
 @pytest.mark.asyncio
 async def test_trajectory_with_broken_geometry_is_refused(monkeypatch, tmp_path):
-    # 0.11.0：绝对坐标/回弹录制必须在 HTTP 边界被挡下并回 400，
+    # 0.11.1：绝对坐标/回弹录制必须在 HTTP 边界被挡下并回 400，
     # 不能落盘、也不能回 200 让上报方误以为池里已有一条好数据。
     pool = api.trajectory_pool
     monkeypatch.setattr(pool, "base_dir", tmp_path)

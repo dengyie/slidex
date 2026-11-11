@@ -25,7 +25,7 @@ from loguru import logger
 from slidex._slide_geometry import (
     normalize_recorded_delays,
     points_from_recorded,
-    recorded_geometry_verdict,
+    upgrade_points_to_cumulative,
 )
 from slidex._trajectory_pool import SliderTrajectoryPool
 
@@ -68,66 +68,6 @@ class GesturePlan:
             for p in self.points
         )
         self.end_hold_scale = max(0.0, float(self.end_hold_scale))
-
-
-def upgrade_points_to_cumulative(
-    points: Sequence[Sequence[float]],
-    distance: float,
-    tolerance: float = 2.0,
-) -> List[List[float]]:
-    """Lift legacy adjacent-diff traces to origin-relative cumulative x/y.
-
-    Decision uses only last-x vs ``distance`` and sum(x) vs ``distance``.
-    Mid-trace ``|x|`` is never a classifier (those values collide for both
-    encodings) — for exactly that reason a corrupted absolute-coordinate
-    trace can slip through here judged as cumulative. Callers that replay
-    pool recordings must gate on ``recorded_geometry_verdict`` first.
-    """
-    if not points:
-        return []
-    parsed: List[List[float]] = []
-    for point in points:
-        if not point:
-            continue
-        x = float(point[0])
-        y = float(point[1]) if len(point) > 1 else 0.0
-        delay = float(point[2]) if len(point) > 2 else 0.0
-        parsed.append([x, y, delay])
-    if not parsed:
-        return []
-    dist = float(distance or 0.0)
-    tol = max(float(tolerance), 0.02 * abs(dist) if dist else float(tolerance))
-    # 末点 x 已对上 distance 且 x 轴单调 → 不必再看 sum(x)。回退是人类的常态
-    # （到点后小幅回校），而 sum(x)≈distance 恰是绝对坐标轨迹的典型特征：线上
-    # trajectory_1001 的 sum=73636、dist=258，若用 sum 判增量编码，回放时会把它
-    # 当位移累加成一串飞点。两个判据并存时，优先信"末点对得上且单调"。
-    if abs(parsed[-1][0] - dist) <= tol and _x_monotonic_forward(parsed):
-        return parsed
-    last_x = parsed[-1][0]
-    sum_x = sum(p[0] for p in parsed)
-    if abs(last_x - dist) <= tol:
-        return parsed
-    if abs(sum_x - dist) <= tol:
-        cx = 0.0
-        cy = 0.0
-        out: List[List[float]] = []
-        for x, y, delay in parsed:
-            cx += x
-            cy += y
-            out.append([cx, cy, delay])
-        return out
-    return parsed
-
-
-def _x_monotonic_forward(points: Sequence[Sequence[float]]) -> bool:
-    """x 是否单调不降（允许 <=1px 的采样抖动）。人类单向拖动必然如此。"""
-    prev = float(points[0][0])
-    for point in points[1:]:
-        x = float(point[0])
-        if x < prev - 1.0:
-            return False
-        prev = x
-    return True
 
 
 def generate_archetype(name: str, distance: float) -> GesturePlan:

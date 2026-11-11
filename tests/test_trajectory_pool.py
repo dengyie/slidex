@@ -27,7 +27,7 @@ def _human_points(distance, frames=1, steps=14, dy=0.0, t0=100.0, gap=50.0):
     """Healthy drag point list: `frames` linear legs of `steps` small steps each.
 
     These pool tests cover bookkeeping (numbering, eviction, LRU, file format),
-    not geometry -- but since 0.11.0 a recording whose coordinate axis is broken
+    not geometry -- but since 0.11.1 a recording whose coordinate axis is broken
     is refused at write time, so a one-shot [[0, 0, 100], [50, ...], [100, ...]]
     fixture could no longer exercise any of it. Step size stays at
     distance / (frames*steps) (far below the 35% jump line) and the last point is

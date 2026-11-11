@@ -4,6 +4,7 @@
 
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -13,25 +14,32 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from loguru import logger
 from slidex._sanitize import sanitize_pure_user_id
-from slidex._slide_geometry import recorded_geometry_verdict
+from slidex._slide_geometry import recorded_geometry_verdict, recorded_trace_verdict
 
 
 _TRAJECTORY_INDEX_RE = re.compile(r"trajectory_(\d+)\.json$")
+
+# 每个脏文件只告警一次（进程内）：_load_all 在每次拖动里至少被调用一次，
+# 逐次刷 WARNING 会让线上日志被存量脏文件淹没（实测占约 9%），而原因码在
+# 首次出现后就不再是新信息。
+_DIRTY_WARNED: set = set()
 
 
 def _dirty_geometry(record: Dict[str, Any]) -> Optional[str]:
     """池内一条录制坐标轴是否坏了；坏了返回原因码，健康返回 None。
 
     加载侧判据与写入侧同一条（``recorded_geometry_verdict``），只是参数
-    来源是文件本身。存量脏文件挡在回放之前，避免一条坏录制毒化之后每一
-    次自动拖动。
+    来源是文件本身；多一步解码，因为池里可能有旧版本的增量编码。存量脏
+    文件挡在回放之前，避免一条坏录制毒化之后每一次自动拖动。
     """
-    reason = recorded_geometry_verdict(record.get("points") or [], record.get("distance"))
+    reason = recorded_trace_verdict(record.get("points") or [], record.get("distance"))
     if reason:
-        logger.warning(
-            f"[TrajectoryPool] skip dirty recording "
-            f"{os.path.basename(str(record.get('_file') or ''))}: {reason}"
-        )
+        name = os.path.basename(str(record.get("_file") or ""))
+        if name not in _DIRTY_WARNED:
+            _DIRTY_WARNED.add(name)
+            logger.warning(f"[TrajectoryPool] skip dirty recording {name}: {reason}")
+        else:
+            logger.debug(f"[TrajectoryPool] skip dirty recording {name}: {reason}")
     return reason
 
 
@@ -180,10 +188,31 @@ class SliderTrajectoryPool:
         if not points:
             return None
         reason = recorded_geometry_verdict(points, distance)
+        try:
+            dist_label = f"{float(distance or 0):.0f}px" if math.isfinite(float(distance or 0)) else "-"
+        except (TypeError, ValueError):
+            dist_label = "?"
         if reason:
             logger.warning(
                 f"[TrajectoryPool] reject recording for {cookie_id} "
-                f"(dist={float(distance or 0):.0f}px, {len(points or [])} pts): {reason}"
+                f"(dist={dist_label}, {len(points or [])} pts): {reason}"
+            )
+            return None
+        # 非数值坐标（null / 字符串 / 嵌套 list / NaN）在 round 或 verdict 里
+        # 都可能抛：写池是旁路能力，绝不能把调用方的成功路径变成异常。
+        # 与 verdict 一样容忍缺省 y/delay（老上报方可能只给 [x] 或 [x, y]）。
+        try:
+            rows = [
+                [float(p[0]),
+                 float(p[1]) if len(p) > 1 else 0.0,
+                 float(p[2]) if len(p) > 2 else 0.0]
+                for p in points
+            ]
+            if not all(math.isfinite(v) for row in rows for v in row):
+                raise ValueError("non-finite coordinate")
+        except (TypeError, ValueError, IndexError) as e:
+            logger.warning(
+                f"[TrajectoryPool] reject recording for {cookie_id}: invalid_points ({e})"
             )
             return None
         cdir = self._cookie_dir(cookie_id)
@@ -202,13 +231,12 @@ class SliderTrajectoryPool:
             "cookie_id": cookie_id,
             "recorded_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
             "verify_url_hash": hashlib.md5(str(verify_url or "").encode()).hexdigest()[:8],
-            "distance": round(float(distance), 1),
+            "distance": round(float(distance or 0), 1),
             "success": bool(success),
             "source": str(source or "auto"),
             "duration_ms": round(float(duration_ms), 1),
             "duration_kind": "motion",
-            "points": [[round(float(p[0]), 2), round(float(p[1]), 2), round(float(p[2]), 1)]
-                       for p in points],
+            "points": [[round(x, 2), round(y, 2), round(t, 1)] for x, y, t in rows],
         }
         stub = fname[: -len(".json")]
         for attempt in range(3):
@@ -260,9 +288,19 @@ class SliderTrajectoryPool:
             except Exception as e:
                 logger.debug(f"[TrajectoryPool] skip corrupt {fp}: {e}")
                 continue
-            # 存量脏录制（0.11.0 之前写入、写池时还没有几何校验）：坐标轴坏了
-            # 就不参与回放，否则一条脏文件会毒化之后每一次自动拖动。
-            if _dirty_geometry(d):
+            # 存量脏录制（0.11.1 之前写入、写池时还没有几何校验）：坐标轴坏了
+            # 就不参与回放，否则一条脏文件会毒化之后每一次自动拖动。判定本身
+            # 也包在 try 里——它是防御性代码，抛异常时最坏结果是跳过这一条，
+            # 而不是让整个池子对这个 cookie 全部不可读（一个坏文件拖垮 49 条
+            # 好录制）。
+            try:
+                if _dirty_geometry(d):
+                    continue
+            except Exception as e:
+                logger.warning(
+                    f"[TrajectoryPool] geometry check failed on "
+                    f"{os.path.basename(str(fp))}, skipping: {e}"
+                )
                 continue
             records.append(d)
         return records

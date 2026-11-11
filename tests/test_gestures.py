@@ -31,7 +31,7 @@ DIST = 158.0
 def _human_points(distance, dy=0, t0=100):
     """Healthy multi-step drag: 0 -> distance in 1/16 legs of travel.
 
-    0.11.0 refuses recorded traces whose geometry is impossible for a human
+    0.11.1 refuses recorded traces whose geometry is impossible for a human
     (a single jump = 100% of travel is a teleport, not a drag). These tests
     cover family selection, not geometry, so the recording they seed looks
     like one the pool would actually accept.
