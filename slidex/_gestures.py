@@ -334,6 +334,10 @@ class GestureSession:
                     distance,
                     exclude_files=self._used_human_files,
                     tolerance=0.10,
+                    # 探测（consume=False）不能按消费记 INFO / 写 last_used：
+                    # 否则一次求解打两条一样的「loaded」，peek 还会推进 LRU 时钟
+                    # （2026-11-11 23:09 生产日志实证）。
+                    peek=not consume,
                 )
             except Exception as e:
                 logger.debug(f"gesture session: load_unused_human failed: {e}")

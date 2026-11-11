@@ -335,12 +335,22 @@ class SliderTrajectoryPool:
         target_distance: float,
         exclude_files: Optional[set] = None,
         tolerance: float = 0.10,
+        *,
+        peek: bool = False,
     ) -> Optional[dict]:
         """Next unused human recording within ``tolerance`` of ``target_distance``.
 
         Unlike ``load_best_trajectory`` this never widens past the given
         tolerance, never falls back to failed/auto traces, and skips files
         already consumed by the current ``GestureSession``.
+
+        ``peek=True`` 表示「只问有没有，不消费」：降为 DEBUG 日志、不写
+        last_used。GestureSession 选型前的可用性探测和只读审计都必须走这条路
+        ——选型探测与真正消费各调一次本方法，peek 也按消费记 INFO 的话，一次
+        求解会打两条一模一样的「loaded」（2026-11-11 23:09 生产日志实证）；
+        peek 无条件 ``_touch_last_used`` 则是只读探测也在推进 LRU 时钟。
+        选轨本身按 (距离差, 文件序号) 排序、与 last_used 无关，故 peek 跳过
+        touch 不会改变选到哪条。
         """
         cookie_id = self._sanitize_cookie_id(cookie_id)
         skip = set()
@@ -367,16 +377,28 @@ class SliderTrajectoryPool:
         # 抽中而 951 号永远轮不到。
         records.sort(key=lambda item: (item[0], _trajectory_index(item[1].get("_file") or "")))
         best = records[0][1]
+        best_fname = os.path.basename(best.get("_file", ""))
+        if peek:
+            logger.debug(
+                f"[TrajectoryPool] unused human peek for dist={target_distance:.0f}: "
+                f"file={best_fname}"
+            )
+            return best
         logger.info(
             f"[TrajectoryPool] unused human for dist={target_distance:.0f}: "
-            f"loaded dist={best['distance']:.0f}px file={os.path.basename(best.get('_file', ''))}"
+            f"loaded dist={best['distance']:.0f}px file={best_fname}"
         )
         self._touch_last_used(cookie_id, best["_file"])
         return best
 
     def load_best_trajectory(self, cookie_id: str, target_distance: float,
-                             distance_tolerance: float = 0.10) -> Optional[dict]:
-        """按距离匹配最佳轨迹（优先成功过的），支持回退放宽 tolerance"""
+                             distance_tolerance: float = 0.10,
+                             *, peek: bool = False) -> Optional[dict]:
+        """按距离匹配最佳轨迹（优先成功过的），支持回退放宽 tolerance。
+
+        ``peek=True``：只读探测（审计等），DEBUG 日志且不写 last_used，
+        语义与 :meth:`load_unused_human` 的 peek 一致。
+        """
         records = [r for r in self._load_all(cookie_id) if r.get("success")]
         if not records:
             records = self._load_all(cookie_id)
@@ -395,9 +417,15 @@ class SliderTrajectoryPool:
         for tol in (distance_tolerance, 0.15, 0.25, 0.40):
             best = _best(tol)
             if best:
-                logger.info(f"[TrajectoryPool] best match for dist={target_distance:.0f}: "
-                            f"loaded dist={best['distance']:.0f}px (tol={tol})")
-                self._touch_last_used(cookie_id, best["_file"])
+                if peek:
+                    logger.debug(
+                        f"[TrajectoryPool] best match peek for dist={target_distance:.0f}: "
+                        f"file={os.path.basename(best.get('_file', ''))} (tol={tol})"
+                    )
+                else:
+                    logger.info(f"[TrajectoryPool] best match for dist={target_distance:.0f}: "
+                                f"loaded dist={best['distance']:.0f}px (tol={tol})")
+                    self._touch_last_used(cookie_id, best["_file"])
                 return best
         return None
 

@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.11.6] - 2026-11-12
+
+轨迹池 peek 语义：只读探测不再按消费记账。
+
+### Fixed
+- **`load_unused_human` / `load_best_trajectory` 新增 `peek=True`**：探测路径降为
+  DEBUG 日志且**不写 `last_used.json`**。
+  2026-11-11 23:09 生产日志实证：一次求解打两条一模一样的
+  `[TrajectoryPool] unused human ... loaded trajectory_959.json`——
+  `GestureSession._first_available` 的可用性探测与 `_build` 的真正消费各调一次，
+  旧实现两次都按消费记账。后果：日志无法区分探测与消费；只读探测推进 LRU
+  时钟（`last_used` 是 `rotate_trajectory` 的打分输入，线上只读审计 22:41 实际
+  改写了两个文件的记账）。
+- `GestureSession._load_human` 改传 `peek=not consume`。选轨本身按
+  (距离差, 文件序号) 排序、与 `last_used` 无关，故探测跳过 touch **不改变选到
+  哪条**——测试已钉住。
+
+### Tests
+- 新增 `tests/test_trajectory_pool_peek.py`（6 例）：peek 不写 last_used /
+  不打 INFO、consume 恰好一次 touch 与一条 INFO、`load_best_trajectory` 的
+  peek 语义、选轨与 peek 无关、整条求解链恰好一次落盘。mutation 验证：
+  把 `peek=not consume` 改回 `peek=False`，求解链用例立即 FAIL。
+
+### Note
+- 已知未接线的旋钮：`SLIDEX_TRAJ_POOL_STRATEGY`（`trajectory_pool_rotation_strategy`）
+  一路传到 `SliderTrajectoryPool.rotation_strategy` 后**无任何消费者**——当前选轨
+  固定为「同距离取最旧编号」（`load_unused_human` 的排序键），`rotate_trajectory`
+  （LRU）在求解链路上没有调用方。接线或删除需产品决策，0.11.6 不动行为。
+
 ## [0.11.5] - 2026-11-11
 
 布尔解析全库收口：`_env` 成为唯一词表，且告警终于能指出是哪个旋钮写错了。
