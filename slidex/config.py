@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Tuple
 
-from slidex._env import parse_float, parse_int
+from slidex._env import parse_bool, parse_float, parse_int
 
 
 @dataclass
@@ -117,13 +117,17 @@ class SlidexConfig:
         return cls(
             max_concurrent=cls._safe_int(os.environ.get("SLIDEX_MAX_CONCURRENT", "3"), 3),
             wait_timeout=cls._safe_int(os.environ.get("SLIDEX_WAIT_TIMEOUT", "60"), 60),
-            trajectory_pool_enabled=os.environ.get("SLIDEX_TRAJ_POOL_ENABLED", "1") == "1",
+            trajectory_pool_enabled=parse_bool(os.environ.get("SLIDEX_TRAJ_POOL_ENABLED"), True),
             trajectory_pool_max_per_cookie=cls._safe_int(os.environ.get("SLIDEX_TRAJ_POOL_MAX"), 50, minimum=1),
             trajectory_pool_min_pool_size=cls._safe_int(os.environ.get("SLIDEX_TRAJ_POOL_MIN"), 5, minimum=0),
-            trajectory_pool_rotation_strategy=os.environ.get("SLIDEX_TRAJ_POOL_STRATEGY", "lru"),
-            trajectory_pool_recorded_only_mode=os.environ.get("SLIDEX_TRAJ_POOL_RECORDED_ONLY", "0") == "1",
+            # 空串同样视同未设置（compose 的 ${VAR:-} 会注入空串）：用 or 兜底，
+            # 避免 strategy="" 这种"看似设了其实没设"的中间态。
+            trajectory_pool_rotation_strategy=(os.environ.get("SLIDEX_TRAJ_POOL_STRATEGY") or "lru"),
+            trajectory_pool_recorded_only_mode=parse_bool(
+                os.environ.get("SLIDEX_TRAJ_POOL_RECORDED_ONLY"), False
+            ),
             trajectory_pool_base_dir=os.environ.get("SLIDEX_TRAJ_POOL_DIR") or None,
-            remote_captcha_enabled=os.environ.get("SLIDEX_REMOTE_ENABLED", "1") == "1",
+            remote_captcha_enabled=parse_bool(os.environ.get("SLIDEX_REMOTE_ENABLED"), True),
             remote_captcha_timeout=cls._safe_int(os.environ.get("SLIDEX_REMOTE_TIMEOUT", "180"), 180),
             remote_captcha_poll_interval=cls._safe_int(os.environ.get("SLIDEX_REMOTE_POLL", "2"), 2),
             vision_endpoint=os.environ.get("SLIDEX_VISION_ENDPOINT") or None,
@@ -156,6 +160,6 @@ class SlidexConfig:
             debug_screenshot_dir=os.environ.get("SLIDEX_DEBUG_SCREENSHOT_DIR") or None,
             calibration_dir=os.environ.get("SLIDEX_CALIBRATION_DIR") or None,
             trajectory_history_dir=os.environ.get("SLIDEX_TRAJ_HISTORY_DIR") or None,
-            telemetry_enabled=os.environ.get("SLIDEX_TELEMETRY_ENABLED", "1") == "1",
+            telemetry_enabled=parse_bool(os.environ.get("SLIDEX_TELEMETRY_ENABLED"), True),
             telemetry_dir=os.environ.get("SLIDEX_TELEMETRY_DIR") or None,
         )

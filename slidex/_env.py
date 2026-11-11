@@ -35,7 +35,12 @@ from typing import Optional
 
 from loguru import logger
 
-__all__ = ["env_float", "env_int", "parse_float", "parse_int"]
+__all__ = ["env_bool", "env_float", "env_int", "parse_bool", "parse_float", "parse_int"]
+
+# 布尔开关的真/假字面量。刻意只认这些常见写法：未知值回落默认并告警，
+# 而不是把任意非空串当 True（那样 "disabled" 会被当成开启）。
+_TRUE_WORDS = frozenset({"1", "true", "yes", "on", "y", "t", "enable", "enabled"})
+_FALSE_WORDS = frozenset({"0", "false", "no", "off", "n", "f", "disable", "disabled"})
 
 
 def _raw(name: str) -> Optional[str]:
@@ -100,6 +105,32 @@ def parse_int(raw: str, default: int, *, minimum: Optional[int] = None,
         _reject(source=str(raw), raw=raw, default=default, why=f"高于上限 {maximum}")
         return default
     return value
+
+
+def parse_bool(raw: str, default: bool) -> bool:
+    """解析布尔字符串；空串视同未设置（静默回落）；未知字面量回落并告警。"""
+    if raw is None or str(raw).strip() == "":
+        return default
+    word = str(raw).strip().lower()
+    if word in _TRUE_WORDS:
+        return True
+    if word in _FALSE_WORDS:
+        return False
+    return _reject(str(raw), raw, default, "不是合法布尔值（用 1/0、true/false、on/off）")
+
+
+def env_bool(name: str, default: bool) -> bool:
+    """读布尔 env；空值与未知字面量回落 default（空值静默）。
+
+    空串视同未设置这条契约必须覆盖布尔开关：容器编排里
+    ``SLIDEX_TRAJ_POOL_ENABLED=${SLIDEX_TRAJ_POOL_ENABLED:-}`` 在 .env 未设置时
+    会注入**空字符串**，而 ``os.environ.get(name, "1") == "1"`` 会把空串判成
+    关闭——0.11.3 之前 ``SLIDEX_TRAJ_POOL_ENABLED`` 就这样被静默关掉整个轨迹池。
+    """
+    raw = _raw(name)
+    if raw is None:
+        return default
+    return parse_bool(raw, default)
 
 
 def env_float(name: str, default: float, *, minimum: Optional[float] = None,

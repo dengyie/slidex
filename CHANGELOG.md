@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.11.4] - 2026-11-11
+
+布尔开关的空串契约：`SLIDEX_TRAJ_POOL_ENABLED=` 不再被当成"关闭"。
+
+### Fixed
+- **布尔开关不吃空串**（`config.py` 的 4 个开关 + `_env.parse_bool/env_bool`）：
+  `trajectory_pool_enabled` / `trajectory_pool_recorded_only_mode` /
+  `remote_captcha_enabled` / `telemetry_enabled` 原先写成
+  `os.environ.get("SLIDEX_TRAJ_POOL_ENABLED", "1") == "1"`——第二个参数是
+  **默认值而非兜底**，env 存在但为空串时直接判 False。容器编排几乎都这么写：
+  `SLIDEX_TRAJ_POOL_ENABLED=${SLIDEX_TRAJ_POOL_ENABLED:-}`（xianyu 的 compose
+  里 14 个 SLIDEX 旋钮就是这样），`.env` 未设置即注入**空字符串**，结果是
+  **整个轨迹池被静默关闭**，日志里连一条告警都没有（`serve_pooled()` 只返回
+  False，回放直接退回合成轨迹）。这与 `_env` 开头「空值视同未设置」的既有
+  契约直接矛盾，属于同库两套语义。
+  - 新增 `parse_bool` / `env_bool`：空串/空白/未设置 → 默认值（静默）；
+    `1/true/yes/on/y/t/enable/enabled` → True；
+    `0/false/no/off/n/f/disable/disabled` → False；其余字面量回落默认并
+    WARNING（`"maybe"` 不再被当成 True）。
+  - `trajectory_pool_rotation_strategy` 同步改成 `... or "lru"`，去掉
+    `strategy=""` 这种"看似设了其实没设"的中间态。
+- 单测（`tests/test_env_parsing.py::TestEnvBool`）：空串/空白/未设置一律取
+  默认值、真假字面量双向、未知值回落并告警，以及端到端 `SlidexConfig.from_env()`
+  在 compose 式空串注入下 `trajectory_pool_enabled is True`、
+  `rotation_strategy == "lru"`，且显式 `=0` 仍然能真正关掉。
+
 ## [0.11.3] - 2026-11-11
 
 轨迹池幂等去重：同一份录制重复落盘不再新增文件。

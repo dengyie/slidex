@@ -168,6 +168,73 @@ class TestSlideEndHoldRangeToleratesBadEnv:
         assert slide_end_hold_range() == (0.0, 1.10)
 
 
+class TestEnvBool:
+    """布尔开关的空串契约（0.11.4）。
+
+    容器编排常用 ``SLIDEX_TRAJ_POOL_ENABLED=${SLIDEX_TRAJ_POOL_ENABLED:-}``：
+    .env 没设置时会注入空字符串。旧实现 ``os.environ.get(name, "1") == "1"``
+    把空串判成 False，等于静默关闭轨迹池——与 _env 的「空值视同未设置」契约冲突。
+    """
+
+    BOOL_KEY = "SLIDEX_TEST_ENV_BOOL"
+
+    @pytest.mark.parametrize("raw", [None, "", "   "])
+    def test_empty_means_unset(self, monkeypatch, raw):
+        from slidex._env import env_bool
+
+        if raw is None:
+            monkeypatch.delenv(self.BOOL_KEY, raising=False)
+        else:
+            monkeypatch.setenv(self.BOOL_KEY, raw)
+        assert env_bool(self.BOOL_KEY, True) is True
+        assert env_bool(self.BOOL_KEY, False) is False
+
+    @pytest.mark.parametrize("raw", ["1", "true", "TRUE", " on ", "yes", "Y"])
+    def test_truthy_words(self, monkeypatch, raw):
+        from slidex._env import env_bool
+
+        monkeypatch.setenv(self.BOOL_KEY, raw)
+        assert env_bool(self.BOOL_KEY, False) is True
+
+    @pytest.mark.parametrize("raw", ["0", "false", "OFF", "no", "N", "disabled"])
+    def test_falsy_words(self, monkeypatch, raw):
+        from slidex._env import env_bool
+
+        monkeypatch.setenv(self.BOOL_KEY, raw)
+        assert env_bool(self.BOOL_KEY, True) is False
+
+    @pytest.mark.parametrize("raw", ["maybe", "2", "enabled?"])
+    def test_unknown_falls_back(self, monkeypatch, raw):
+        from slidex._env import env_bool
+
+        monkeypatch.setenv(self.BOOL_KEY, raw)
+        assert env_bool(self.BOOL_KEY, True) is True
+        assert env_bool(self.BOOL_KEY, False) is False
+
+    def test_config_empty_pool_enabled_stays_on(self, monkeypatch):
+        """端到端：compose 注入空串时轨迹池必须仍是开着的（0.11.3 会被关掉）。"""
+        from slidex.config import SlidexConfig
+
+        monkeypatch.setenv("SLIDEX_TRAJ_POOL_ENABLED", "")
+        monkeypatch.setenv("SLIDEX_TRAJ_POOL_RECORDED_ONLY", "")
+        monkeypatch.setenv("SLIDEX_TRAJ_POOL_STRATEGY", "")
+        monkeypatch.setenv("SLIDEX_REMOTE_ENABLED", "")
+        cfg = SlidexConfig.from_env()
+        assert cfg.trajectory_pool_enabled is True
+        assert cfg.trajectory_pool_recorded_only_mode is False
+        assert cfg.trajectory_pool_rotation_strategy == "lru"
+        assert cfg.remote_captcha_enabled is True
+
+    def test_config_explicit_off_still_works(self, monkeypatch):
+        from slidex.config import SlidexConfig
+
+        monkeypatch.setenv("SLIDEX_TRAJ_POOL_ENABLED", "0")
+        monkeypatch.setenv("SLIDEX_TRAJ_POOL_RECORDED_ONLY", "1")
+        cfg = SlidexConfig.from_env()
+        assert cfg.trajectory_pool_enabled is False
+        assert cfg.trajectory_pool_recorded_only_mode is True
+
+
 _IMPORT_PROBE = (
     "import slidex.solver as s;"
     "assert s.SliderSolver.SOLVE_WATCHDOG_TIMEOUT_S == 600.0, s.SliderSolver.SOLVE_WATCHDOG_TIMEOUT_S;"
