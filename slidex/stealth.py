@@ -20,7 +20,7 @@ import re
 import sys
 import socket
 from datetime import datetime
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote_plus, urlencode, urlparse
 from playwright.sync_api import sync_playwright as playwright_sync_playwright, ElementHandle
 try:
     from patchright.sync_api import sync_playwright as patchright_sync_playwright
@@ -2418,7 +2418,10 @@ class XianyuSliderStealth:
                     clicked = True
                     break
                 except Exception as selector_error:
-                    _mark_detached_runtime(selector_error)
+                    # 这里不消费 detached 标志，原先调用的 _mark_detached_runtime
+                    # 是从热路径复制来的残肢（局部闭包没跟过来），运行到必 NameError；
+                    # 保持原语义：记日志后继续尝试下一个选择器。
+                    logger.debug(f"【{self.pure_user_id}】滑块错误态元素异常(可能已脱离运行时): {selector_error}")
                     continue
 
             if not clicked and slider_container:
@@ -4699,7 +4702,9 @@ class XianyuSliderStealth:
                     if element and element.is_visible():
                         return True
                 except Exception as selector_error:
-                    _mark_detached_runtime(selector_error)
+                    # 同 _try_reset_slider_error_state：原调用是复制残肢，必 NameError；
+                    # 保持原语义：记日志后继续。
+                    logger.debug(f"【{self.pure_user_id}】保持登录提示探测异常: {selector_error}")
                     continue
         except Exception:
             pass
