@@ -870,7 +870,7 @@ class AliyunCaptchaJsProvider(CaptchaProvider):
         if verdict:
             return SolveResult(success=True, code=0, cookies=select_cookies_for_url(cookies, page_url))
         # 有判定但无数字码：按基类约定给 1，让手势会话换家族重采样
-        return SolveResult(success=False, code=self._result_code if self._result_code is not None else 1)
+        return SolveResult(success=False, cookies=None, code=self._result_code if self._result_code is not None else 1)
 
 
 __all__ = ["AliyunCaptchaJsProvider"]

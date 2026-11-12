@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.11.9] - 2026-11-13
+
+aliyun-captcha-js 失败分支 SolveResult 构造修复（生产注册链路实测回归）。
+
+### Fixed
+- **`get_result` 失败分支漏 `cookies` 必填参**：判定失败且 `_result_code is None`
+  时，旧代码 `SolveResult(success=False, code=…)` 漏传必填位置参 `cookies` →
+  `TypeError: SolveResult.__init__() missing 1 required positional argument:
+  'cookies'`——滑块实际已滑过（aliyuncs 校验 POST 200）却整次求解报错。
+  2026-11-13 chat.z.ai 注册链路实测暴露，补 `cookies=None` 并按基类约定
+  回退 `code=1`（让手势会话换家族重采样）。回归测试
+  `TestGetResultFailureShape`（未修复代码上验证红 → 修复后绿）。
+
 ## [0.11.8] - 2026-11-12
 
 评审清理批：删死代码、last_used 对账与原子写、策略校验（评审 P3 全项 + Delete List）。

@@ -485,3 +485,42 @@ class TestOpaquePieceGuard:
         gap, conf, debug = AliyunJigsawMatcher.find_gap_contour_contrast(bg, tall_piece)
         # 不崩溃即可：有效点足够则给定位，否则低置信判失败
         assert gap is None or gap >= 0
+
+
+class TestGetResultFailureShape:
+    """get_result 失败分支必须构造合法 SolveResult（cookies 是必填位置参数）。
+
+    2026-11-13 chat.z.ai 实测回归：判定失败但 `_result_code is None` 时，
+    旧代码 `SolveResult(success=False, code=…)` 漏传 cookies → TypeError
+    ('SolveResult' object … missing 'cookies')，滑块明明已滑过却整次求解报错。
+    """
+
+    @staticmethod
+    def _result_with_verdict(verdict: bool):
+        """observer 已给出判定（True=success / False=fail），但无数字码。"""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+        from slidex.providers.aliyun_captcha_js import AliyunCaptchaJsProvider
+
+        provider = AliyunCaptchaJsProvider()
+        provider._result = verdict  # `_result is not None` 即短路 DOM 轮询
+        provider._result_code = None  # 有判定但无数字码 → 约定回退 code=1
+
+        page = MagicMock()
+        page.url = "https://chat.z.ai/auth"
+        page.context.cookies = AsyncMock(return_value=[])
+        # _dom_verdict 走 evaluate：返回无文案无包的空状态，不干扰已给的判定
+        page.evaluate = AsyncMock(return_value={})
+        return asyncio.run(provider.get_result(page, timeout_ms=100))
+
+    def test_fail_verdict_returns_solve_result_not_typeerror(self):
+        res = self._result_with_verdict(verdict=False)
+        assert res.success is False
+        assert res.cookies is None
+        assert res.code == 1  # 无数字码 → 按基类约定回退 1，让手势会话换族重采样
+        assert res.error is None
+
+    def test_success_verdict_still_returns_result(self):
+        res = self._result_with_verdict(verdict=True)
+        assert res.success is True
+        assert res.code == 0
