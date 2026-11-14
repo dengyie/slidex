@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.12.0] - 2026-11-14
+
+外部打码平台接入（pigeonw / Turnstile-Solver 兼容协议）。
+
+### Added
+- **`slidex.external` 新包 + `PigeonwClient` / `solve_turnstile`**：接入白鸽打码
+  平台（cloudflare.pigeonw.com，「接口与 Turnstile-Solver 完全兼容」）。token 型
+  挑战（turnstile / recaptcha_v3 / recaptcha_enterprise / cf_clearance）纯 HTTP
+  客户端：`GET /turnstile?url=&sitekey=` 建任务 → `GET /result?id=` 1s 轮询 →
+  `solution.token`。与 `slidex.providers` 滑块 provider 体系刻意分开——provider
+  抽象（locate_elements/perform_slide/响应监听）承载页面内交互型挑战，外部打码
+  平台是纯 HTTP token 服务，硬套抽象会迫使 detect/locate 返回假元素。传输层
+  标准库 urllib（与 `slidex.ocr.llm` 同一轻依赖契约），自带浏览器 UA（平台明确
+  警告 Python 内置 urllib 默认 UA 会被 Cloudflare 拦）。
+  - 鉴权 `Authorization: Bearer <key>`；key 从 `SLIDEX_PIGEONW_KEY` env 读
+    （`SLIDEX_PIGEONW_BASE` 可覆盖 base url 指向同协议部署）。
+  - `elapsed_time` 在响应顶层（solution 外），Turnstile/CfClearance 两个
+    Solution 都从顶层读。
+  - HTTP 401/402/403/429/503 统一包 `PigeonwError`（带 HTTP_<code>）；业务
+    errorId=1 包 `PigeonwSolveError`（带 errorCode，如
+    `ERROR_CAPTCHA_UNSOLVABLE`——失败不扣额度可直接重试）；轮询超时包
+    `PigeonwTimeoutError`。
+  - 顶层 `slidex` 同步导出 `PigeonwClient` / `solve_turnstile` /
+    `TurnstileSolution` / `CfClearanceSolution` / `BalanceInfo` 等。
+  - 真机验证（2026-11-14）：CF 官方测试 sitekey 全链路 4.9s 出 token
+    （平台 elapsed 2.5s），余额 886→885 确认成功计费；单元测试 20 项
+    （mock urllib 零网络，协议状态机/错误码表/参数编码固化）；全量
+    1214 passed / 19 skipped 零回归。
+
+### Fixed
+- **deep review 两处 P1**（真机复现 → 修复 → 回归测试锁定，23 passed）：
+  - `solve()` ready 但 solution 缺 token / 缺 cf_clearance cookie 时，旧代码
+    会 `from_solution` 吞成 `token=''` / `cookie_value=''` 的**假成功**返回——
+    调用方拿空 token 过站必败且难排查。现在抛 `PigeonwError`
+    （`error_code="EMPTY_SOLUTION"`）并携带原始响应片段。
+  - `_get_json` 读超时裸穿：`socket.timeout`（Python 3.10+ 即 `TimeoutError`）
+    是 `OSError` 子类但不是 `URLError`，此前轮询读超时会以裸 `TimeoutError`
+    逃出 `_get_json`，调用方的 `except PigeonwError` 兜不住。现在统一包
+    `PigeonwError(error_code="HTTP_TIMEOUT")`。
+  - 清理：`solve_turnstile` 内函数级 `import os` 上提模块级；测试去掉未用的
+    `pw` import；`PigeonwTimeoutError` 消息在 per-call `timeout_s` 覆盖时按
+    实际预算展示。
+
 ## [0.11.10] - 2026-11-13
 
 aliyun-captcha-js 失败分支 SolveResult 构造修复（生产注册链路实测回归）。

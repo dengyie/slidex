@@ -76,6 +76,16 @@ from slidex._chromium_lifecycle import (
     ensure_previous_chromium_closed,
     find_chromium_pid_by_user_data_dir,
 )
+from slidex.external import (
+    BalanceInfo,
+    CfClearanceSolution,
+    PigeonwClient,
+    PigeonwError,
+    PigeonwSolveError,
+    PigeonwTimeoutError,
+    TurnstileSolution,
+    solve_turnstile,
+)
 
 __all__ = [
     "SlidexConfig",
@@ -127,6 +137,14 @@ __all__ = [
     "SolveResult",
     "AliyunNoCaptchaProvider",
     "GeeTestProvider",
+    "PigeonwClient",
+    "PigeonwError",
+    "PigeonwSolveError",
+    "PigeonwTimeoutError",
+    "TurnstileSolution",
+    "CfClearanceSolution",
+    "BalanceInfo",
+    "solve_turnstile",
     "FakeOcrExtractor",
     "OcrBox",
     "OcrInput",
