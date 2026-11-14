@@ -203,6 +203,104 @@ def test_solve_recaptcha_requires_action_param_passthrough():
     assert "action=login" in captured["url"]
 
 
+def test_solve_recaptcha_without_action_fails_fast_locally():
+    """recaptcha 族缺 action 直接本地 ValueError，不发建任务请求。"""
+    client = _client()
+    with mock.patch.object(urllib.request, "urlopen") as fake:
+        with pytest.raises(ValueError, match="action is required"):
+            client.solve("https://example.com", "6Labc", kind="recaptcha_v3")
+        with pytest.raises(ValueError, match="action is required"):
+            client.solve("https://example.com", "6Labc", kind="recaptcha_enterprise")
+    fake.assert_not_called()
+
+
+def test_solve_tolerates_transient_poll_errors_until_deadline():
+    """轮询途中瞬态错误（5xx/URLError/读超时）容忍到 deadline，任务可能仍在平台侧跑。
+
+    review P2 实锤：此前单次瞬态网络错误直接杀死整个 solve，白烧一次建任务
+    （且平台侧任务成功仍会计费）。
+    """
+    client = _client(timeout_s=2.0, poll_interval_s=0.01)
+    bodies = [
+        {"errorId": 0, "taskId": "t-transient"},
+        urllib.error.HTTPError("u", 503, "no node", {}, None),  # 瞬态
+        urllib.error.URLError("conn reset"),  # 瞬态
+        TimeoutError("read timed out"),  # 瞬态
+        {
+            "errorId": 0,
+            "status": "ready",
+            "solution": {"token": "0.ok"},
+            "elapsed_time": 3.1,
+        },
+    ]
+
+    def _fake_urlopen(request, timeout):
+        item = bodies.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return _urlopen_body(item)
+
+    with mock.patch.object(urllib.request, "urlopen", side_effect=_fake_urlopen):
+        sol = client.solve("https://example.com", "0x4AAA")
+    assert sol.token == "0.ok"
+
+
+def test_solve_transient_errors_raise_timeout_with_last_error():
+    """瞬态错误持续到 deadline → PigeonwTimeoutError，detail 带最后一次错误。
+
+    建任务成功后轮询持续失败：建任务阶段的错误不在容忍范围（任务没建成，
+    没什么可等），只有轮询阶段才容忍瞬态。
+    """
+    client = _client(timeout_s=0.3, poll_interval_s=0.01)
+    bodies = [
+        {"errorId": 0, "taskId": "t-stuck"},
+    ]
+
+    def _fake_urlopen(request, timeout):
+        if bodies:
+            return _urlopen_body(bodies.pop(0))
+        raise urllib.error.URLError("down")
+
+    with mock.patch.object(urllib.request, "urlopen", side_effect=_fake_urlopen):
+        with pytest.raises(PigeonwTimeoutError) as excinfo:
+            client.solve("https://example.com", "0x4AAA")
+    assert excinfo.value.detail.startswith("task_id=t-stuck")
+    assert "last_error=NETWORK:" in excinfo.value.detail
+    assert "network error calling /result" in excinfo.value.detail
+
+
+def test_solve_fails_fast_on_deterministic_http_errors():
+    """401（key 无效）等确定性错误不容忍，立即上抛。"""
+    client = _client(poll_interval_s=0.01)
+    with mock.patch.object(
+        urllib.request,
+        "urlopen",
+        side_effect=urllib.error.HTTPError("u", 401, "Unauthorized", {}, None),
+    ):
+        with pytest.raises(PigeonwError) as excinfo:
+            client.solve("https://example.com", "0x4AAA")
+    assert excinfo.value.error_code == "HTTP_401"
+
+
+def test_solve_rejects_non_positive_timeout_s():
+    """per-call timeout_s<=0 显式拒绝（构造器有 max(1.0) 夹取，per-call 一致防呆）。"""
+    client = _client()
+    with pytest.raises(ValueError, match="timeout_s must be positive"):
+        client.solve("https://example.com", "0x4AAA", timeout_s=0)
+
+
+def test_solve_poll_error_does_not_swallow_solve_error():
+    """errorId=1 业务失败在轮询中也要立即上抛，不做瞬态容忍。"""
+    client = _client(timeout_s=5.0, poll_interval_s=0.01)
+    bodies = [
+        {"errorId": 0, "taskId": "t-fail"},
+        {"errorId": 1, "errorCode": "ERROR_CAPTCHA_UNSOLVABLE", "errorDescription": "nope"},
+    ]
+    with mock.patch.object(urllib.request, "urlopen", side_effect=[_urlopen_body(b) for b in bodies]):
+        with pytest.raises(PigeonwSolveError):
+            client.solve("https://example.com", "0x4AAA")
+
+
 def test_solve_ready_without_token_raises_not_fake_success():
     """ready 但 solution 缺 token → PigeonwError，绝不返回 token='' 的假成功。
 

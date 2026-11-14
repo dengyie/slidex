@@ -306,6 +306,10 @@ class PigeonwClient:
         # cf_clearance 无 sitekey；turnstile/recaptcha 族必填。
         if kind != "cf_clearance" and not sitekey:
             raise ValueError("sitekey is required for token kinds")
+        # recaptcha 族平台必传 action（1-100 位字母/数字/下划线/斜杠）——
+        # 预校验，别浪费一次建任务往返才被平台拒。
+        if kind in ("recaptcha_v3", "recaptcha_enterprise") and not action:
+            raise ValueError(f"action is required for {kind}")
         params: Dict[str, str] = {"url": url}
         if sitekey:
             params["sitekey"] = sitekey
@@ -343,23 +347,44 @@ class PigeonwClient:
         proxy: str = "",
         task_timeout: int = 0,
         timeout_s: Optional[float] = None,
-    ) -> Any:
+    ) -> "TurnstileSolution | CfClearanceSolution":
         """建任务 + 轮询到出结果。
 
         turnstile/recaptcha 族返回 :class:`TurnstileSolution`；
         ``kind="cf_clearance"`` 返回 :class:`CfClearanceSolution`。
 
-        ``timeout_s`` 覆盖实例默认的轮询总预算。
+        ``timeout_s`` 覆盖实例默认的轮询总预算。轮询途中的瞬态网络错误
+        （URLError/读超时/429/5xx/坏响应）容忍到 deadline——任务在平台侧
+        可能仍在跑，杀掉重来只会白烧一次建任务；仅确定性错误立即上抛
+        （HTTP_401 key 无效 / HTTP_402 额度不足 / HTTP_403 被禁用）与
+        业务失败 errorId=1（:class:`PigeonwSolveError`）。
         """
+        if timeout_s is not None and float(timeout_s) <= 0:
+            raise ValueError(f"timeout_s must be positive, got {timeout_s}")
         task_id = self.create_task(
             kind, url, sitekey,
             action=action, cdata=cdata, proxy=proxy, timeout=task_timeout,
         )
         budget = self.timeout_s if timeout_s is None else float(timeout_s)
         deadline = time.monotonic() + budget
+        logger.info(f"[pigeonw] task created kind={kind} task_id={task_id}")
         while True:
             time.sleep(self.poll_interval_s)
-            data = self.get_result(task_id)
+            try:
+                data = self.get_result(task_id)
+            except PigeonwSolveError:
+                raise  # 任务真失败（errorId=1），原样上抛，调用方可直接重试
+            except PigeonwError as exc:
+                if exc.error_code in ("HTTP_401", "HTTP_402", "HTTP_403"):
+                    raise
+                last_error = f"{exc.error_code or 'NETWORK'}: {exc}"
+                if time.monotonic() >= deadline:
+                    raise PigeonwTimeoutError(
+                        f"not solved in {budget:.0f}s",
+                        detail=f"task_id={task_id} last_error={last_error}",
+                    )
+                logger.warning(f"[pigeonw] poll error tolerated: {last_error}")
+                continue
             if str(data.get("status") or "") == "processing":
                 if time.monotonic() >= deadline:
                     raise PigeonwTimeoutError(
@@ -368,24 +393,26 @@ class PigeonwClient:
                 continue
             # ready 但 solution 缺字段是平台侧异常（真机 review P1：此前会
             # 返回 token='' 的假成功，调用方拿空 token 去过校验必然失败且难排查）。
+            status = str(data.get("status") or "")
             solution = data.get("solution") or {}
             elapsed = _as_float(data.get("elapsed_time"))
             if kind == "cf_clearance":
                 result = CfClearanceSolution.from_solution(solution, task_id=task_id, elapsed_time=elapsed)
                 if not result.cookie_value:
                     raise PigeonwError(
-                        "solver returned ready without cf_clearance cookie",
+                        f"solver returned no cf_clearance cookie (status={status!r})",
                         error_code="EMPTY_SOLUTION",
                         detail=json.dumps(data, ensure_ascii=False)[:200],
                     )
-                return result
-            result = TurnstileSolution.from_solution(solution, task_id=task_id, elapsed_time=elapsed)
-            if not result.token:
-                raise PigeonwError(
-                    "solver returned ready without token",
-                    error_code="EMPTY_SOLUTION",
-                    detail=json.dumps(data, ensure_ascii=False)[:200],
-                )
+            else:
+                result = TurnstileSolution.from_solution(solution, task_id=task_id, elapsed_time=elapsed)
+                if not result.token:
+                    raise PigeonwError(
+                        f"solver returned no token (status={status!r})",
+                        error_code="EMPTY_SOLUTION",
+                        detail=json.dumps(data, ensure_ascii=False)[:200],
+                    )
+            logger.info(f"[pigeonw] solved task_id={task_id} elapsed={elapsed:.1f}s")
             return result
 
     def balance(self) -> BalanceInfo:

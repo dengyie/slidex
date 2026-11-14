@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.12.1] - 2026-11-14
+
+deep review 第二轮：轮询瞬态容忍 + 建任务预校验前移。
+
+### Changed
+- **轮询途中瞬态错误容忍到 deadline**：此前单次网络抖动（URLError/读超时/
+  429/5xx/坏响应）直接杀死整个 solve——但任务在平台侧可能仍在跑（成功还
+  计费），杀掉重来白烧一次建任务。现在轮询阶段瞬态 `PigeonwError` 容忍并
+  记 last_error 继续轮询，持续到 deadline 才转 `PigeonwTimeoutError`
+  （detail 带 `last_error=`）；仅确定性错误立即上抛（HTTP_401 key 无效 /
+  HTTP_402 额度不足 / HTTP_403 被禁用）与业务失败 errorId=1
+  （`PigeonwSolveError`，可重试语义不变）。建任务阶段错误不在容忍范围
+  （任务没建成没什么可等）。
+- **recaptcha 族 action 预校验前移**：平台必传 action（1-100 位），缺参
+  现在建任务前本地 `ValueError` 快抛，不浪费一次建任务往返才被平台拒。
+- **per-call `timeout_s<=0` 显式拒绝**：构造器有 `max(1.0)` 夹取而 per-call
+  没有，防呆对齐。
+- **可观测性**：solve 全程带日志（task created / poll error tolerated /
+  solved elapsed）；EMPTY_SOLUTION 消息携带实际 status；`solve()` 返回
+  标注从 `Any` 精确到 Union。
+- 单元测试 23→29 项（瞬态容忍恢复成功/超时带 last_error/确定性快抛/
+  errorId=1 不被容忍吞掉/action 预校验/timeout_s 防呆）；全量
+  **1223 passed / 19 skipped 零回归**。
+
 ## [0.12.0] - 2026-11-14
 
 外部打码平台接入（pigeonw / Turnstile-Solver 兼容协议）。
