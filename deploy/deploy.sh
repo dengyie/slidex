@@ -61,6 +61,40 @@ if [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
 fi
 echo "    sha ok: ${LOCAL_SHA:0:16}…"
 
+echo "==> [4.5/6] playwright browser preflight"# wheel 重装（--no-deps）不会带回浏览器缓存；换机/清缓存后 /health 照绿但
+# 求解全挂（2026-11-14 线上验收实锤：deep_check 9/23，14 项 browser_launch_failed）。
+# 双二进制校验：solver 走 launch(headless=True) 用 headless shell（必须存在）；
+# 完整 chromium（executable_path 指向的）缺失时仅告警——有头模式才用。
+# 注意 executable_path 永远指完整 chromium，直接拿它判会漏报 headless 缺失。
+ssh "$REMOTE" "$VENV/bin/python - <<'PYEOF'
+import glob, os, re, sys
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError as e:
+    print(f'    playwright import failed: {e}', file=sys.stderr)
+    sys.exit(1)
+with sync_playwright() as p:
+    full = p.chromium.executable_path
+cache = os.path.dirname(os.path.dirname(os.path.dirname(full)))  # …/ms-playwright
+# rev 不能从 executable_path 倒数第二级取——完整 chromium 缺失时该路径是期望值
+# （…/chrome-linux64/chrome），那一级是平台名不是 rev。headless shell 目录名
+# 自带 rev（chromium_headless_shell-<rev>），直接 glob。
+shell_dirs = sorted(glob.glob(os.path.join(cache, 'chromium_headless_shell-*', 'chrome-headless-shell-*')))
+shell = [os.path.join(d, 'chrome-headless-shell') for d in shell_dirs if os.path.isdir(d)]
+shell_exists = bool(shell) and any(os.path.exists(s) for s in shell)
+if not shell_exists:
+    print(f'    HEADLESS SHELL MISSING: no chromium_headless_shell-*/ under {cache}', file=sys.stderr)
+    print('    fix: playwright CDN is blocked from this host — download locally'
+          ' (resumable curl loop through proxy), scp, unzip into'
+          f' {cache}/chromium_headless_shell-<rev>/ keeping inner dir layout,'
+          ' touch INSTALLATION_COMPLETE + chmod +x chrome-headless-shell', file=sys.stderr)
+    sys.exit(1)
+print(f'    headless shell ok: {shell[0]}')
+if not os.path.exists(full):
+    print(f'    WARNING: full chromium missing ({full}) — headless=False / 有头模式不可用', file=sys.stderr)
+PYEOF
+"
+
 echo "==> [5/6] health"
 ssh "$REMOTE" "curl -s --max-time 5 http://$MESH_IP:8077/health | head -c 200; echo"
 
