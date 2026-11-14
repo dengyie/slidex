@@ -372,3 +372,20 @@ class TestSliderConcurrencyManager:
 
         # 应该能注册（空字符串也是有效 ID）
         assert result is True
+
+
+def test_has_same_account_active_reports_pending_verification():
+    """同账号已有实例（含等人工扫码的实例）要能被上层查询到。"""
+    manager = SliderConcurrencyManager()
+    manager.max_concurrent = 5
+    manager.active_instances.clear()
+
+    assert manager.has_same_account_active("has_same_probe_1926782908") is False
+
+    manager.register_instance("has_same_probe_1926782908", "i1")
+    assert manager.has_same_account_active("has_same_probe_1926782908") is True
+    # 同账号不同后缀（多用户共用账号）也算同一账号
+    assert manager.has_same_account_active("has_same_probe_1926782909") is True
+
+    manager.unregister_instance("has_same_probe_1926782908", "i1")
+    assert manager.has_same_account_active("has_same_probe_1926782908") is False

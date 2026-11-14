@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.12.2] - 2026-11-15
+
+账密登录在 punish 页滑块通过后卡死的人工验证修复。
+
+### Fixed
+- **隐藏的 `alibaba-login-box` 不再被当成「待扫码」**：原实现只按 iframe id 判定，
+  滑块/punish 通过后页面上残留的隐藏登录框会让流程进入整段人工验证等待
+  （`verification_wait_timeout`，默认 450 秒）。三条判定路径（iframe 首次扫描、
+  父 iframe 反查、`page.frames` 的 mini_login URL 分支）统一走 `_is_handle_visible`，
+  只保留真正可见的登录框。第三条尤为关键：隐藏 iframe 内的 frame URL 仍含
+  `mini_login`，只补前两条等于没修。
+- **滑块通过后补一次登录提交**：淘宝 punish 流程是「提交 → 滑块页 → 退回登录表单
+  → 再提交」，旧流程滑块通过后只复查一次登录态，未登录就直接转人工扫码，把本可
+  自动完成的一步变成 450 秒等待（2026-11-14 线上连续 93 次账密登录全部停在这里）。
+  新增 `_resubmit_login_after_punish`：仅在密码框仍可见时补点一次登录按钮
+  （找不到按钮退回回车），且 `login_with_password_playwright` 每次登录最多补一次；
+  页面上已无登录表单时不做任何动作，避免点坏人脸/短信验证页。
+
+### Added
+- `SliderConcurrencyManager.has_same_account_active(user_id)`：供上层在发起重复
+  账密登录前查询「同账号是否已有实例在跑」（含正在等人工扫码的那个）。同账号并发
+  去重是设计，排队 60 秒拿不到槽位不应被记成一次登录失败。
 ## [Unreleased]
 
 HA 工具链三漂移根修（2026-11-15 HA 盘点衍生）。

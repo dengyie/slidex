@@ -9878,6 +9878,70 @@ class XianyuSliderStealth:
             logger.debug(f"【{self.pure_user_id}】检测验证类型时出错: {e}")
             return 'unknown'
 
+    def _resubmit_login_after_punish(self, monitor_page, preferred_frame, selectors) -> bool:
+        """滑块通过后仍停在登录表单时，补一次提交。
+
+        淘宝的 punish 流程是「提交 → 滑块页 → 退回登录表单 → 再提交一次」。
+        旧流程在滑块通过后只复查一次登录态，未登录就直接判成「必须人工扫码」，
+        把本可自动完成的一步变成整段人工验证等待（2026-11-14 连续 93 次
+        密码登录全部停在这里）。
+
+        只在「密码框仍可见」时补点一次，且调用方保证整次登录只补一次。
+        """
+        frames = []
+        if preferred_frame is not None:
+            frames.append(preferred_frame)
+        try:
+            frames.extend(list(monitor_page.frames))
+        except Exception:
+            pass
+        frames.append(monitor_page)
+
+        seen = set()
+        for frame in frames:
+            if frame is None or id(frame) in seen:
+                continue
+            seen.add(id(frame))
+            try:
+                password_input, _ = self._query_first_visible(frame, selectors['password'])
+            except Exception:
+                password_input = None
+            if not password_input:
+                continue
+            try:
+                submit, submit_selector = self._query_first_visible(frame, selectors['submit'])
+            except Exception:
+                submit, submit_selector = None, None
+            try:
+                if submit:
+                    logger.warning(
+                        f"【{self.pure_user_id}】滑块已通过但仍在登录表单，补点一次登录按钮: {submit_selector}"
+                    )
+                    submit.click()
+                else:
+                    logger.warning(f"【{self.pure_user_id}】滑块已通过但仍在登录表单，补一次回车提交")
+                    password_input.press('Enter')
+                return True
+            except Exception as e:
+                logger.warning(f"【{self.pure_user_id}】补提交登录失败: {e}")
+                return False
+
+        logger.info(f"【{self.pure_user_id}】滑块通过后未找到仍可见的登录表单，不补提交")
+        return False
+
+    def _is_handle_visible(self, handle) -> bool:
+        """元素的可见性判定，异常一律按不可见处理。
+
+        punish 页滑块通过后，页面上常残留不可见的登录框 iframe；把它当成
+        「待扫码验证」会让密码登录白等整段人工验证时间（450 秒）。
+        """
+        if not handle:
+            return False
+        try:
+            return bool(handle.is_visible())
+        except Exception:
+            return False
+
     def _detect_qr_code_verification(self, page) -> tuple:
         """检测是否存在二维码/人脸验证（排除滑块验证）
         
@@ -10046,7 +10110,14 @@ class XianyuSliderStealth:
                     try:
                         iframe_id = iframe.get_attribute('id')
                         if iframe_id == 'alibaba-login-box':
-                            logger.info(f"【{self.pure_user_id}】✅ 检测到 alibaba-login-box iframe")
+                            if not self._is_handle_visible(iframe):
+                                # 滑块/punish 通过后残留的隐藏登录框不是「待扫码」，
+                                # 若照旧上抛会进入 450 秒人工验证等待。
+                                logger.info(
+                                    f"【{self.pure_user_id}】检测到 alibaba-login-box iframe 但不可见，按残留元素跳过"
+                                )
+                                continue
+                            logger.info(f"【{self.pure_user_id}】✅ 检测到可见的 alibaba-login-box iframe")
                             frame = iframe.content_frame()
                             if frame:
                                 frame_url = frame.url if hasattr(frame, 'url') else '未知'
@@ -10175,7 +10246,24 @@ class XianyuSliderStealth:
                 try:
                     frame_url = frame.url
                     logger.debug(f"【{self.pure_user_id}】检查Frame {idx} 是否有二维码: {frame_url}")
-                    
+
+                    # 隐藏 alibaba-login-box 里的 frame 一律不是「待扫码」：
+                    # 该 frame 的 URL 常是 mini_login，只按 URL 判定会绕过首个扫描
+                    # 的可见性检查，让滑块后的残留登录框重新变成 450 秒人工验证。
+                    try:
+                        parent_element = frame.frame_element()
+                        if (
+                            parent_element
+                            and parent_element.get_attribute('id') == 'alibaba-login-box'
+                            and not self._is_handle_visible(parent_element)
+                        ):
+                            logger.debug(
+                                f"【{self.pure_user_id}】Frame {idx} 属于隐藏的 alibaba-login-box，按残留元素跳过"
+                            )
+                            continue
+                    except Exception:
+                        pass
+
                     # 检查frame URL是否包含 mini_login（人脸验证或短信验证页面）
                     if 'mini_login' in frame_url:
                         # 进一步确认不是滑块验证
@@ -10227,7 +10315,12 @@ class XianyuSliderStealth:
                         frame_element = frame.frame_element()
                         if frame_element:
                             parent_iframe_id = frame_element.get_attribute('id')
-                            if parent_iframe_id == 'alibaba-login-box':
+                            if parent_iframe_id == 'alibaba-login-box' and not self._is_handle_visible(frame_element):
+                                # 与首个 iframe 扫描保持同一判据：隐藏的残留登录框不是「待扫码」
+                                logger.debug(
+                                    f"【{self.pure_user_id}】Frame {idx} 的 alibaba-login-box 不可见，按残留元素跳过"
+                                )
+                            elif parent_iframe_id == 'alibaba-login-box':
                                 logger.info(f"【{self.pure_user_id}】✅ 在Frame {idx} 检测到 alibaba-login-box（人脸验证/短信验证）")
                                 logger.info(f"【{self.pure_user_id}】人脸验证/短信验证Frame URL: {frame_url}")
                                 verification_type = self._detect_verification_type(frame)
@@ -10747,6 +10840,8 @@ class XianyuSliderStealth:
             else:
                 logger.info(f"【{self.pure_user_id}】密码登录流程设置 risk_trigger_scene={self.risk_trigger_scene}")
             self._password_slider_runtime_hardened = False
+            # 每次登录重置「滑块后补提交」标记，保证一次登录最多补提交一次
+            self._login_resubmitted_after_punish = False
 
             # 检查日期有效性
             if not self._check_date_validity():
@@ -11703,7 +11798,23 @@ class XianyuSliderStealth:
                                 logger.success(f"【{self.pure_user_id}】✅ 滑块验证后，登录验证成功！")
                                 login_success = True
                             else:
-                                # 滑块验证后仍未登录成功，继续检测二维码/人脸验证（此时应该不会再检测到滑块）
+                                # punish 页滑块通过后页面会退回登录表单，需要补一次提交，
+                                # 否则会被误判成「必须人工扫码」白等整段人工验证时间。
+                                if not getattr(self, '_login_resubmitted_after_punish', False):
+                                    self._login_resubmitted_after_punish = True
+                                    if self._resubmit_login_after_punish(
+                                        monitor_page, login_frame, login_selectors
+                                    ):
+                                        time.sleep(3)
+                                        login_success_after_slider, active_page, _ = self._probe_context_login_success(
+                                            context, monitor_page
+                                        )
+                                        if login_success_after_slider:
+                                            logger.success(
+                                                f"【{self.pure_user_id}】✅ 补提交登录后，登录验证成功！"
+                                            )
+                                            login_success = True
+                                # 补提交后仍未登录成功，继续检测二维码/人脸验证（此时应该不会再检测到滑块）
                                 logger.info(f"【{self.pure_user_id}】等待1秒后继续检测是否需要二维码/人脸验证...")
                                 time.sleep(1)
                                 logger.info(f"【{self.pure_user_id}】滑块验证后，继续检测是否需要二维码/人脸验证...")
