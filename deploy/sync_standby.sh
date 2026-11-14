@@ -24,15 +24,37 @@ standby_ok() {
     [ \"\$ver\" = \"$1\" ]
     [ -f /etc/slidex-captcha.env ] && [ -f $CHECK_DIR/deep_check.py ]
     [ -f $NACE_DIR/config/egress.yaml ] && [ -f $NACE_DIR/health_probe.sh ]
+    sudo grep -q 'slidex_browser' $NACE_DIR/health_probe.sh || { echo 'probe v2.1 or older: browser preflight missing' >&2; exit 1; }
     sudo grep -q '10.144.144.9:9999' $NACE_DIR/health_probe.sh && { echo 'stale probe with typo port 9999' >&2; exit 1; } || true
-    echo \"    standby ok: slidex \$ver + env + check + nace config\"
+    echo \"    standby ok: slidex \$ver + env + check + nace config + probe v2.2\"
     [ -f /etc/systemd/system/ha-probe.timer ] && echo '    standby ok: ha-probe.timer present' || echo '    WARN: ha-probe.timer missing (probe not self-healing on standby)'"
+}
+
+# 浏览器预检：备机浏览器缺失 = 切换即死（/health 照绿）。
+# 2026-11-15 HA 盘点实锤：sync --check 四项全绿但备机 chromium 缺失。
+# 判定与 deploy.sh [4.5/6]、ha-probe v2.2 同款（glob chromium_headless_shell-*）。
+browser_ok() {
+  ssh "$STANDBY" "$STANDBY_VENV/bin/python - <<'PYEOF'
+import glob, os, sys
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    full = p.chromium.executable_path
+cache = os.path.dirname(os.path.dirname(os.path.dirname(full)))
+shell = [os.path.join(d, 'chrome-headless-shell')
+         for d in sorted(glob.glob(os.path.join(cache, 'chromium_headless_shell-*', 'chrome-headless-shell-*')))
+         if os.path.isdir(d)]
+if not any(os.path.exists(s) for s in shell):
+    print(f'    BROWSER MISSING on standby: no chromium_headless_shell-*/ under {cache}', file=sys.stderr)
+    sys.exit(1)
+print(f'    standby ok: browser {shell[0]}')
+PYEOF"
 }
 
 VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
 
 if [ "${1:-}" = "--check" ]; then
   standby_ok "$VERSION" || { echo "standby NOT in sync (want $VERSION)" >&2; exit 1; }
+  browser_ok || { echo "standby browser missing — 切换即死，先按 deploy/README.md 装回" >&2; exit 1; }
   exit 0
 fi
 
@@ -65,6 +87,7 @@ ssh "$STANDBY" '[ -f /etc/systemd/system/ha-probe.timer ] || { echo "WARN: ha-pr
 
 echo "==> [4/4] 备机自检"
 standby_ok "$VERSION"
+browser_ok
 
 echo "✔ standby in sync ($STANDBY = slidex $VERSION)。切换："
 echo "  ssh $STANDBY 'sudo systemctl restart slidex-captcha'"

@@ -1,5 +1,24 @@
 # Changelog
 
+## [Unreleased]
+
+HA 工具链三漂移根修（2026-11-15 HA 盘点衍生）。
+
+### Fixed
+- **sync_standby.sh 补浏览器预检**：原 `--check` 只验 wheel/env/check/nace
+  四项——正是这四项全绿 + 备机 chromium 缺失的"切换即死"组合被 HA 盘点
+  实锤。现补 `browser_ok()`（glob `chromium_headless_shell-*`，判定与
+  deploy.sh [4.5/6]、ha-probe v2.2 同款），并接入全量同步 [4/4] 自检步。
+- **deploy/README.md 对齐现状**：现役主机改 mesh-huawei（gz-cvm 已退役，
+  IP 冒烟示例同步换）；deploy.sh 描述改 7 道门禁（补 [4.5/6] 浏览器预检）；
+  check 同步真源从已删的 upload_check.sh 改为 deploy.sh 本身；新增
+  高可用冷备拓扑一节（sync_standby 双分支、探针 v2.2、切换 SOP）；离线
+  机器浏览器预置步骤（代理续传 + scp + INSTALLATION_COMPLETE）。
+- **删 deploy/upload_check.sh 死管道**：源 `/tmp/slidex-deep` 早已清空、
+  目标 gz-cvm 已退役、deploy.sh [6/6] 已内置 check 同步——三重过时，
+  唯一引用（README）同步清理。
+- **README 清 heal_check.py 幽灵引用**：脚本不存在于仓库，表格行删除。
+
 ## [0.12.1] - 2026-11-14
 
 deep review 第二轮：轮询瞬态容忍 + 建任务预校验前移。

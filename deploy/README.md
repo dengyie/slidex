@@ -1,17 +1,19 @@
 # 部署
 
 目标形态：**单机常驻服务**，业务方通过 `http://<host>:8077` + Bearer key 调用。
+主 = mesh-huawei（华为云上海，10.144.144.9）；gz-cvm（10.144.144.8）已于
+2026-11-10 到期退役，下文 gz-cvm 仅作 systemd 形态的通用参考。
 
 两种宿主形态：
 
 | 宿主 | 进程守护 | 说明 |
 |------|----------|------|
-| gz-cvm（systemd） | `slidex-captcha.service` | 内存充裕，标准形态，见下文 |
+| mesh-huawei（systemd） | `slidex-captcha.service` | 现役主机，标准形态，见下文 |
 | pxed（supervisor） | `supervisor-slidex-captcha.conf` | 4G 无 swap 共享宿主，**必须**额外装 oom_guard + renderer 限制，见文末 |
 
-## gz-cvm 形态（systemd）
+## gz-cvm/mesh-huawei 形态（systemd）
 
-gz-cvm（EasyTier mesh，10.144.144.8）上 systemd 守护。
+mesh-huawei（EasyTier mesh，10.144.144.9，root 直登无 sudo）上 systemd 守护。
 
 ## 布局
 
@@ -39,10 +41,17 @@ sudo install -m 644 deploy/slidex-captcha.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now slidex-captcha
 ```
 
-Playwright 浏览器内核（服务首次求解时会自动下载；离线机器预置：
+Playwright 浏览器内核：有外网的机器服务首启会自动下载；mesh-huawei 等
+离线机器（CDN 被墙）需本地经代理下载后 scp 预置：
 
 ```bash
+# 有外网机器：
 sudo /opt/slidex-captcha/.venv/bin/python -m playwright install chromium-headless-shell
+# 离线机器：本地 curl -C - 断点续传 zip（走 127.0.0.1:7897 代理）→ scp →
+# unzip 进 ~/.cache/ms-playwright/chromium_headless_shell-<rev>/（保留内层
+# chrome-headless-shell-linux64/ 目录）→ touch INSTALLATION_COMPLETE +
+# chmod +x chrome-headless-shell。deploy.sh [4.5/6] 与 sync_standby.sh
+# --check 都会预检此目录。
 ```
 
 ## 发布新版本（日常，一键）
@@ -54,26 +63,39 @@ sudo /opt/slidex-captcha/.venv/bin/python -m playwright install chromium-headles
 ./deploy/deploy.sh 0.9.3    # 或指定已 tag 的版本
 ```
 
-脚本做 6 件事：本地 `python -m build --wheel` → `scp` 到 `/tmp/` →
-`pip install --force-reinstall --no-deps` → `systemctl restart` →
-`sha256sum` 对比本地与线上 solver.py → 跑 `deep_check.py`（23/23 才算过）。
-deep_check 脚本由 `deploy/upload_check.sh` 单独同步到线上。
+脚本做 7 道门禁：本地 `python -m build --wheel` → `scp` 到 `/tmp/` →
+`pip/uv install --force-reinstall --no-deps` → `systemctl restart` →
+`sha256sum` 对比本地与线上 solver.py → **[4.5/6] playwright 浏览器预检**
+（headless shell 缺失直接失败，杜绝 /health 照绿但求解全挂）→
+跑 `deep_check.py`（23/23 才算过，check 脚本由 deploy.sh 本身从 repo 同步，
+仓库是唯一真源）。
 
 ## 线上验收
 
 | 工具 | 用途 |
 |------|------|
-| `check/deep_check.py` | 23 项验收：契约边界/上下文卫生/代理铁律/并发隔离/资源泄漏 |
-| `check/heal_check.py` | 故障自愈：杀 Chromium 后服务应自动重建农场 |
+| `deploy/check/deep_check.py` | 23 项验收：契约边界/上下文卫生/代理铁律/并发隔离/资源泄漏 |
 | `GET /health` | `{ok, active_tasks, done_24h, fail_24h, types}` |
 
-curl 冒烟：
+curl 冒烟（以现役主机 mesh-huawei 为例，gz-cvm 已于 2026-11-10 到期退役）：
 
 ```bash
-curl -s http://10.144.144.8:8077/health
-curl -s http://10.144.144.8:8077/v1/solve -H "Authorization: Bearer $KEY" \
+curl -s http://10.144.144.9:8077/health
+curl -s http://10.144.144.9:8077/v1/solve -H "Authorization: Bearer $KEY" \
   -H 'Content-Type: application/json' -d '{"type":"px_press","appId":"PXzC5j78di",...}'
 ```
+
+## 高可用（冷备切换）
+
+主 = mesh-huawei（10.144.144.9），备 = mesh-mango2（10.144.144.88，冷备，
+pxed 实测 load 顶不住 chrome）：
+
+- `./deploy/sync_standby.sh`：wheel/env/check/nace 配置全量同步到备机 + 自检
+- `./deploy/sync_standby.sh --check`：只自检（版本、env、check 工具、
+  探针 v2.2、**playwright 浏览器**——四绿但浏览器缺失 = 切换即死）
+- 备机探针：ha-probe.timer（2min）+ health_probe.sh v2.2
+- 切换 SOP：备机 `systemctl restart slidex-captcha` 后，
+  调用方 `CAPTCHA_RUN_BASE` 改指 `http://10.144.144.88:8077`
 
 ## 运维注意
 
