@@ -61,13 +61,14 @@ if [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
 fi
 echo "    sha ok: ${LOCAL_SHA:0:16}…"
 
-echo "==> [4.5/6] playwright browser preflight"# wheel 重装（--no-deps）不会带回浏览器缓存；换机/清缓存后 /health 照绿但
+# wheel 重装（--no-deps）不会带回浏览器缓存；换机/清缓存后 /health 照绿但
 # 求解全挂（2026-11-14 线上验收实锤：deep_check 9/23，14 项 browser_launch_failed）。
 # 双二进制校验：solver 走 launch(headless=True) 用 headless shell（必须存在）；
 # 完整 chromium（executable_path 指向的）缺失时仅告警——有头模式才用。
 # 注意 executable_path 永远指完整 chromium，直接拿它判会漏报 headless 缺失。
-ssh "$REMOTE" "$VENV/bin/python - <<'PYEOF'
-import glob, os, re, sys
+echo "==> [4.5/6] playwright browser preflight"
+ssh -T "$REMOTE" "$VENV/bin/python - <<'PYEOF' 2>&1
+import glob, os, sys
 try:
     from playwright.sync_api import sync_playwright
 except ImportError as e:
