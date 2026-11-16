@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.13.1] - 2026-11-16
+
+线上表现驱动迭代（2026-11-16 mesh-huawei 日志复盘）。
+
+### Added
+- **px 导航层进程内重试**：`challenge_load_failed` / `challenge_load_timeout`（retryable）终态前当场换新 context 再试一次，预算减半（≥30s）；与 farm 死亡重试互斥（elif），两次都败才终态。线上实测 sticky 代理抖动 `ERR_PROXY_CONNECTION_FAILED` → 同一任务 12s 终态失败、调用方整轮重跑——抖动通常秒级恢复，不该由调用方承担。
+- **/v1/solve 调用方错误分流**：401 / 非法 JSON / type 缺失 / 未知 type / 4xx 参数类 HandlerFailure 计入新增 `caller_error_24h`，不再混入 `fail_24h`。线上 restart 冒烟测试的 2×401 + 5×422 曾让健康服务在面板上呈现 6 done / 6 fail。
+- **/health 输出 `caller_error_24h`**：求解失败与调用方配置错误分开可见。
+- **回归测试 7 条**：px 导航重试成功恢复 / 双败终态+预算减半 / token_timeout 不触发 / farm 分支优先级，service 三条分流测试（401+坏JSON / 坏type / 真求解失败仍计 fail_24h）。
+
+### Fixed
+- **未知 type 计数漏网**：`handler_registry.get()` 抛 `HandlerFailure.unsupported`（400）原本在分流 try/except 之外，新测试钉住后才暴露——查找移入分流块。
+- **solve() 死代码块**：早前导航重试草稿残留的 `elapsed_frac` 分支（引用不存在符号，真走到即 NameError）删除。
+
 ## [0.13.0] - 2026-11-16
 
 滑块拟人化 R1-R8 全量落地（docs/slider-humanization-requirements-2026-11-16）+ R7 回执语义代码 review 根修。

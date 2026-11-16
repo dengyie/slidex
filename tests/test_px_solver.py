@@ -396,6 +396,107 @@ async def test_navigate_playwright_timeout_is_load_timeout():
     assert result.retryable_error is True
 
 
+async def test_nav_failure_is_retried_in_process_and_recovers():
+    """导航瞬时失败（代理抖动）进程内重试一次后成功，不必由调用方整轮重跑。
+
+    2026-11-16 线上实测：ERR_PROXY_CONNECTION_FAILED → challenge_load_failed
+    同一任务 12s 终态失败。第一次 context 的 page goto 报代理错，第二次
+    context 正常拿到 pass token——solve 应恢复成功。
+    """
+    bad_page = _FakePage(goto_exc=RuntimeError("net::ERR_PROXY_CONNECTION_FAILED"))
+    bad_context = _FakeContext([[]], page=bad_page)
+    good_page = _FakePage()
+    good_context = _FakeContext([_pass_cookies()], page=good_page)
+    made = [bad_context, good_context]
+
+    async def _factory(opts):
+        return made.pop(0)
+
+    solver = PxPressSolver(context_factory=_factory)
+
+    result = await solver.solve(_request())
+
+    assert result.success is True
+    assert result.tokens["px3"] == _PASS_PX3
+    assert bad_context.closed is True
+    assert good_context.closed is True
+
+
+async def test_nav_failure_twice_is_final_and_uses_halved_budget():
+    """两次导航都败才是终态；重试请求的预算减半（不低于 30s）。
+
+    press 的 host 导航页内超时被 _HOST_NAV_TIMEOUT_S=30 封顶，减半预算
+    （120→60）在 goto kwargs 上不可见，必须看传给 _solve_once 的请求本身。
+    """
+    budgets = []
+    real_solve_once = PxPressSolver._solve_once
+
+    async def _spy(self, request, started):
+        budgets.append(request.solve_timeout_s)
+        return await real_solve_once(self, request, started)
+
+    page = _FakePage(goto_exc=RuntimeError("net::ERR_PROXY_CONNECTION_FAILED"))
+    context = _FakeContext([[]], page=page)
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
+    solver._solve_once = _spy.__get__(solver)  # type: ignore[method-assign]
+
+    result = await solver.solve(_request(timeout=120))
+
+    assert result.success is False
+    assert result.error_kind == ERR_CHALLENGE_LOAD
+    assert result.retryable_error is True
+    assert budgets == [120.0, 60.0]
+
+
+async def test_nav_retry_not_triggered_for_token_timeout():
+    """px_token_timeout（页面加载了但没出 token）不是导航层失败，不触发
+    进程内导航重试——避免把 25s 的慢任务翻倍拖成 55s。"""
+    page = _FakePage()
+    context = _FakeContext([[]], page=page)
+    made = [context]
+
+    async def _factory(opts):
+        return made.pop(0)
+
+    solver = PxPressSolver(context_factory=_factory)
+
+    result = await solver.solve(_request(timeout=60))
+
+    assert result.success is False
+    assert result.error_kind == ERR_TOKEN_TIMEOUT
+    # 只建了一个 context：没有第二次
+    assert made == []
+
+
+async def test_farm_death_retry_takes_precedence_over_nav_retry():
+    """farm 死亡重试与导航重试互斥（elif）：farm 分支拿走这次重试后
+    nav 分支不再叠加——farm 重试复用原预算（120 不减半），总共只跑两次。
+    """
+    budgets = []
+
+    async def _fake_solve_once(request, started):
+        budgets.append(request.solve_timeout_s)
+        if len(budgets) == 1:
+            # 第一次求解期间 farm 死亡：epoch 推进，solve() 的 farm 分支触发
+            solver._farm_epoch += 1
+        return PxPressResult(
+            success=False, mode=request.mode,
+            error_kind=ERR_CHALLENGE_LOAD,
+            error="challenge_load_failed: net::ERR_PROXY_CONNECTION_FAILED",
+            retryable=True,
+        )
+
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(_FakeContext([[]])))
+    solver._solve_once = _fake_solve_once  # type: ignore[method-assign]
+
+    result = await solver.solve(_request(timeout=120))
+
+    assert result.success is False
+    assert result.error_kind == ERR_CHALLENGE_LOAD
+    # farm 分支触发（预算不减半），elif 挡住 nav 分支——只有两次
+    assert budgets == [120.0, 120.0]
+
+
 async def test_rpc_swallow_survives_cancelled_future():
     """_rpc 的收割 callback 在 future 被取消时不得打崩自己（pxed 第 13 轮
     日志实测 "Exception in callback _rpc._swallow"：CancelledError 是
@@ -1132,7 +1233,11 @@ async def test_iframe_inject_timeout_retries_once(monkeypatch):
 
 
 async def test_iframe_inject_both_attempts_fail_is_load_failed(monkeypatch):
-    """两次注入都失败：维持既有 challenge_load_failed 语义（不静默继续）。"""
+    """两次注入都失败：维持既有 challenge_load_failed 语义（不静默继续）。
+
+    注入失败归类为 challenge_load_failed 且 retryable——新导航重试会对同一
+    任务进程内再试一次（第二次也注入失败才终态），evaluate 共 4 次尝试。
+    """
     import asyncio as _asyncio
 
     class _AlwaysFailInjectPage(_FakePage):
@@ -1154,7 +1259,7 @@ async def test_iframe_inject_both_attempts_fail_is_load_failed(monkeypatch):
     assert result.success is False
     assert result.error_kind == ERR_CHALLENGE_LOAD
     assert "iframe inject failed" in result.error
-    assert page.evaluate_attempts == 2
+    assert page.evaluate_attempts == 4
 
 
 async def test_diagnostics_present_on_success_and_failure():

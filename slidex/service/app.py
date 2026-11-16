@@ -129,6 +129,10 @@ class TaskStore:
         self._ttl_s = ttl_s
         self._done: Deque[float] = deque()
         self._fail: Deque[float] = deque()
+        # 调用方错误（401 鉴权失败 / 4xx 参数错误）单列：这些不是求解失败，
+        # 混进 fail_24h 会污染运维看板（2026-11-16 线上：重启冒烟把 7 个
+        # 401/422 计成求解失败，6 done 对 6 fail 看起来像全挂）。
+        self._caller_error: Deque[float] = deque()
 
     async def create(
         self,
@@ -216,13 +220,18 @@ class TaskStore:
         (self._done if ok else self._fail).append(now)
         self._trim(now)
 
+    def record_caller_error(self) -> None:
+        """调用方错误（401/4xx）单独计数，不计入 fail_24h。"""
+        self._caller_error.append(time.monotonic())
+        self._trim(time.monotonic())
+
     def record_outcome(self, ok: bool) -> None:
         """同步接口（/v1/solve）的成败同样计入 24h 看板。"""
         self._record_outcome(ok)
 
     def _trim(self, now: float) -> None:
         cutoff = now - _COUNTER_WINDOW_S
-        for bucket in (self._done, self._fail):
+        for bucket in (self._done, self._fail, self._caller_error):
             while bucket and bucket[0] < cutoff:
                 bucket.popleft()
 
@@ -240,7 +249,11 @@ class TaskStore:
     def counters(self) -> Dict[str, int]:
         now = time.monotonic()
         self._trim(now)
-        return {"done_24h": len(self._done), "fail_24h": len(self._fail)}
+        return {
+            "done_24h": len(self._done),
+            "fail_24h": len(self._fail),
+            "caller_error_24h": len(self._caller_error),
+        }
 
     async def cancel_all(self) -> None:
         # 取消与清表必须原子：若先 list 再 clear，窗口内 create() 插入的新
@@ -393,17 +406,35 @@ def create_app(
             "active_tasks": int(getattr(px_solver, "active_tasks", 0) or 0),
             "done_24h": counters["done_24h"],
             "fail_24h": counters["fail_24h"],
+            # 调用方错误（401/4xx）单列：不计入 fail_24h（2026-11-16 线上
+            # 冒烟把 7 个 401/422 计成求解失败的教训）
+            "caller_error_24h": counters["caller_error_24h"],
             "types": list(handler_registry.canonical_types()),
         }
 
     @app.post("/v1/solve")
     async def solve(request: Request) -> JSONResponse:
-        auth.check(request)
-        payload = await _read_json(request)
+        try:
+            auth.check(request)
+        except HandlerFailure as exc:
+            # 401 是调用方配置错误，不是求解失败——单列不计入 fail_24h
+            store.record_caller_error()
+            raise
+        try:
+            payload = await _read_json(request)
+        except HandlerFailure as exc:
+            store.record_caller_error()
+            raise
         type_name = normalize_type(payload.get("type") or payload.get("captchaType"))
         if not type_name:
+            store.record_caller_error()
             raise HandlerFailure.bad_request("type is required")
-        handler = handler_registry.get(type_name)
+        try:
+            handler = handler_registry.get(type_name)
+        except HandlerFailure as exc:
+            # 未知 type 是调用方错误（4xx 类）：单列，不混进求解失败看板
+            store.record_caller_error()
+            raise
         body = dict(payload)
         body["type"] = type_name
         try:
@@ -418,10 +449,16 @@ def create_app(
                 retryable=True,
                 code=codes.SOLVE_TIMEOUT,
             ) from None
-        except HandlerFailure:
-            # 同步接口的成败也要进 24h 计数，否则 /health 的 fail_24h 永远
-            # 只算 v2 任务，运维看板会把同步链路的失败全吞掉。
-            store.record_outcome(False)
+        except HandlerFailure as exc:
+            if exc.status_code >= 400 and exc.status_code < 500 and exc.kind in (
+                "bad_request", "unsupported_type",
+            ):
+                # 调用方参数错误（4xx 类）：单列，不混进求解失败看板
+                store.record_caller_error()
+            else:
+                # 同步接口的成败也要进 24h 计数，否则 /health 的 fail_24h 永远
+                # 只算 v2 任务，运维看板会把同步链路的失败全吞掉。
+                store.record_outcome(False)
             raise
         except Exception as exc:
             # handler 把 HanderFailure 之外的异常吞成 500 信封，而不是让

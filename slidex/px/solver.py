@@ -685,6 +685,29 @@ class PxPressSolver:
                 retried = await self._await_solve_capped(effective, started)
                 if retried is not None:
                     return retried
+            elif (
+                result is not None
+                and not result.success
+                and result.retryable_error
+                and result.error_kind in (ERR_CHALLENGE_LOAD, ERR_CHALLENGE_TIMEOUT)
+            ):
+                # 导航层瞬时失败进程内重试一次（2026-11-16 线上实测：sticky
+                # 代理抖动 ERR_PROXY_CONNECTION_FAILED → 同一任务 12s 终态
+                # 失败，调用方整轮重跑；代理抖动通常秒级恢复）。与 farm 死亡
+                # 重试互斥（elif）；重试预算减半（不低于 30s），两次都败才是
+                # 终态，HTTP 判死类不可重试错误不进这里。
+                retried_budget = max(30.0, request.solve_timeout_s / 2.0)
+                logger.warning(
+                    "px: nav-level failure ({}) — retrying once in-process "
+                    "with fresh context (budget {:.0f}s)",
+                    result.error_kind, retried_budget,
+                )
+                retried = await self._await_solve_capped(
+                    dataclasses.replace(effective, solve_timeout_s=retried_budget),
+                    time.monotonic(),
+                )
+                if retried is not None:
+                    return retried
             if result is not None:
                 return result
             return PxPressResult(

@@ -522,6 +522,48 @@ def test_health_counts_v1_solve_outcomes():
     assert bad["fail_24h"] == 1
 
 
+def test_caller_errors_not_counted_as_solve_failures():
+    """2026-11-16 线上教训：重启冒烟把 7 个 401/422 计成 fail_24h，
+    done=6 fail=6 看起来像全挂——调用方错误必须单列，不污染求解看板。"""
+    client = _client()
+    # 401：错误 key
+    client.post("/v1/solve", json=_PX_BODY, headers={"Authorization": "Bearer wrong"})
+    # 422：body 不是合法 JSON 对象
+    client.post(
+        "/v1/solve",
+        content=b"not-json",
+        headers={**{"Authorization": "Bearer secret",
+                    "Content-Type": "application/json"}},
+    )
+    body = client.get("/health").json()
+    assert body["fail_24h"] == 0
+    assert body["caller_error_24h"] == 2
+    assert body["done_24h"] == 0
+
+
+def test_bad_request_type_is_caller_error_not_solve_failure():
+    """type 缺失 / unsupported_type 也是调用方错误（4xx 类）。"""
+    client = _client()
+    headers = {"Authorization": "Bearer secret"}
+    client.post("/v1/solve", json={"type": ""}, headers=headers)
+    client.post(
+        "/v1/solve", json={"type": "no_such_type"}, headers=headers,
+    )
+    body = client.get("/health").json()
+    assert body["fail_24h"] == 0
+    assert body["caller_error_24h"] == 2
+
+
+def test_solver_failure_still_counts_after_caller_error_split():
+    """分流不吞真失败：求解器失败仍进 fail_24h。"""
+    solver = _FakePxSolver(result=PxPressResult(False, error_kind="px_token_timeout"))
+    client = _client(solver)
+    client.post("/v1/solve", json=_PX_BODY, headers={"Authorization": "Bearer secret"})
+    body = client.get("/health").json()
+    assert body["fail_24h"] == 1
+    assert body["caller_error_24h"] == 0
+
+
 # ────────────────────── geetest_v3 兼容 ──────────────────────
 
 
