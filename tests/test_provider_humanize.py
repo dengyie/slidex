@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
 from unittest import mock
 
 import socket
@@ -108,21 +109,27 @@ async def test_provider_slide_holds_recorded_press_point_and_skips_it():
 
 @pytest.mark.asyncio
 async def test_provider_slide_ends_with_overshoot_back_and_jitter():
-    """释放前必须出现过冲（x 超过终点）再回拖的收尾序列。"""
+    """释放前概率化过冲（R5）：出现时 x 超过终点再回拖收尾。用真实
+    random.seed 强制过冲分支命中（uniform 不再 mock，内核尾段点数可变）。"""
     provider = AliyunNoCaptchaProvider()
     page = _FakePage()
     provider.bind_response_listener = mock.MagicMock()
 
     traj = [[0.0, 0.0, 800.0], [87.0, 0.0, 40.0]]
-    with mock.patch("random.uniform", side_effect=lambda a, b: (a + b) / 2), \
-         mock.patch("random.randint", side_effect=lambda a, b: a):
-        await provider.perform_slide(page, _FakeElements(), 87, traj)
-
-    moves = [e for e in page.mouse.events if e[0] == "move"]
-    # 终点绝对 x = start(10 + 40/2=30) + 87 = 117；中点均匀化 uniform → 过冲 x > 117
-    final_xs = [m[1] for m in moves[-3:]]
-    assert max(final_xs) > 117.0  # 过冲
-    assert final_xs[-1] < max(final_xs)  # 回拖/抖动收尾
+    fired = False
+    for seed in range(50):
+        page = _FakePage()
+        random.seed(seed)
+        with mock.patch("random.uniform", side_effect=lambda a, b: (a + b) / 2), \
+             mock.patch("random.randint", side_effect=lambda a, b: a):
+            await provider.perform_slide(page, _FakeElements(), 87, traj)
+        moves = [e for e in page.mouse.events if e[0] == "move"]
+        # 终点绝对 x = start(10 + 40/2=30) + 87 = 117；中点均匀化 uniform → 过冲 x > 117
+        final_xs = [m[1] for m in moves[-4:]]
+        if max(final_xs) > 117.0:
+            fired = True
+            assert final_xs[-1] < max(final_xs)  # 回拖/抖动收尾
+    assert fired  # R5 概率化过冲在 50 个 seed 里必须出现
     assert page.mouse.events[-1][0] == "up"
 
 

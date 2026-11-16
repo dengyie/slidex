@@ -33,6 +33,9 @@ class ProviderSolverMixin:
         self._provider_name = provider
         self._provider: Optional[CaptchaProvider] = None
         self._use_provider_mode = provider is not None
+        # R7 回执语义：最近一次 provider 结果的上游码/放行确认
+        self.last_upstream_code: Optional[str] = None
+        self.last_verified: Optional[bool] = None
         super().__init__(**kwargs)
 
     async def _detect_and_init_provider(self, page: Page) -> bool:
@@ -164,6 +167,9 @@ class ProviderSolverMixin:
                     await self._provider.cleanup_after_result(page)
                 last_code = result.code if getattr(result, "code", None) is not None else -1
                 self.last_slide_code = last_code
+                # R7：透传上游拒绝码与回执语义（F001 类 → 换新会话；F015 类 → 重取图）
+                self.last_upstream_code = getattr(result, "upstream_code", None)
+                self.last_verified = getattr(result, "verified", None)
                 if result.success:
                     logger.success(f"[{self.pure_user_id}] provider solve success! (attempt={attempt})")
                     break

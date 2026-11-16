@@ -33,13 +33,24 @@ class ProviderElements:
 
 @dataclass
 class SolveResult:
-    """求解结果"""
+    """求解结果
+
+    「滑块拖完/页面判定成功」(success) 与「上游回执确认放行」(verified)
+    分离（R7，docs/slider-humanization-requirements-2026-11-16 §3）：
+    z.ai 实证 `{success:true, verifyResult:false, verifyCode:F001}` 会被
+    旧判定当成功，页面实际未放行。verified=False 且 reason=no_receipt
+    表示未拿到任何回执通道（宁缺勿假）；upstream_code 携带上游 F 码
+    （F001 风控类 → 调用方应换新会话；F015 位置类 → 重取图即可）。
+    """
     success: bool
     cookies: Optional[Dict]
     error: Optional[str] = None
     need_retry: bool = False
     confidence: float = 0.0  # 匹配置信度
     code: Optional[int] = None  # 校验包 code；超时为 -1；有包无数字码的失败为 1
+    verified: Optional[bool] = None  # 上游回执确认放行；None = 未取到回执（宁缺勿假）
+    upstream_code: Optional[str] = None  # 上游失败码（F001/F015 等）
+    reason: Optional[str] = None  # verified 非 True 时归因（no_receipt / 上游码）
 
 
 class CaptchaProvider(ABC):

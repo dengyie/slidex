@@ -106,14 +106,22 @@ class TestTrajectoryGeneration:
         assert trajectory[-1][0] == distance
 
     def test_generate_trajectory_x_monotonic_increase(self):
-        """测试 x 坐标单调递增（正距离）"""
+        """测试 x 主段近似单调递增（R4：AR(1) 路径噪声允许 ≤1px 采样回退，
+        与池质检 _x_monotonic_forward 的 1px 容差对齐；R5：回退超过过冲
+        上限只允许出现在尾段过冲回拖内）。"""
         trajectory = generate_trajectory(100, attempt=1)
 
         x_coords = [point[0] for point in trajectory]
 
-        # x 应该单调递增
-        for i in range(1, len(x_coords)):
-            assert x_coords[i] >= x_coords[i-1]
+        # 找主拖动段终点（最后一个 x==distance 的位置之前：回退 ≤1.2px）
+        peak = max(x_coords)
+        peak_idx = x_coords.index(peak)
+        for i in range(1, peak_idx + 1):
+            assert x_coords[i] >= x_coords[i-1] - 1.2
+        # 回拖段（如有）：终点必须回到 distance，回退量 ≤ 过冲上限 10px
+        assert x_coords[-1] == 100
+        for i in range(peak_idx + 1, len(x_coords)):
+            assert x_coords[i] >= peak - 10.0
 
     def test_generate_trajectory_y_drift_downward(self):
         """测试 y 坐标向下漂移趋势"""

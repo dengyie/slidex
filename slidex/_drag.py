@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
+from slidex._humanize import maybe_overshoot_points
 from slidex._trajectory import slide_end_hold_range
 
 
@@ -65,18 +66,14 @@ def build_drag_events(
         last_x, last_y = float(x), float(y)
 
     if extra_overshoot and points:
-        overshoot = random.uniform(3.0, 6.0)
-        back = random.uniform(2.0, 3.5)
-        add(random.uniform(60, 110), type="mouseMoved",
-            x=last_x + overshoot, y=last_y + random.uniform(-1.5, 1.5),
-            buttons=1, pointerType="mouse")
-        add(random.uniform(50, 90), type="mouseMoved",
-            x=last_x + overshoot - back, y=last_y + random.uniform(-1.0, 1.0),
-            buttons=1, pointerType="mouse")
-        add(random.uniform(30, 60), type="mouseMoved",
-            x=last_x + random.uniform(-1.0, 1.0), y=last_y,
-            buttons=1, pointerType="mouse")
-        last_x = last_x + random.uniform(-1.0, 1.0)
+        # R5：固定三步过冲（每次必现、幅度固定）改为内核概率化过冲——
+        # 30-60% 出现、幅度 uniform(2,9)px 按路程限幅、回拖 uniform(1,4)px、
+        # 15% 概率两次修正。点序 y 语义与 compose_human_points 对齐：
+        # 相对按下原点的偏移，回收到按下水平线附近。
+        for tx, ty, td in maybe_overshoot_points(last_x - start_x):
+            last_x, last_y = start_x + float(tx), start_y + float(ty)
+            add(float(td), type="mouseMoved", x=last_x, y=last_y,
+                buttons=1, pointerType="mouse")
 
     lo, hi = slide_end_hold_range()
     add(random.uniform(lo, hi) * 1000.0, type="mouseReleased",

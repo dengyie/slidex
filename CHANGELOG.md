@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.13.0] - 2026-11-16
+
+滑块拟人化 R1-R8 全量落地（docs/slider-humanization-requirements-2026-11-16）+ R7 回执语义代码 review 根修。
+
+### Added
+- **`_humanize.py` 拟人运动学内核**：minimum-jerk 母线（Flash & Hogan 五次曲线，±5% 不对称）、Fitts 定律时长 `clamp(320+900·log2((D+40)/40)/3.5, 380, 1500)ms`、gamma(shape=2.2) 间隔（8ms 下限）、AR(1) 路径噪声（σ=0.4 ρ=0.7，末 3 点收敛）、Y 轴 8-12Hz 多模态阻尼震颤、子动作（sub-movement）2-4 段合成、概率化过冲（30-60% 出现、幅度按路程限幅）、骨架独立采样（steps 12-22）、终态 `bridge_cap` 速度比打磨（与 `velocity_series` 同款配对，40 轮不动点）。消除 `_trajectory`/`_gestures` 双引擎统计漂移。
+- **统计契约测试 17 条**（`tests/test_humanize_stats.py`）：相邻显著速度比 < 2.5、无 ≥4 步 ±1% 平顶（≤5/200）、gamma 右偏直方图、Fitts 距离-时长 Pearson r > 0.4、骨架跨调用独立——R1 验收线钉成回归屏障。
+- **R7 契约测试 29 条**（`tests/test_r7_receipt_contract.py`）：信封判定、SolveResult 回执字段、三通道拒绝捕获、调用方归因。
+- **路由根修测试 8 条**：code=-2 换家族不重放、-1 同录制重放对照组、`AliyunNoCaptchaProvider` F001 实例级归因通路、纯函数性断言。
+- **R8 池回放个体化**：真人录制 ×0.8-1.25 时间缩放（8ms 采样率下限钳制）+ AR(1) 噪声叠加 + `source=pool:<file>` 归因日志；code=-1 重放确定性契约靠个体化模板缓存保持。
+
+### Changed
+- **R7 成功判定契约**：`{success:true, verifyResult:false, verifyCode:F001}` 类信封一律判失败（页面未放行）。`SolveResult` 增加 `verified/upstream_code/reason` 三字段——「拖完」与「上游确认放行」分离，未拿到回执 `verified=None reason=no_receipt`（宁缺勿假）。`aliyun_captcha_js` 校验包 `Code=Success` 单独存在不再判成功。
+- **R5 过冲概率化**：删除 `_drag.py`/`aliyun.py`/`aliyun_captcha_js.py`/`geetest.py` 四处恒定三步过冲，统一走内核 `maybe_overshoot_points`。
+- **`_trajectory.py` 重写**：委托内核 + API 兼容层（>200ms delay 拆分带位移线性插值，v=dx/dt 守恒）。
+
+### Fixed
+- **[review] F001 拒绝路由根修**：console 拒绝回执原设 `code=-1` 会触发「同录制原路重放」——与 R7「F001 同会话重拖无意义」语义矛盾。新增专用码 `UPSTREAM_REJECT_CODE=-2`，GestureSession 收到 -2 必 consume 当前家族/录制换下一个；legacy 循环收到 -2 直接停拖转被动归因（对齐 300 punish 的 stop 语义），telemetry 加 `slide_reject_stop` 事件。
+- **[review] `last_verify_code` 全局状态根修**：`interpret_slide_json` 函数属性只写不读且并发求解交叉污染——已删除，函数回归纯函数；verifyCode 归因改由调用方经 `extract_verify_code` 记到实例（`AliyunNoCaptchaProvider._last_upstream_code`），并覆写 `get_result` 把 `verified/upstream_code/reason` 透传进 `SolveResult`（此前该 provider 通路的 F001 归因完全断链）。
+- **[review] attempt 粒度归因**：重试轮失败且无新回执时 `last_verified` 清 None，不再把上一轮 F001 归因错安到本轮捕获面 miss 上。
+- **[review] 清理**：aliyun.py 死变量 `end_x/end_y`、solver `-1 if code is None else -1` 恒值三元式、测试重复 import / 未用参数。
+
 ## [Unreleased]
 
 HA 工具链三漂移根修（2026-11-15 HA 盘点衍生）。

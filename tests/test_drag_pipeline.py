@@ -6,6 +6,7 @@ RTT 撕成 2-6 秒台阶。流水线派发按设计间隔 fire-and-forget，事�
 RTT 解耦——本文件用带延迟的假会话钉住这一性质。
 """
 import asyncio
+import random
 import time
 
 import pytest
@@ -36,15 +37,36 @@ def test_build_drag_events_order_and_buttons():
     assert timeline[-1][1]["buttons"] == 0    # 松键
     # 末端握持（0.6.18 真人要领）：release 前的 gap 在 0.45-1.10s 量级
     assert timeline[-1][0] >= 300.0
-    # 过冲/回拖/回中三步存在
-    assert types.count("mouseMoved") >= 8 + 3 + 2
+    # 接近 ×2 + 8 个位移点 + 松键 = 至少 11 条
+    assert types.count("mouseMoved") >= 8 + 2
+
+
+def test_build_drag_events_overshoot_is_probabilistic():
+    """R5：固定三步过冲删除，extra_overshoot=True 时 30-60% 概率出现
+    内核概率化过冲尾（3-7 点或 0 点），False 时永不追加。"""
+    random.seed(101)
+    t_without = build_drag_events(0.0, 0.0, _make_timeline_points(), extra_overshoot=False)
+    assert len(t_without) == 2 + 1 + 9 + 1  # 接近×2 + press + 9 位移点 + release
+    fired = sum(
+        len(build_drag_events(0.0, 0.0, _make_timeline_points(), extra_overshoot=True))
+        - len(t_without)
+        for _ in range(40)
+    )
+    assert fired > 0  # 概率化过冲在 40 次抽样里必须出现
+    for n_extra in (
+        len(build_drag_events(0.0, 0.0, _make_timeline_points(), extra_overshoot=True))
+        - len(t_without)
+        for _ in range(40)
+    ):
+        assert n_extra in (0, 3, 4, 5, 6, 7)  # 内核尾段点数上限 7（两次修正+回拖拆分）
 
 
 def test_build_drag_events_no_double_overshoot():
+    """extra_overshoot=False 与 True 的差异只来自概率化过冲尾，不再固定 +3。"""
+    random.seed(202)
     t_with = build_drag_events(0.0, 0.0, _make_timeline_points(), extra_overshoot=True)
     t_without = build_drag_events(0.0, 0.0, _make_timeline_points(), extra_overshoot=False)
-    # legacy 轨迹已烘焙过冲点序，extra_overshoot=False 不再追加三步
-    assert len(t_with) == len(t_without) + 3
+    assert len(t_with) - len(t_without) in (0, 3, 4, 5, 6, 7)
 
 
 @pytest.mark.asyncio

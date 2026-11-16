@@ -56,7 +56,11 @@ from slidex._async_budget import await_with_budget
 from slidex._cookies import cookie_domain_for_url, parse_cookie_header, select_cookies_for_url
 from slidex._frames import iter_search_targets, query_in_targets, wait_in_targets
 from slidex._slide_geometry import clamp_travel, points_from_recorded
-from slidex._slide_result import interpret_slide_json, is_punish_slide_code
+from slidex._slide_result import (
+    UPSTREAM_REJECT_CODE,
+    interpret_slide_json,
+    is_punish_slide_code,
+)
 from slidex._success_record import (
     FINGERPRINT_AUDIT_JS,
     SCHEMA_VERSION,
@@ -171,6 +175,9 @@ class SliderSolver(ProviderSolverMixin):
         self._result_event = asyncio.Event()
         self._slide_code = None
         self._slide_ok: Optional[bool] = None
+        # R7：上游拒绝码（console 回执 verifyCode，F001/F015），供上层区分
+        # 「风控拒 → 换新会话」与「几何未命中 → 重取图」
+        self._slide_upstream_code: Optional[str] = None
         # 本轮 solve 内最近一次 /slide 判决码（300=other-punish 等），
         # 供宿主区分"风控惩罚拒绝"与"本地异常/轨迹质量失败"
         self.last_slide_code: Optional[int] = None
@@ -738,7 +745,14 @@ class SliderSolver(ProviderSolverMixin):
             await self._close_cdp_only()
 
     async def solve_on_page(self, page, page_url: str = "") -> Tuple[bool, Optional[dict]]:
-        """在调用方持有的 Playwright Page 上求解，不接管浏览器生命周期。"""
+        """在调用方持有的 Playwright Page 上求解，不接管浏览器生命周期。
+
+        R7 回执语义：返回布尔值为「上游确认放行」(verified)——
+        ``self.last_verified`` / ``self.last_upstream_code`` 提供归因：
+        - verified=False + upstream_code=F001 类 → 换新会话重试（同会话重拖无意义）
+        - verified=False + upstream_code=F015 类 → 重取图再拖
+        - verified=None → 未取到任何回执通道（宁缺勿假，按失败处理）
+        """
         self.last_fallback_used = None
         self._is_cdp_mode = True
         self._solve_mode = "playwright_page"
@@ -746,6 +760,8 @@ class SliderSolver(ProviderSolverMixin):
         self._success_outcome = None
         self._success_extra = None
         self.last_slide_code = None
+        self.last_upstream_code = None
+        self.last_verified = None
         self._solve_t0 = time.monotonic()
         self.page = page
         self.context = page.context
@@ -779,7 +795,11 @@ class SliderSolver(ProviderSolverMixin):
                 success=success,
                 status="success" if success else "failed",
                 cookies=cookies,
-                extra={"failure_reason": None if success else "solve_failed"},
+                extra={
+                    "failure_reason": None if success else "solve_failed",
+                    "verified": self.last_verified,
+                    "upstream_code": self.last_upstream_code,
+                },
             )
             return success, cookies
         except Exception as e:
@@ -896,9 +916,22 @@ class SliderSolver(ProviderSolverMixin):
             ok, code = await self._wait_slide_outcome(6.0, success_code)
             last_code = code if code is not None else -1
             self.last_slide_code = last_code
+            # R7：归因按 attempt 粒度维护——本轮拿到拒绝回执才置
+            # verified=False + 透传 F 码；本轮成功置 True；本轮失败且无新
+            # 回执（捕获面 miss/超时）时清 verified，不把上一轮的 F001
+            # 归因错安到本轮失败上（upstream_code 保留供日志对照）。
+            if getattr(self, "_slide_upstream_code", None):
+                self.last_upstream_code = self._slide_upstream_code
+                self.last_verified = False
+            elif ok:
+                self.last_verified = True
+                self.last_upstream_code = None
+            else:
+                self.last_verified = None
             logger.info(
                 f"[{self.pure_user_id}] gesture {plan.archetype} attempt {attempt}: "
-                f"ok={ok} code={code}"
+                f"ok={ok} code={code} "
+                f"upstream={getattr(self, 'last_upstream_code', None) or '-'}"
             )
             self._emit_step(
                 "legacy",
@@ -925,6 +958,19 @@ class SliderSolver(ProviderSolverMixin):
                 )
                 self._emit_telemetry_event(
                     "slide_punish_stop", slide_code=code, attempt=attempt, mode="legacy"
+                )
+                break
+            if last_code == UPSTREAM_REJECT_CODE:
+                # R7：上游显式拒绝回执（F001 行为风控 / F015 位置错）。同会话
+                # 原路重拖只会给风控追加确认样本——停止自动拖动，归因交给
+                # 调用方（F001 类换新会话 / F015 类重取图）。
+                logger.warning(
+                    f"[{self.pure_user_id}] slide rejected by upstream receipt "
+                    f"(code={self.last_upstream_code}) — stopping auto drags"
+                )
+                self._emit_telemetry_event(
+                    "slide_reject_stop", slide_code=last_code,
+                    upstream_code=self.last_upstream_code, attempt=attempt, mode="legacy",
                 )
                 break
             if self._bx_voucher:
@@ -2114,6 +2160,7 @@ class SliderSolver(ProviderSolverMixin):
             self._result_event.clear()
             self._slide_code = None
             self._slide_ok = None
+            self._slide_upstream_code = None
             return
 
         box = await btn.bounding_box()
@@ -2122,6 +2169,7 @@ class SliderSolver(ProviderSolverMixin):
             self._result_event.clear()
             self._slide_code = None
             self._slide_ok = None
+            self._slide_upstream_code = None
             return
 
         sx = box["x"] + box["width"] / 2 + random.uniform(-2.5, 2.5)
@@ -2130,6 +2178,7 @@ class SliderSolver(ProviderSolverMixin):
         self._result_event.clear()
         self._slide_code = None
         self._slide_ok = None
+        self._slide_upstream_code = None
 
         if plan is None:
             plan = getattr(self, "_active_plan", None)
@@ -2264,7 +2313,12 @@ class SliderSolver(ProviderSolverMixin):
 
     def _on_console(self, msg):
         """阿里新前端（CAPTCHA V3）成功标志走 console/前端回调而非 _____tmd_____/slide
-        响应（mucsbr/aliyun-captcha-fake 同款捕获面），这里做兜底成功信号。"""
+        响应（mucsbr/aliyun-captcha-fake 同款捕获面），这里做兜底成功信号。
+
+        R7（2026-11-16 z.ai 实证）：`❌ 验证码验证失败: {success:true,
+        verifyResult:false, verifyCode:F001}` 同样走 console——只认成功标记
+        会漏掉拒绝回执。拒绝（验证失败 + verifyResult:false）与成功一样
+        置事件并记录 upstream_code，杜绝「拖完即成功」假信号。"""
         try:
             text = msg.text or ""
         except Exception:
@@ -2277,6 +2331,29 @@ class SliderSolver(ProviderSolverMixin):
             )
             self._slide_ok = True
             self._result_event.set()
+            return
+        # R7：上游拒绝回执（信封 success:true + verifyResult:false / 验证失败）
+        if ("验证码验证失败" in text or "验证失败" in text) or (
+            "verifyResult" in text and "false" in text.lower()
+        ):
+            code = None
+            match = re.search(r'verifyCode["\s:]+([A-Z0-9]+)', text)
+            if match:
+                code = match.group(1)
+            self._slide_upstream_code = code
+            self._slide_ok = False
+            # -2 = UPSTREAM_REJECT_CODE：显式拒绝与 -1（packet miss，同录制
+            # 重放）区分——GestureSession 收到 -2 必须换家族/换录制。
+            self._slide_code = UPSTREAM_REJECT_CODE
+            logger.warning(
+                f"[{self.pure_user_id}] console FAIL receipt: code={code} text={text[:200]!r}"
+            )
+            self._emit_telemetry_event(
+                "slide_console_fail",
+                marker=text[:200],
+                upstream_code=code,
+            )
+            self._result_event.set()
 
     async def _wait_result(self, timeout=5.0):
         try:
@@ -2287,7 +2364,11 @@ class SliderSolver(ProviderSolverMixin):
         except Exception:
             return -1
     async def _wait_slide_outcome(self, timeout=5.0, success_code=0):
-        """等滑块校验包：success 标志优先于 code。超时视为失败。"""
+        """等滑块校验包：success 标志优先于 code。超时视为失败。
+
+        返回 (ok, code)；R7：console 拒绝回执的 verifyCode 记到
+        ``self._slide_upstream_code``（F001/F015），供调用方归因。"""
+        self._slide_upstream_code = None
         try:
             await asyncio.wait_for(self._result_event.wait(), timeout=timeout)
         except (asyncio.TimeoutError, Exception):

@@ -240,3 +240,68 @@ def test_human_minus_1_rescales_to_new_distance():
         assert a.source_file == b.source_file
         assert a.points[-1][0] == pytest.approx(DIST)
         assert b.points[-1][0] == pytest.approx(180.0)
+
+
+def test_human_replay_r8_time_scale_and_noise(monkeypatch):
+    """R8：真人池回放必须个体化——delay ×0.8-1.25、x 叠加 AR(1) 噪声、
+    终点强制回目标位，并打 source=pool:<file> 日志。用 monkeypatch 把
+    replay_time_scale 钉在 1.25 / 0.8 两个端点，总 delay 比值必须精确。"""
+    from slidex._slide_geometry import (
+        normalize_recorded_delays,
+        points_from_recorded,
+        upgrade_points_to_cumulative,
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pool = SliderTrajectoryPool(tmp)
+        pool.save_trajectory(_human_points(DIST), "u1", DIST, True, source="human_cdp")
+
+        def build(ts_value):
+            monkeypatch.setattr(gestures_mod, "replay_time_scale", lambda: ts_value)
+            s = GestureSession(SliderTrajectoryPool(tmp), "u1", trajectory_mode="recorded")
+            return s.next(DIST, None)
+
+        plan_hi = build(1.25)
+        plan_lo = build(0.8)
+        assert plan_hi is not None and plan_lo is not None
+        total_hi = sum(float(p[2]) for p in plan_hi.points)
+        total_lo = sum(float(p[2]) for p in plan_lo.points)
+        assert total_lo / total_hi == pytest.approx(0.8 / 1.25, rel=1e-9)
+        assert total_hi / total_lo == pytest.approx(1.25 / 0.8, rel=1e-9)
+
+        # 噪声叠加：与纯归一化管线（无噪声）对比，x 逐点有 ≤2px 偏移、
+        # 非全零、终点精确回目标位
+        plan = build(1.0)
+        assert plan is not None
+        rec = pool.load_unused_human("u1", DIST, exclude_files=set(), tolerance=0.10, peek=True)
+        assert rec
+        upgraded = upgrade_points_to_cumulative(rec["points"], DIST)
+        timed = normalize_recorded_delays(upgraded)
+        norm = points_from_recorded({**rec, "points": timed}, DIST, tolerance=0.10)
+        assert norm
+        xs_plan = [float(p[0]) for p in plan.points]
+        xs_norm = [float(q[0]) for q in norm]
+        diffs = [abs(a - b) for a, b in zip(xs_plan, xs_norm)]
+        assert max(diffs) > 0.05          # 噪声确实叠加了
+        assert max(diffs) <= 2.0          # σ=0.35px 的 AR(1)，不应越界
+        assert plan.points[-1][0] == pytest.approx(DIST)
+        for i in range(1, len(xs_plan)):
+            assert xs_plan[i] >= xs_plan[i - 1] - 1.0  # 池质检同款单调容差
+
+
+def test_human_replay_r8_source_log():
+    """R8 日志契约：source=pool:<file> 必须出现。"""
+    from loguru import logger
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pool = SliderTrajectoryPool(tmp)
+        pool.save_trajectory(_human_points(DIST), "u1", DIST, True, source="human_cdp")
+        session = GestureSession(pool, "u1", trajectory_mode="recorded")
+        seen: list[str] = []
+        handler_id = logger.add(lambda m: seen.append(m), level="INFO")
+        try:
+            plan = session.next(DIST, None)
+        finally:
+            logger.remove(handler_id)
+        assert plan is not None
+        assert any("source=pool:" in m for m in seen)

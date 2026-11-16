@@ -9,6 +9,9 @@ Five synthetic families are generated independently. They must not call
 - ``last_code == -1`` → do not switch (human keeps the same recording
   but re-scales points to this attempt's distance; synthetic resamples
   the same family)
+- ``last_code == -2`` → upstream explicitly rejected (F001/F015 receipt):
+  consume the current family/recording and switch — replaying the same
+  session just feeds the risk engine more confirmation samples
 - any other code (300, success:false code:0, other packet failures) →
   consume the current family, pick the next unused orthogonal family
 """
@@ -22,9 +25,12 @@ from typing import List, Optional, Sequence, Set, Tuple
 
 from loguru import logger
 
+from slidex._humanize import apply_replay_noise, compose_human_points, replay_time_scale, skeleton_params
 from slidex._slide_geometry import (
+    RECORDED_GAP_MIN_MS,
     normalize_recorded_delays,
     points_from_recorded,
+    scale_recorded_points,
     upgrade_points_to_cumulative,
 )
 from slidex._trajectory_pool import SliderTrajectoryPool
@@ -49,7 +55,12 @@ SYNTHETIC_ARCHETYPES = (
 
 FIRST_TRY_ORDER = (ARCHETYPE_HUMAN,) + SYNTHETIC_ARCHETYPES
 
+# 结果码语义（与 solver/_slide_result 对齐）：
+# -1 = packet miss（结果捕获面 miss / 超时）——同录制重放或同家族重采样；
+# -2 = 上游显式拒绝回执（verifyCode F001/F015，UPSTREAM_REJECT_CODE）——
+#      同会话重拖无意义，换下一个家族/录制，绝不原路重放。
 _PACKET_MISS = -1
+_UPSTREAM_REJECT = -2
 
 
 @dataclass
@@ -122,23 +133,31 @@ def _y_wiggle(tau: float, amp: float) -> float:
 
 
 def _minimum_jerk(distance: float) -> List[Point]:
-    """Flash-Hogan 5th-order point-to-point: bell velocity, monotonic, no overshoot."""
-    steps = random.randint(12, 18)
-    traj: List[Point] = [(0.0, 0.0, _press_hold_ms())]
-    duration = random.uniform(420.0, 680.0)
-    for i in range(1, steps + 1):
-        tau = i / steps
-        # Flash & Hogan 1985: 10t^3 - 15t^4 + 6t^5
-        eased = tau * tau * tau * (10.0 + tau * (-15.0 + 6.0 * tau))
-        x = distance * eased
-        delay = max(16.0, duration / steps + random.uniform(-6.0, 6.0))
-        y = 0.0 if i == steps else _y_wiggle(tau, 1.2)
-        traj.append((x, y, delay))
-    if traj[-1][0] != distance:
-        traj.append((distance, 0.0, random.uniform(40.0, 90.0)))
-    else:
-        last = traj[-1]
-        traj[-1] = (distance, 0.0, last[2])
+    """Flash-Hogan 5th-order point-to-point: bell velocity, monotonic, no overshoot.
+
+    R1-R6 迭代后该家族直接委托 ``_humanize`` 共享内核（Fitts 时长、gamma
+    间隔、子动作合成、AR(1) 路径噪声、R6 独立骨架参数），与其他引擎共用
+    同一套运动学原语，不再各自维护一份 inline easing 造成统计漂移。家族
+    契约靠两件事保持：clip_to_distance 抵墙 + 单调钳制（回退 ≤0.8px 的
+    AR(1) 采样被压平，主段严格单调）；overshoot_probability=0 关闭 R5
+    概率化过冲尾（本家族的过冲由 ARCHETYPE_OVERSHOOT 负责区分）。
+    """
+    sk = skeleton_params()
+    pts = compose_human_points(
+        distance,
+        steps=sk["steps"],
+        skew=sk["skew"],
+        press_hold_ms=_press_hold_ms(),
+        overshoot_probability=0.0,
+        clip_to_distance=True,
+    )
+    sign = -1.0 if distance < 0 else 1.0
+    dist = abs(float(distance or 0.0))
+    traj: List[Point] = []
+    run = 0.0
+    for i, (x, _y, d) in enumerate(pts):
+        run = min(max(run, abs(x)), dist)
+        traj.append((sign * run, 0.0 if i == len(pts) - 1 else _y, d))
     return traj
 
 
@@ -254,6 +273,8 @@ class GestureSession:
         self._current_plan: Optional[GesturePlan] = None
         self._current_archetype: Optional[str] = None
         self._current_human_rec: Optional[dict] = None
+        self._replay_template: Optional[List[List[float]]] = None
+        self._replay_template_dist: float = 0.0
 
     def next(self, distance: float, last_code: Optional[int]) -> Optional[GesturePlan]:
         dist = float(distance or 0.0)
@@ -275,6 +296,20 @@ class GestureSession:
             self._current_plan = plan
             logger.debug(f"gesture session: code=-1 resampling {self._current_archetype}")
             return plan
+
+        if last_code == _UPSTREAM_REJECT:
+            # R7：上游显式拒绝（F001/F015 回执）。与 packet miss 区分——
+            # 同会话原路重放等于给风控追加确认样本，必须 consume 当前
+            # 家族/录制后换下一个（human 耗尽则落到合成家族）。
+            if self._current_archetype and self._current_archetype != ARCHETYPE_HUMAN:
+                self._used_archetypes.add(self._current_archetype)
+            self._current_plan = None
+            self._current_archetype = None
+            self._current_human_rec = None
+            logger.debug(
+                f"gesture session: code=-2 upstream rejected — "
+                f"switching family (was {self._current_archetype})"
+            )
 
         if last_code is not None and last_code != _PACKET_MISS:
             # 合成家族 consume 后永不回绕。human 不在这里预判耗尽：_first_available
@@ -359,6 +394,7 @@ class GestureSession:
         if not rec:
             return None
         self._current_human_rec = rec
+        self._replay_template = None  # 新录制 → 重新个体化（R8）
         return self._plan_from_human_rec(rec, distance)
 
     def _rebuild_human(self, distance: float) -> Optional[GesturePlan]:
@@ -367,8 +403,22 @@ class GestureSession:
             return None
         return self._plan_from_human_rec(rec, distance)
 
-    @staticmethod
-    def _plan_from_human_rec(rec: dict, distance: float) -> Optional[GesturePlan]:
+    def _plan_from_human_rec(self, rec: dict, distance: float) -> Optional[GesturePlan]:
+        file = rec.get("_file")
+        template = self._replay_template
+        if template is not None:
+            # code=-1 重放：个体化模板（已含时间缩放 + AR(1) 噪声）按新
+            # 距离重标定，同录制同距离的重复重放逐点一致（重放契约）。
+            rescaled = scale_recorded_points(
+                template, self._replay_template_dist, distance, tolerance=0.10
+            )
+            return GesturePlan(
+                archetype=ARCHETYPE_HUMAN,
+                points=rescaled,
+                extra_overshoot=False,
+                end_hold_scale=1.0,
+                source_file=file,
+            )
         raw = rec.get("points") or []
         rec_dist = float(rec.get("distance") or distance or 0.0)
         upgraded = upgrade_points_to_cumulative(raw, rec_dist)
@@ -378,12 +428,27 @@ class GestureSession:
         scaled = points_from_recorded({**rec, "points": timed}, distance, tolerance=0.10)
         if not scaled:
             return None
+        # R8：回放个体化——真人录制按 ×0.8-1.25 时间缩放（同一录制不再以
+        # 恒定节奏回放）+ AR(1) 路径噪声叠加（σ≈0.35px，终点强制回目标位）。
+        # 缩放后逐点钳回采样率下限（RECORDED_GAP_MIN_MS）：归一化把密集录制
+        # 贴到 8ms 下限，×0.8 会压到 6.4ms——采样率冲出设计带、与「真人
+        # 采样密度上限」的池契约冲突。
+        ts = replay_time_scale()
+        gap_min = RECORDED_GAP_MIN_MS
+        scaled = [[p[0], p[1], max(float(p[2]) * ts, gap_min)] for p in scaled]
+        scaled = apply_replay_noise(scaled, distance)
+        self._replay_template = scaled
+        self._replay_template_dist = distance
+        logger.info(
+            f"gesture session: human replay source=pool:{os.path.basename(str(file))} "
+            f"time_scale={ts:.2f}"
+        )
         return GesturePlan(
             archetype=ARCHETYPE_HUMAN,
             points=scaled,
             extra_overshoot=False,
             end_hold_scale=1.0,
-            source_file=rec.get("_file"),
+            source_file=file,
         )
 
 

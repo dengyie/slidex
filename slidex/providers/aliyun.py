@@ -9,7 +9,8 @@ from loguru import logger
 from slidex.providers import CaptchaProvider, ProviderElements, SolveResult
 from slidex.vision.models import ChallengeType, ProviderManifest, VisionContext
 from slidex._frames import iter_search_targets, wait_in_targets, query_in_targets
-from slidex._slide_result import interpret_slide_json
+from slidex._humanize import maybe_overshoot_points
+from slidex._slide_result import extract_verify_code, interpret_slide_json
 from slidex._trajectory import slide_end_hold_range
 
 
@@ -42,6 +43,7 @@ class AliyunNoCaptchaProvider(CaptchaProvider):
     def __init__(self):
         super().__init__()
         self._challenge_scope = None
+        self._last_upstream_code: Optional[str] = None  # R7：上游拒绝码（F001/F015）
 
     async def detect(self, page: Page) -> bool:
         """检测是否是 Aliyun NoCaptcha（主文档 + iframe）。"""
@@ -201,6 +203,7 @@ class AliyunNoCaptchaProvider(CaptchaProvider):
         import random
 
         self.bind_response_listener(page)
+        self._last_upstream_code = None  # 新一轮求解 → 归因重置
 
         btn_box = await elements.slider_btn.bounding_box()
         if not btn_box:
@@ -248,17 +251,14 @@ class AliyunNoCaptchaProvider(CaptchaProvider):
             if delay:
                 await page.wait_for_timeout(int(delay))
 
-        end_x = start_x + slide_points[-1][0] if slide_points else start_x
-        end_y = start_y + slide_points[-1][1] if slide_points else start_y
         if extra_overshoot:
-            # 终点过冲 3-6px → 回拖 2-3.5px → 释放位 ±1px 手抖
-            overshoot = random.uniform(3.0, 6.0)
-            back = random.uniform(2.0, 3.5)
-            await page.mouse.move(end_x + overshoot, end_y + random.uniform(-1.5, 1.5))
-            await page.wait_for_timeout(random.randint(60, 110))
-            await page.mouse.move(end_x + overshoot - back, end_y + random.uniform(-1.0, 1.0))
-            await page.wait_for_timeout(random.randint(50, 90))
-            await page.mouse.move(end_x + random.uniform(-1.0, 1.0), end_y)
+            # R5 概率化过冲：内核统一抽样（30-60% 出现、幅度按路程限幅），
+            # 点序 y 相对按下原点
+            for tx, ty, td in maybe_overshoot_points(
+                slide_points[-1][0] if slide_points else 0.0
+            ):
+                await page.mouse.move(start_x + float(tx), start_y + float(ty))
+                await page.wait_for_timeout(int(float(td)))
         # 0.6.18 真人要领：终点变绿后握住停顿再松键（验证在松键时刻评估）
         end_hold_lo, end_hold_hi = slide_end_hold_range()
         scale = max(0.0, float(end_hold_scale or 1.0))
@@ -279,10 +279,35 @@ class AliyunNoCaptchaProvider(CaptchaProvider):
                     self._result_code = int(data["code"])
                 except (TypeError, ValueError):
                     pass
-            return interpret_slide_json(data, success_code=0)
+            ok = interpret_slide_json(data, success_code=0)
+            # R7：拒绝回执的 verifyCode 记到实例（并发求解不共享全局状态），
+            # get_result 透传给 SolveResult.upstream_code 供调用方归因。
+            if ok is False:
+                self._last_upstream_code = extract_verify_code(data)
+            return ok
         except Exception as e:
             logger.debug(f"validate_response error: {e}")
             return None
+
+    async def get_result(self, page: Page, timeout_ms: int = 5000) -> SolveResult:
+        """基类轮询判定 + R7 回执语义透传。
+
+        verified：显式拒绝 → False（upstream_code=F001/F015）；判定成功 →
+        True；超时/无回执 → None + reason=no_receipt（宁缺勿假）。
+        """
+        result = await super().get_result(page, timeout_ms=timeout_ms)
+        if result.success:
+            result.verified = True
+            result.upstream_code = self._last_upstream_code
+            return result
+        if self._result is False and self._last_upstream_code:
+            result.verified = False
+            result.upstream_code = self._last_upstream_code
+            result.reason = self._last_upstream_code
+        else:
+            result.verified = None
+            result.reason = "no_receipt"
+        return result
 
 
 __all__ = ["AliyunNoCaptchaProvider"]

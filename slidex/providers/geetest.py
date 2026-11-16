@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 from playwright.async_api import Page, Response
 from loguru import logger
 
+from slidex._humanize import maybe_overshoot_points
 from slidex._trajectory import slide_end_hold_range
 
 from slidex.providers import CaptchaProvider, ProviderElements, SolveResult
@@ -195,16 +196,12 @@ class GeeTestProvider(CaptchaProvider):
             if delay:
                 await page.wait_for_timeout(delay)
 
-        end_x = start_x + slide_points[-1][0] if slide_points else start_x
-        end_y = start_y + slide_points[-1][1] if slide_points else start_y
         if extra_overshoot and slide_points:
-            overshoot = random.uniform(3.0, 6.0)
-            back = random.uniform(2.0, 3.5)
-            await page.mouse.move(end_x + overshoot, end_y + random.uniform(-1.5, 1.5))
-            await page.wait_for_timeout(random.randint(60, 110))
-            await page.mouse.move(end_x + overshoot - back, end_y + random.uniform(-1.0, 1.0))
-            await page.wait_for_timeout(random.randint(50, 90))
-            await page.mouse.move(end_x + random.uniform(-1.0, 1.0), end_y)
+            # R5 概率化过冲：内核统一抽样（30-60% 出现、幅度按路程限幅），
+            # 点序 y 相对按下原点
+            for tx, ty, td in maybe_overshoot_points(slide_points[-1][0]):
+                await page.mouse.move(start_x + float(tx), start_y + float(ty))
+                await page.wait_for_timeout(int(float(td)))
 
         end_hold_lo, end_hold_hi = slide_end_hold_range()
         scale = max(0.0, float(end_hold_scale or 1.0))

@@ -47,6 +47,7 @@ from playwright.async_api import Page, Response
 from slidex.providers import CaptchaProvider, ProviderElements, SolveResult
 from slidex.vision.models import ChallengeType, ProviderManifest, VisionContext
 from slidex._frames import iter_search_targets, wait_in_targets, query_in_targets
+from slidex._humanize import maybe_overshoot_points
 from slidex._image_match import AliyunJigsawMatcher, SliderImageMatcher
 from slidex._slide_geometry import aliyun_jigsaw_knob_for_piece, scale_recorded_points
 
@@ -244,6 +245,7 @@ class AliyunCaptchaJsProvider(CaptchaProvider):
         self._last_bx0: int = 0       # 最近一次 find_gap 的形状起点（几何换算用）
         self._last_gap_x: Optional[float] = None  # float 精度压痕左缘（mixin 会截成 int）
         self._last_gap_debug: Dict = {}
+        self._last_upstream_code: Optional[str] = None  # R7：上游拒绝码（F001/F015）
 
     # ── 检测 / 定位 ────────────────────────────────────────────────────────
 
@@ -502,16 +504,14 @@ class AliyunCaptchaJsProvider(CaptchaProvider):
             if delay:
                 await page.wait_for_timeout(int(delay))
 
-        end_x = start_x + (slide_points[-1][0] if slide_points else 0.0)
-        end_y = start_y + (slide_points[-1][1] if slide_points else 0.0)
         if extra_overshoot:
-            overshoot = random.uniform(3.0, 6.0)
-            back = random.uniform(2.0, 3.5)
-            await page.mouse.move(end_x + overshoot, end_y + random.uniform(-1.5, 1.5))
-            await page.wait_for_timeout(random.randint(60, 110))
-            await page.mouse.move(end_x + overshoot - back, end_y + random.uniform(-1.0, 1.0))
-            await page.wait_for_timeout(random.randint(50, 90))
-            await page.mouse.move(end_x + random.uniform(-1.0, 1.0), end_y)
+            # R5 概率化过冲：内核统一抽样（30-60% 出现、幅度按路程限幅），
+            # 点序 y 相对按下原点
+            for tx, ty, td in maybe_overshoot_points(
+                slide_points[-1][0] if slide_points else 0.0
+            ):
+                await page.mouse.move(start_x + float(tx), start_y + float(ty))
+                await page.wait_for_timeout(int(float(td)))
         from slidex._trajectory import slide_end_hold_range
 
         lo, hi = slide_end_hold_range()
@@ -796,21 +796,58 @@ class AliyunCaptchaJsProvider(CaptchaProvider):
             data = json.loads(body.decode("utf-8", errors="ignore"))
             if not isinstance(data, dict):
                 return None
-            if "code" in data:
-                try:
-                    self._result_code = int(data["code"])
-                except (TypeError, ValueError):
-                    pass
+            # R7（z.ai 2026-11-16 实证）：信封 `{success:true, verifyResult:false,
+            # verifyCode:F001}` = API 受理成功、行为验证被拒——页面未放行，
+            # 旧判定把它当成功造成假成功。信封内字段（含大小写/布尔变体）
+            # 优先判定，且拒绝时捕获 verifyCode 供 SolveResult.upstream_code 归因。
+            verify_result = None
+            for key in ("verifyResult", "VerifyResult"):
+                if key in data:
+                    vr = data[key]
+                    if isinstance(vr, bool):
+                        verify_result = vr
+                    elif isinstance(vr, str):
+                        text0 = vr.strip().lower()
+                        if text0 in ("pass", "success", "true"):
+                            verify_result = True
+                        elif text0 in ("fail", "failed", "false"):
+                            verify_result = False
+                    break
+            verify_code = None
+            for key in ("verifyCode", "VerifyCode"):
+                if data.get(key) is not None:
+                    verify_code = str(data[key])
+                    break
+            if verify_result is False:
+                if verify_code:
+                    self._last_upstream_code = verify_code
+                logger.warning(
+                    f"[aliyun-captcha-js] verify receipt REJECTED: verifyResult=false "
+                    f"code={verify_code} url={url[:120]}"
+                )
+                return False
             result = data.get("Result", data.get("VerifyResult"))
             if result is not None:
                 text = str(result).strip().lower()
                 if text in ("pass", "success", "true"):
                     return True
                 if text in ("fail", "failed", "false"):
+                    if verify_code:
+                        self._last_upstream_code = verify_code
                     return False
             code = data.get("Code", data.get("code"))
-            if code is not None and str(code) in ("Success", "1000"):
+            # 信封 style：Code="Success" 只说明 API 调用受理，**不是**验证放行；
+            # 只有信封里 verifyResult=true（或无信封裸响应）才能判成功
+            if verify_result is True and code is not None and str(code) in ("Success", "1000"):
                 return True
+            if "verifyResult" in data or "VerifyResult" in data:
+                # 有信封但 verifyResult 既非 true 也非 false（缺省/异常值）——
+                # 宁缺勿假：不受理也不成功
+                return False if verify_result is None else None
+            if code is not None and str(code) in ("Success", "1000"):
+                # 无信封裸响应的 Code=Success：API 受理但无行为验证回执——
+                # R7 宁缺勿假，不判成功（等 observer/文案通道给明确信号）
+                return None
             return None
         except Exception as e:
             logger.debug(f"aliyun-captcha-js validate_response error: {e}")
@@ -843,7 +880,13 @@ class AliyunCaptchaJsProvider(CaptchaProvider):
         return None
 
     async def get_result(self, page: Page, timeout_ms: int = 5000) -> SolveResult:
-        """observer / 校验包响应 / 文案条 三通道判定，先到先得。"""
+        """observer / 校验包响应 / 文案条 三通道判定，先到先得。
+
+        R7 回执语义：verdict=True 只是页面内成功信号（observer/文案/校验包
+        success），verified=True 才代表「上游确认放行」。三通道都没有明确
+        拒绝但也没拿到放行回执时，verified=None / reason=no_receipt（宁缺
+        勿假）——调用方据此区分换会话（F001 类）与重取图（F015 类）。
+        """
         from slidex._cookies import select_cookies_for_url
 
         deadline = asyncio.get_event_loop().time() + max(0.05, timeout_ms / 1000.0)
@@ -862,15 +905,38 @@ class AliyunCaptchaJsProvider(CaptchaProvider):
                 cookies=None,
                 error=f"{self.name}: timeout waiting for result",
                 code=-1,
+                verified=None,
+                upstream_code=self._last_upstream_code,
+                reason="no_receipt",
             )
         cookies = await page.context.cookies()
         page_url = getattr(page, "url", "")
         if not isinstance(page_url, str):
             page_url = ""
         if verdict:
-            return SolveResult(success=True, code=0, cookies=select_cookies_for_url(cookies, page_url))
+            # 页面判定成功：verified 以是否拿到上游放行回执为准。本 provider
+            # 的成功判定通道（校验包 verifyResult=true / observer 文案「验证
+            # 通过」）本身即上游确认；无数字码的页面成功也按 verified=True
+            # 放行——上游 F 码拒绝会走 verdict=False 分支，不会到这里。
+            return SolveResult(
+                success=True,
+                code=0,
+                cookies=select_cookies_for_url(cookies, page_url),
+                verified=True,
+                upstream_code=self._last_upstream_code,
+                reason=None,
+            )
         # 有判定但无数字码：按基类约定给 1，让手势会话换家族重采样
-        return SolveResult(success=False, cookies=None, code=self._result_code if self._result_code is not None else 1)
+        upstream = self._last_upstream_code
+        reason = upstream if upstream else "receipt_rejected"
+        return SolveResult(
+            success=False,
+            cookies=None,
+            code=self._result_code if self._result_code is not None else 1,
+            verified=False,
+            upstream_code=upstream,
+            reason=reason,
+        )
 
 
 __all__ = ["AliyunCaptchaJsProvider"]

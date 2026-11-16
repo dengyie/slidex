@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""滑块轨迹生成 — 基于物理模型的四阶段轨迹算法"""
+"""滑块轨迹生成 — legacy 公开 API，委托 ``_humanize`` 拟人运动学内核。
+
+需求 docs/slider-humanization-requirements-2026-11-16 §2：旧四阶段分段
+easing（中段 20%–60% 纯线性匀速 + 三个一阶不连续折角）是滑块风控最经典
+的统计签名，全量替换为共享内核的 minimum-jerk 母线 + Fitts 时长 + gamma
+间隔 + 子动作合成 + 生理性震颤。本模块只保留参数翻译与 API 兼容层。
+"""
 
 import random
-import math
 from typing import List, Tuple
+
 from loguru import logger
 
+from slidex._humanize import compose_human_points
 
 def generate_trajectory(
     distance: float,
@@ -15,86 +22,60 @@ def generate_trajectory(
     overshoot_back: bool = False,
 ) -> List[Tuple[float, float, float]]:
     """
-    生成人类化滑动轨迹
+    生成人类化滑动轨迹（minimum-jerk 内核，R1-R6 全条目）。
 
     返回: [(x, y, delay_ms), ...]  相对位移 + 步骤间延迟(ms)
 
     press_hold_ms: 按下后保持不动的时长（真实人手按下到开始拖动的延迟，
         kanxue 成功案例用 1200ms；0 走默认 100-200ms 起始停顿）
-    overshoot_back: 终点先过冲 3-6px 再回拖（收尾减速与回拖修正，
-        释放前模拟人手抖动）
+    overshoot_back: 终点先过冲再回拖（收尾减速与回拖修正，释放前模拟
+        人手抖动）；False 时仍按 R5 的 30-60% 概率出现概率化过冲
+    attempt: 重试轮次——旧语义放大 Y 抖动（attempt 越大抖动越大），内核
+        jitter_amp 按 attempt 线性放大保留该语义
     """
-    traj = []
+    traj = compose_human_points(
+        distance,
+        press_hold_ms=float(press_hold_ms) if press_hold_ms > 0 else 0.0,
+        overshoot_back=bool(overshoot_back),
+        jitter_amp=1.0 + max(0, attempt - 1) * 0.8,
+    )
 
-    # === 起始停顿 ===
-    if press_hold_ms > 0:
-        traj.append((0, 0, press_hold_ms))
-    else:
-        traj.append((0, 0, random.uniform(100, 200)))
-
-    # === 滑动阶段 ===
-    steps = random.randint(10, 15)
-    jitter = 2.0 + attempt * 0.8
-
-    # 四阶段：slow_start(0-20%) -> fast(20-60%) -> medium(60-85%) -> fine_tune(85-100%)
-    for i in range(steps):
-        p = (i + 1) / steps
-
-        if p <= 0.20:
-            t = p / 0.20
-            eased = 0.02 + 0.13 * (t ** 1.8)
-        elif p <= 0.60:
-            t = (p - 0.20) / 0.40
-            eased = 0.15 + 0.60 * t
-        elif p <= 0.85:
-            t = (p - 0.60) / 0.25
-            eased = 0.75 + 0.20 * t
+    # API 兼容：部分调用方假定每步 delay < 200ms（旧 uniform(25,75) 语义）。
+    # 内核 gamma 长尾/犹豫停顿可能超 200ms——>200ms 的样本拆成多个 <200ms
+    # 的连续点。位移按各段时间占比在「前一样本位置 → 目标位置」间线性
+    # 插值：v = dx/dt 守恒（若整段位移挂第一段，该样本速度虚增拆分倍数）。
+    bounded: List[Tuple[float, float, float]] = []
+    prev_x = prev_y = 0.0
+    for x, y, delay in traj:
+        d = float(delay)
+        n_full = int(d // 195.0)
+        if n_full == 0:
+            bounded.append((x, y, max(1.0, d)))
+            prev_x, prev_y = float(x), float(y)
+            continue
+        rem = d - n_full * 195.0
+        chunks = [195.0] * n_full
+        if rem >= 1.0:
+            chunks.append(rem)
         else:
-            t = (p - 0.85) / 0.15
-            eased = 0.95 + 0.05 * t
+            chunks[-1] += rem
+        total = sum(chunks)
+        covered = 0.0
+        for c in chunks[:-1]:
+            covered += c
+            frac = covered / total
+            bounded.append((prev_x + (x - prev_x) * frac,
+                            prev_y + (y - prev_y) * frac, c))
+        bounded.append((x, y, chunks[-1]))
+        prev_x, prev_y = float(x), float(y)
 
-        x = distance * eased
-
-        # Y 轴向下漂移 + 正弦抖动
-        drift = -0.5 - p * 4.0
-        y = drift + math.sin(p * math.pi * random.uniform(1.5, 3.5)) * jitter * (0.4 + 0.6 * p)
-
-        # 随机尖刺
-        if random.random() < 0.06:
-            y += random.uniform(-jitter * 1.8, jitter * 1.8)
-
-        # 步骤间延迟
-        if i == 0:
-            delay = random.uniform(35, 55)
-        elif i >= steps - 2:
-            delay = random.uniform(40, 60)
-        elif random.random() < 0.07:
-            delay = random.uniform(55, 75)
-        else:
-            delay = random.uniform(25, 45)
-
-        traj.append((x, y, delay))
-
-    # === 终点停顿 ===
-    traj.append((distance, 0, random.uniform(50, 120)))
-
-    # === 过冲回拖 + 释放前抖动（模拟人手收尾修正） ===
-    if overshoot_back:
-        over = random.uniform(3.0, 6.0)
-        back = random.uniform(2.0, 3.5)
-        jitter = random.uniform(-1.0, 1.0)
-        # 过冲点 → 回拖点 → 释放位（带 ±1px 手抖）
-        traj.append((distance + over, random.uniform(-1.5, 1.5), random.uniform(60, 110)))
-        traj.append((distance + over - back, random.uniform(-1.0, 1.0), random.uniform(50, 90)))
-        traj.append((distance + jitter, 0.0, random.uniform(40, 80)))
-
-    total_ms = sum(d for _, _, d in traj)
+    total_ms = sum(d for _, _, d in bounded)
     logger.debug(
-        f"trajectory: dist={distance:.0f}px, steps={len(traj)}, "
+        f"trajectory: dist={distance:.0f}px, steps={len(bounded)}, "
         f"time={total_ms:.0f}ms, attempt={attempt}"
     )
 
-    return traj
+    return bounded
 
 
 def trajectory_to_points(
