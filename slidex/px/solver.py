@@ -776,9 +776,17 @@ class PxPressSolver:
             )
             return None
         if remaining < retried_budget + _SOLVE_HARD_MARGIN_S:
-            # 剩余只够「预算+余量」以内：收缩重试预算，让重试自己的硬顶
-            # （retried_budget + margin）不越过总硬顶。
-            retried_budget = max(2.0, remaining - _SOLVE_HARD_MARGIN_S)
+            # 剩余只够「预算+余量」以内：收缩重试预算到 remaining − margin，
+            # 让重试自己的硬顶（retried_budget + margin）恰好等于剩余——严格
+            # 不越总硬顶。收缩后连 5s 都不到（第二次求解毫无意义）则放弃。
+            shrunk = remaining - _SOLVE_HARD_MARGIN_S
+            if shrunk < 5.0:
+                logger.info(
+                    "px: {} — shrunk retry budget {:.1f}s < 5s, no in-process retry",
+                    result.error_kind, shrunk,
+                )
+                return None
+            retried_budget = shrunk
             logger.info(
                 "px: {} — shrinking retry budget to {:.1f}s to honor total deadline",
                 result.error_kind, retried_budget,

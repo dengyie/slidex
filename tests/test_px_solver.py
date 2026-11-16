@@ -492,6 +492,89 @@ async def test_nav_retry_skipped_when_budget_too_small():
     assert budgets == [12.0]
 
 
+async def test_retry_budget_shrink_never_exceeds_total_deadline():
+    """收缩分支边界（证据驱动复现）：曾用 max(2.0, …) 抬下限导致重试硬顶
+    17s > remaining 10s（越界 7s）。修后守卫数学保证任意 remaining 不越界：
+    - farm_rescue（小预算）：remaining=10s → shrunk = −5s < 5s 放弃；
+      remaining=18s → shrunk = 3s < 5s 也放弃（3s 求解无意义）；
+    - 大预算 nav（timeout=120）：收缩是实路径，cap = shrunk + 15 = remaining。
+    """
+    durations = []
+
+    async def _fake_solve_once(request, started):
+        durations.append(request.solve_timeout_s)
+        return PxPressResult(
+            success=False, mode=request.mode,
+            error_kind=ERR_CHALLENGE_LOAD, error="x", retryable=True,
+        )
+
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(_FakeContext([[]])))
+    solver._solve_once = _fake_solve_once  # type: ignore[method-assign]
+    request = _request(timeout=10)
+
+    # remaining = 10 + 15 − 15 = 10s：收缩后 <5s → 放弃
+    started = time.monotonic() - 15.0
+    await solver._nav_retry_if_budget_allows(
+        request, request, started,
+        PxPressResult(success=False, mode="press",
+                      error_kind=ERR_CHALLENGE_LOAD, error="x", retryable=True),
+        farm_rescue=True,
+    )
+    assert durations == []
+
+    # remaining = 10 + 15 − 4 = 21s：不进收缩窗口（21 ≥ 5+15），标准减半 5s
+    durations.clear()
+    started = time.monotonic() - 4.0
+    await solver._nav_retry_if_budget_allows(
+        request, request, started,
+        PxPressResult(success=False, mode="press",
+                      error_kind=ERR_CHALLENGE_LOAD, error="x", retryable=True),
+        farm_rescue=True,
+    )
+    assert durations == [5.0]
+    assert durations[-1] + 15 <= 21.0 + 1e-9
+
+    # remaining = 18s：进收缩窗口，shrunk = 18−15 = 3s < 5s → 放弃
+    # （小预算求解无意义；标准分支的大预算场景才走真收缩）
+    durations.clear()
+    started = time.monotonic() - 7.0
+    await solver._nav_retry_if_budget_allows(
+        request, request, started,
+        PxPressResult(success=False, mode="press",
+                      error_kind=ERR_CHALLENGE_LOAD, error="x", retryable=True),
+        farm_rescue=True,
+    )
+    assert durations == []
+
+
+async def test_retry_budget_shrink_is_real_path_for_large_budgets():
+    """大预算（timeout=120）时收缩是实路径：remaining=70s ∈ [60,75) →
+    收缩预算 70−15=55s，重试硬顶 55+15=70s 恰好等于剩余，严格封顶。"""
+    durations = []
+
+    async def _fake_solve_once(request, started):
+        durations.append(request.solve_timeout_s)
+        return PxPressResult(
+            success=False, mode=request.mode,
+            error_kind=ERR_CHALLENGE_LOAD, error="x", retryable=True,
+        )
+
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(_FakeContext([[]])))
+    solver._solve_once = _fake_solve_once  # type: ignore[method-assign]
+    request = _request(timeout=120)
+
+    started = time.monotonic() - 65.0  # remaining = 120 + 15 − 65 = 70s
+    await solver._nav_retry_if_budget_allows(
+        request, request, started,
+        PxPressResult(success=False, mode="press",
+                      error_kind=ERR_CHALLENGE_LOAD, error="x", retryable=True),
+        farm_rescue=False,
+    )
+    # 收缩预算 = remaining − margin（含微秒级执行误差），硬顶恰好等于剩余
+    assert durations and abs(durations[0] - 55.0) < 0.01
+    assert durations[-1] + 15 <= 70.0 + 1e-6
+
+
 async def test_farm_death_retry_takes_precedence_over_nav_retry():
     """farm 死亡重试与导航重试互斥（elif）：farm 分支拿走这次重试后
     nav 分支不再叠加——总共只跑两次。farm 分支与导航重试共用预算守卫
