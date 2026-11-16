@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.13.2] - 2026-11-16
+
+0.13.1 生产 code review 四项发现根修。
+
+### Fixed
+- **[review F1] caller_error 分流 kind 白名单写错**：`"bad_request"` 不是任何真实 kind——`HandlerFailure.bad_request()` 实设 `kind="invalid_request"`。handler.solve 内的参数类 422（px 缺 appId/坏 URL/坏时区、geetest 缺 websiteURL）全部落进 fail_24h，与同错误在预检路径计入 caller_error_24h 不一致。白名单改 `("invalid_request", "unsupported_type")`，新增回归测试钉住。
+- **[review F2] 重试硬顶越过调用方总预算**：导航重试与 farm 死亡重试统一收敛到 `_nav_retry_if_budget_allows`——剩余不足重试预算时不重试；剩余只够「预算+硬顶余量」以内时收缩重试预算，总耗时始终封在调用方预算 + 15s 余量内。farm 分支此前完全无预算检查（既有缺口），一并修复。
+- **[review F4] v2 create_task 计数对称**：401 / 坏 JSON / 缺 captchaType / 未知 type / validate 422 与 /v1/solve 同规则计入 caller_error_24h（此前 v2 路径的调用方错误完全无痕）。
+- **[review Nit] record_caller_error 单时刻**：append 与 trim 共用一次 time.monotonic()，与 record_outcome 模式一致。
+
+### Changed
+- deploy/README.md /health 字段清单补 `caller_error_24h` 及其语义（review F3）。
+
 ## [0.13.1] - 2026-11-16
 
 线上表现驱动迭代（2026-11-16 mesh-huawei 日志复盘）。

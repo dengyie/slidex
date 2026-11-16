@@ -682,7 +682,11 @@ class PxPressSolver:
                     "px: farm died during task (epoch {} -> {}), retrying once "
                     "on fresh farm", farm_epoch_before, self._farm_epoch,
                 )
-                retried = await self._await_solve_capped(effective, started)
+                # farm 死亡重试走救援下限（5s）：farm 已重置、不重试必然
+                # 假失败；预算守卫保证总耗时封顶（review F2）。
+                retried = await self._nav_retry_if_budget_allows(
+                    effective, request, started, result, farm_rescue=True,
+                )
                 if retried is not None:
                     return retried
             elif (
@@ -691,34 +695,11 @@ class PxPressSolver:
                 and result.retryable_error
                 and result.error_kind in (ERR_CHALLENGE_LOAD, ERR_CHALLENGE_TIMEOUT)
             ):
-                # 导航层瞬时失败进程内重试一次（2026-11-16 线上实测：sticky
-                # 代理抖动 ERR_PROXY_CONNECTION_FAILED → 同一任务 12s 终态
-                # 失败，调用方整轮重跑；代理抖动通常秒级恢复）。与 farm 死亡
-                # 重试互斥（elif）；重试预算减半（不低于 30s），两次都败才是
-                # 终态，HTTP 判死类不可重试错误不进这里。总耗时必须尊重调用
-                # 方预算：剩余总预算 <30s（如 deep_check C4 黑洞代理 12s 场景）
-                # 不做重试——盲试只会把 12s 的尊重预算拖成 42s。
-                elapsed_s = time.monotonic() - started
-                remaining = request.solve_timeout_s + _SOLVE_HARD_MARGIN_S - elapsed_s
-                retried_budget = max(30.0, request.solve_timeout_s / 2.0)
-                if remaining < retried_budget:
-                    logger.info(
-                        "px: nav-level failure ({}) but remaining budget "
-                        "{:.1f}s < {:.0f}s — no in-process retry",
-                        result.error_kind, remaining, retried_budget,
-                    )
-                else:
-                    logger.warning(
-                        "px: nav-level failure ({}) — retrying once in-process "
-                        "with fresh context (budget {:.0f}s)",
-                        result.error_kind, retried_budget,
-                    )
-                    retried = await self._await_solve_capped(
-                        dataclasses.replace(effective, solve_timeout_s=retried_budget),
-                        time.monotonic(),
-                    )
-                    if retried is not None:
-                        return retried
+                retried = await self._nav_retry_if_budget_allows(
+                    effective, request, started, result, farm_rescue=False,
+                )
+                if retried is not None:
+                    return retried
             if result is not None:
                 return result
             return PxPressResult(
@@ -756,6 +737,60 @@ class PxPressSolver:
         inner.add_done_callback(self._reap_abandoned)
         await self._reset_farm()
         return None
+
+    async def _nav_retry_if_budget_allows(
+        self,
+        effective: PxPressRequest,
+        request: PxPressRequest,
+        started: float,
+        result: PxPressResult,
+        *,
+        farm_rescue: bool,
+    ) -> Optional[PxPressResult]:
+        """进程内重试一次的统一预算守卫（farm 死亡重试与导航重试共用）。
+
+        2026-11-16 线上实测：sticky 代理抖动 ERR_PROXY_CONNECTION_FAILED →
+        同一任务 12s 终态失败，调用方整轮重跑；代理抖动通常秒级恢复。总耗时
+        必须尊重调用方预算：剩余总预算（solve_timeout + 硬顶余量 − 已耗时）
+        不足时不重试——盲试只会把 deep_check C4 黑洞代理 12s 场景拖成 42s。
+
+        两种重试的下限不同：
+        - farm 死亡（farm_rescue=True）：死亡救援——farm 已重置、不重试必然
+          假失败（pxed 第 11 轮连环撞根因），重置通常秒级，下限 5s；
+        - 导航瞬时失败（farm_rescue=False）：锦上添花——代理抖动可能自己好、
+          调用方还可整轮重跑，下限 30s（预算减半取大）。
+
+        剩余比标准重试预算多但不到「预算+硬顶余量」时，按剩余收缩重试预算，
+        保证重试自身硬顶不越过总硬顶。
+        """
+        elapsed_s = time.monotonic() - started
+        remaining = request.solve_timeout_s + _SOLVE_HARD_MARGIN_S - elapsed_s
+        retried_budget = (
+            max(5.0, request.solve_timeout_s / 2.0) if farm_rescue
+            else max(30.0, request.solve_timeout_s / 2.0)
+        )
+        if remaining < retried_budget:
+            logger.info(
+                "px: {} — remaining budget {:.1f}s < {:.0f}s, no in-process retry",
+                result.error_kind, remaining, retried_budget,
+            )
+            return None
+        if remaining < retried_budget + _SOLVE_HARD_MARGIN_S:
+            # 剩余只够「预算+余量」以内：收缩重试预算，让重试自己的硬顶
+            # （retried_budget + margin）不越过总硬顶。
+            retried_budget = max(2.0, remaining - _SOLVE_HARD_MARGIN_S)
+            logger.info(
+                "px: {} — shrinking retry budget to {:.1f}s to honor total deadline",
+                result.error_kind, retried_budget,
+            )
+        logger.warning(
+            "px: {} — retrying once in-process with fresh context (budget {:.0f}s)",
+            result.error_kind, retried_budget,
+        )
+        return await self._await_solve_capped(
+            dataclasses.replace(effective, solve_timeout_s=retried_budget),
+            time.monotonic(),
+        )
 
     def _reap_abandoned(self, fut: "asyncio.Future") -> None:
         """收割被放弃的僵尸协程的异常（callback 里的异常不会外泄）。"""

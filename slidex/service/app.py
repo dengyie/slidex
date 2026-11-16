@@ -222,8 +222,9 @@ class TaskStore:
 
     def record_caller_error(self) -> None:
         """调用方错误（401/4xx）单独计数，不计入 fail_24h。"""
-        self._caller_error.append(time.monotonic())
-        self._trim(time.monotonic())
+        now = time.monotonic()
+        self._caller_error.append(now)
+        self._trim(now)
 
     def record_outcome(self, ok: bool) -> None:
         """同步接口（/v1/solve）的成败同样计入 24h 看板。"""
@@ -451,7 +452,9 @@ def create_app(
             ) from None
         except HandlerFailure as exc:
             if exc.status_code >= 400 and exc.status_code < 500 and exc.kind in (
-                "bad_request", "unsupported_type",
+                # HandlerFailure.bad_request() 的 kind 是 invalid_request，
+                # 不是 "bad_request"（曾写错导致 handler 内 422 全落 fail_24h）
+                "invalid_request", "unsupported_type",
             ):
                 # 调用方参数错误（4xx 类）：单列，不混进求解失败看板
                 store.record_caller_error()
@@ -477,12 +480,27 @@ def create_app(
 
     @app.post("/v2/tasks/")
     async def create_task(request: Request) -> JSONResponse:
-        auth.check(request)
-        payload = await _read_json(request)
+        # 与 /v1/solve 同规则：401 / 坏 JSON / 参数类 4xx 是调用方错误，
+        # 单列不进 fail_24h（v1 分流后的路径对称，review F4）
+        try:
+            auth.check(request)
+        except HandlerFailure as exc:
+            store.record_caller_error()
+            raise
+        try:
+            payload = await _read_json(request)
+        except HandlerFailure as exc:
+            store.record_caller_error()
+            raise
         captcha_type = str(payload.get("captchaType") or payload.get("type") or "").strip()
         if not captcha_type:
+            store.record_caller_error()
             raise HandlerFailure.bad_request("captchaType is required")
-        handler = handler_registry.get(captcha_type)
+        try:
+            handler = handler_registry.get(captcha_type)
+        except HandlerFailure as exc:
+            store.record_caller_error()
+            raise
         task_id = str(payload.get("taskId") or "").strip()
         if not task_id:
             task_id = f"t_{int(time.time() * 1000):x}_{os.urandom(4).hex()}"
@@ -492,7 +510,11 @@ def create_app(
         validate = getattr(handler, "validate", None)
         if callable(validate):
             # 参数错误在创建时就暴露为 4xx，而不是让调用方轮询到 fail
-            validate(body)
+            try:
+                validate(body)
+            except HandlerFailure as exc:
+                store.record_caller_error()
+                raise
 
         await store.create(
             task_id, captcha_type, handler.solve, body,

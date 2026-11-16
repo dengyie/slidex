@@ -494,8 +494,8 @@ async def test_nav_retry_skipped_when_budget_too_small():
 
 async def test_farm_death_retry_takes_precedence_over_nav_retry():
     """farm 死亡重试与导航重试互斥（elif）：farm 分支拿走这次重试后
-    nav 分支不再叠加——farm 重试复用原预算（120 不减半），总共只跑两次。
-    """
+    nav 分支不再叠加——总共只跑两次。farm 分支与导航重试共用预算守卫
+    （review F2）：重试预算同样减半，剩余不足时不重试。"""
     budgets = []
 
     async def _fake_solve_once(request, started):
@@ -517,8 +517,34 @@ async def test_farm_death_retry_takes_precedence_over_nav_retry():
 
     assert result.success is False
     assert result.error_kind == ERR_CHALLENGE_LOAD
-    # farm 分支触发（预算不减半），elif 挡住 nav 分支——只有两次
-    assert budgets == [120.0, 120.0]
+    # farm 分支触发（预算减半到 60），elif 挡住 nav 分支——只有两次
+    assert budgets == [120.0, 60.0]
+
+
+async def test_farm_death_retry_skipped_only_on_exhausted_budget():
+    """farm 分支是死亡救援（下限 5s）：12s 预算场景剩余 ~25s 仍会重试——
+    farm 已重置、不重试必然假失败（pxed 第 11 轮连环撞根因）。只有剩余
+    真正耗尽（<5s）才放弃重试。"""
+    budgets = []
+
+    async def _fake_solve_once(request, started):
+        budgets.append(request.solve_timeout_s)
+        solver._farm_epoch += 1  # 每次都「farm 死亡」
+        return PxPressResult(
+            success=False, mode=request.mode,
+            error_kind=ERR_CHALLENGE_LOAD,
+            error="challenge_load_failed: proxy flapped",
+            retryable=True,
+        )
+
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(_FakeContext([[]])))
+    solver._solve_once = _fake_solve_once  # type: ignore[method-assign]
+
+    result = await solver.solve(_request(timeout=12))
+
+    assert result.success is False
+    # 救援下限 5s：剩余 ~25s 足够，重试发生（预算减半 6s）
+    assert budgets == [12.0, 6.0]
 
 
 async def test_rpc_swallow_survives_cancelled_future():

@@ -455,6 +455,22 @@ def test_v2_invalid_params_rejected_at_creation():
     assert response.status_code == 422
 
 
+def test_v2_caller_errors_counted_symmetric_with_v1():
+    """v2 create_task 的调用方错误与 /v1/solve 同规则单列（review F4）：
+    401 / 缺 captchaType / 未知 type / validate 422 都进 caller_error_24h，
+    不进 fail_24h。"""
+    client = _client()
+    good = {"Authorization": "Bearer secret"}
+    client.post("/v2/tasks/", json={"captchaType": "px_press"}, headers=good)  # validate 422
+    client.post("/v2/tasks/", json={}, headers=good)                          # 缺 captchaType
+    client.post("/v2/tasks/", json={"captchaType": "nope"}, headers=good)     # 未知 type
+    client.post("/v2/tasks/", json={"captchaType": "px_press"},
+                headers={"Authorization": "Bearer wrong"})                   # 401
+    body = client.get("/health").json()
+    assert body["fail_24h"] == 0
+    assert body["caller_error_24h"] == 4
+
+
 def test_v2_unsupported_type_is_400():
     client = _client()
     response = client.post(
@@ -562,6 +578,27 @@ def test_solver_failure_still_counts_after_caller_error_split():
     body = client.get("/health").json()
     assert body["fail_24h"] == 1
     assert body["caller_error_24h"] == 0
+
+
+def test_handler_validation_422_is_caller_error():
+    """handler.solve 内抛的参数类 422（bad_request→kind=invalid_request）
+    也必须计入 caller_error_24h——review F1：白名单曾写成 "bad_request"
+    （不存在的 kind），导致缺 appId / 缺 websiteURL 落进 fail_24h。"""
+    client = _client()
+    headers = {"Authorization": "Bearer secret"}
+    # px_press 缺 appId：PxPressRequest.from_payload 抛 PxRequestError
+    # → HandlerFailure.bad_request(422, kind=invalid_request)
+    client.post(
+        "/v1/solve",
+        json={"type": "px_press", "challengeUrl": "https://x.example/",
+              "websiteURL": "https://y.example/"},
+        headers=headers,
+    )
+    # geetest_v3 缺 websiteURL
+    client.post("/v1/solve", json={"type": "geetest_v3"}, headers=headers)
+    body = client.get("/health").json()
+    assert body["fail_24h"] == 0
+    assert body["caller_error_24h"] == 2
 
 
 # ────────────────────── geetest_v3 兼容 ──────────────────────

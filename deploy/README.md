@@ -75,7 +75,7 @@ sudo /opt/slidex-captcha/.venv/bin/python -m playwright install chromium-headles
 | 工具 | 用途 |
 |------|------|
 | `deploy/check/deep_check.py` | 23 项验收：契约边界/上下文卫生/代理铁律/并发隔离/资源泄漏 |
-| `GET /health` | `{ok, active_tasks, done_24h, fail_24h, types}` |
+| `GET /health` | `{ok, active_tasks, done_24h, fail_24h, caller_error_24h, types}`（caller_error_24h = 401/4xx 调用方配置错误，单列不进 fail_24h） |
 
 curl 冒烟（以现役主机 mesh-huawei 为例，gz-cvm 已于 2026-11-10 到期退役）：
 
