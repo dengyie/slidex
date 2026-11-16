@@ -51,6 +51,15 @@ class SliderConcurrencyManager:
         same_account_active = self._find_same_account_active_locked(user_id)
         return len(self.active_instances) < self.max_concurrent and same_account_active is None
 
+    def has_same_account_active(self, user_id: str) -> bool:
+        """同一账号是否已有实例在跑（含正在等人工扫码的实例）。
+
+        调用方据此避免「再起一个必然排队超时」的重复登录：同账号去重是设计，
+        排队等 60 秒拿不到槽位不是失败，而是一条会误导排查的错误日志。
+        """
+        with self.instance_lock:
+            return self._find_same_account_active_locked(user_id) is not None
+
     def wait_for_slot(self, user_id: str, timeout: int = None) -> bool:
         if timeout is None:
             timeout = self.wait_timeout
