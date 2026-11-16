@@ -414,7 +414,7 @@ async def test_nav_failure_is_retried_in_process_and_recovers():
 
     solver = PxPressSolver(context_factory=_factory)
 
-    result = await solver.solve(_request())
+    result = await solver.solve(_request(timeout=120))
 
     assert result.success is True
     assert result.tokens["px3"] == _PASS_PX3
@@ -466,6 +466,30 @@ async def test_nav_retry_not_triggered_for_token_timeout():
     assert result.error_kind == ERR_TOKEN_TIMEOUT
     # 只建了一个 context：没有第二次
     assert made == []
+
+
+async def test_nav_retry_skipped_when_budget_too_small():
+    """调用方预算小（如黑洞代理 12s 场景）：第一次尝试烧掉预算后剩余
+    <30s 不做重试——总耗时必须尊重调用方预算（deep_check C4 验收线：
+    黑洞代理 12s 预算 42s 才终态 = 预算不受尊重）。"""
+    budgets = []
+    real_solve_once = PxPressSolver._solve_once
+
+    async def _spy(self, request, started):
+        budgets.append(request.solve_timeout_s)
+        return await real_solve_once(self, request, started)
+
+    page = _FakePage(goto_exc=RuntimeError("net::ERR_PROXY_CONNECTION_FAILED"))
+    context = _FakeContext([[]], page=page)
+    solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
+    solver._solve_once = _spy.__get__(solver)  # type: ignore[method-assign]
+
+    result = await solver.solve(_request(timeout=12))
+
+    assert result.success is False
+    assert result.error_kind == ERR_CHALLENGE_LOAD
+    # 只跑一次：剩余预算不足，不重试
+    assert budgets == [12.0]
 
 
 async def test_farm_death_retry_takes_precedence_over_nav_retry():
@@ -1235,8 +1259,9 @@ async def test_iframe_inject_timeout_retries_once(monkeypatch):
 async def test_iframe_inject_both_attempts_fail_is_load_failed(monkeypatch):
     """两次注入都失败：维持既有 challenge_load_failed 语义（不静默继续）。
 
-    注入失败归类为 challenge_load_failed 且 retryable——新导航重试会对同一
-    任务进程内再试一次（第二次也注入失败才终态），evaluate 共 4 次尝试。
+    注入失败归类为 challenge_load_failed 且 retryable——预算充足时导航
+    重试会对同一任务进程内再试一次（第二次也注入失败才终态），evaluate
+    共 4 次尝试。
     """
     import asyncio as _asyncio
 
@@ -1254,7 +1279,7 @@ async def test_iframe_inject_both_attempts_fail_is_load_failed(monkeypatch):
     context = _FakeContext([[]], page=page)
     solver = PxPressSolver(context_factory=lambda opts: _resolve(context))
 
-    result = await solver.solve(_request())
+    result = await solver.solve(_request(timeout=120))
 
     assert result.success is False
     assert result.error_kind == ERR_CHALLENGE_LOAD

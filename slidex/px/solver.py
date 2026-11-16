@@ -695,19 +695,30 @@ class PxPressSolver:
                 # 代理抖动 ERR_PROXY_CONNECTION_FAILED → 同一任务 12s 终态
                 # 失败，调用方整轮重跑；代理抖动通常秒级恢复）。与 farm 死亡
                 # 重试互斥（elif）；重试预算减半（不低于 30s），两次都败才是
-                # 终态，HTTP 判死类不可重试错误不进这里。
+                # 终态，HTTP 判死类不可重试错误不进这里。总耗时必须尊重调用
+                # 方预算：剩余总预算 <30s（如 deep_check C4 黑洞代理 12s 场景）
+                # 不做重试——盲试只会把 12s 的尊重预算拖成 42s。
+                elapsed_s = time.monotonic() - started
+                remaining = request.solve_timeout_s + _SOLVE_HARD_MARGIN_S - elapsed_s
                 retried_budget = max(30.0, request.solve_timeout_s / 2.0)
-                logger.warning(
-                    "px: nav-level failure ({}) — retrying once in-process "
-                    "with fresh context (budget {:.0f}s)",
-                    result.error_kind, retried_budget,
-                )
-                retried = await self._await_solve_capped(
-                    dataclasses.replace(effective, solve_timeout_s=retried_budget),
-                    time.monotonic(),
-                )
-                if retried is not None:
-                    return retried
+                if remaining < retried_budget:
+                    logger.info(
+                        "px: nav-level failure ({}) but remaining budget "
+                        "{:.1f}s < {:.0f}s — no in-process retry",
+                        result.error_kind, remaining, retried_budget,
+                    )
+                else:
+                    logger.warning(
+                        "px: nav-level failure ({}) — retrying once in-process "
+                        "with fresh context (budget {:.0f}s)",
+                        result.error_kind, retried_budget,
+                    )
+                    retried = await self._await_solve_capped(
+                        dataclasses.replace(effective, solve_timeout_s=retried_budget),
+                        time.monotonic(),
+                    )
+                    if retried is not None:
+                        return retried
             if result is not None:
                 return result
             return PxPressResult(
