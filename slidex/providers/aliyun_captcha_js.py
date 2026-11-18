@@ -37,7 +37,7 @@ import asyncio
 import base64
 import json
 import random
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -46,7 +46,14 @@ from playwright.async_api import Page, Response
 
 from slidex.providers import CaptchaProvider, ProviderElements, SolveResult
 from slidex.vision.models import ChallengeType, ProviderManifest, VisionContext
+from slidex._drag import (
+    DragDispatchError,
+    apply_end_hold_scale,
+    build_drag_events,
+    dispatch_drag_timeline,
+)
 from slidex._frames import iter_search_targets, wait_in_targets, query_in_targets
+from slidex._gestures import GesturePlan
 from slidex._humanize import maybe_overshoot_points
 from slidex._image_match import AliyunJigsawMatcher, SliderImageMatcher
 from slidex._slide_geometry import aliyun_jigsaw_knob_for_piece, scale_recorded_points
@@ -468,8 +475,6 @@ class AliyunCaptchaJsProvider(CaptchaProvider):
         start_y = knob_box["y"] + knob_box["height"] / 2
 
         if cdp_session is not None:
-            from slidex._drag import apply_end_hold_scale, build_drag_events, dispatch_drag_timeline
-
             pts_abs = [
                 (start_x + float(x), start_y + float(y), float(delay or 0.0))
                 for (x, y, delay) in points
@@ -571,6 +576,7 @@ class AliyunCaptchaJsProvider(CaptchaProvider):
         max_attempts: int = 2,
         verdict_timeout_ms: int = 10000,
         deadline_s: Optional[float] = None,
+        plan_factory: Optional[Callable[[float, Optional[str]], Optional[GesturePlan]]] = None,
     ) -> Dict:
         """全链路：武装全新控件 → 提图 → 检测 → 二次反解 → 拖拽 → 捕获 param。
 
@@ -585,6 +591,16 @@ class AliyunCaptchaJsProvider(CaptchaProvider):
         Args:
             drag: "real" 走 page.mouse（CDP 可信事件）；"synthetic" 走页面内
                 合成手势（嵌入式 webview 宿主）。
+            plan_factory: 外置手势规划器（0.13.3，solver GestureSession 同源）。
+                缺省 None 时 real 拖拽走内置三段匀速（旧路径）。提供时：gap
+                定位完成后调 ``plan_factory(target_px, prev_verdict)`` 取
+                GesturePlan（points 相对按下原点），经 CDP Input 流水线派发
+                （build_drag_events 完整事件序：接近/按下/位移/末端握持/松键）。
+                返回 None = 会话手势耗尽 → 记 NO_PLAN 并停止重试（继续打只会
+                给风控追加样本）。``prev_verdict`` 是本调用内上一 attempt 的
+                verdict 码（"F001"/"F015"/"ARM"/...；首个 attempt 传 None），
+                由调用方映射 -1/-2 反馈语义（_gestures PACKET_MISS_CODE /
+                UPSTREAM_REJECT）。跨 attempt/跨 context 的会话由调用方持有。
             deadline_s: 整体预算（秒），超时后不再开新尝试（进行中的尝试不中断）。
 
         单轮内的任何异常（SDK 结构变化 / mouse 不可用等）都吸收为该轮失败并
@@ -670,6 +686,32 @@ class AliyunCaptchaJsProvider(CaptchaProvider):
                         logger.warning(f"[aliyun-captcha-js] synthetic drag error: {drag_res}")
                         result["fail_code"] = "DRAG"
                         continue
+                elif plan_factory is not None:
+                    prev_verdict = result["fail_code"] if attempt > 1 else None
+                    plan = plan_factory(float(target), prev_verdict)
+                    if plan is None:
+                        # 会话手势耗尽（家族/录制全部 consume）。继续武装+拖拽
+                        # 只会向风控追加确认样本（solver R7 同款语义）——停。
+                        logger.warning(
+                            f"[aliyun-captcha-js] attempt {attempt}: gesture session "
+                            f"exhausted — stop hammering (NO_PLAN)"
+                        )
+                        result["fail_code"] = result["fail_code"] or "NO_PLAN"
+                        break
+                    logger.info(
+                        f"[aliyun-captcha-js] attempt {attempt}: plan={plan.archetype} "
+                        f"steps={len(plan.points)} overshoot={plan.extra_overshoot} "
+                        f"end_hold_scale={plan.end_hold_scale:.2f}"
+                    )
+                    try:
+                        await self._dispatch_plan_cdp(page, geo, plan)
+                    except DragDispatchError as e:
+                        logger.warning(
+                            f"[aliyun-captcha-js] attempt {attempt}: CDP dispatch "
+                            f"failed: {e} — abort attempt (session may be dead)"
+                        )
+                        result["fail_code"] = "DRAG"
+                        continue
                 else:
                     drag_res = await self._drag_real(page, geo, target)
                     logger.debug(f"[aliyun-captcha-js] real drag readback: {drag_res}")
@@ -741,6 +783,35 @@ class AliyunCaptchaJsProvider(CaptchaProvider):
             " return k ? getComputedStyle(k).left : null; }"
         )
         return {"target": round(float(target), 1), "sl": sl}
+
+    async def _dispatch_plan_cdp(self, page: Page, geo: Dict, plan: GesturePlan) -> None:
+        """把 GesturePlan 经 CDP Input 流水线派发（与 solver._do_slide 同管线）。
+
+        plan.points 相对按下原点（dx, dy, delay_ms）；事件序（接近移动 → 按下
+        → 位移 → [过冲] → 末端握持 → 松键）由 build_drag_events 编译，全部是
+        浏览器 input 管线的可信事件。按下点带 ±2.5px 抖动（solver 同款）——
+        精确中心点是统计签名。任何 send 失败 raise DragDispatchError，调用方
+        不得折成 packet-miss（会锁死同一手势家族重试）。
+        """
+        kb = geo["knobBox"]
+        sx = kb[0] + kb[2] / 2 + random.uniform(-2.5, 2.5)
+        sy = kb[1] + kb[3] / 2 + random.uniform(-2.5, 2.5)
+        pts_abs = [
+            (sx + float(dx), sy + float(dy), float(delay or 0.0))
+            for (dx, dy, delay) in plan.points
+        ]
+        timeline = build_drag_events(
+            sx, sy, pts_abs, extra_overshoot=bool(plan.extra_overshoot)
+        )
+        apply_end_hold_scale(timeline, getattr(plan, "end_hold_scale", 1.0))
+        cdp = await page.context.new_cdp_session(page)
+        try:
+            await dispatch_drag_timeline(cdp, timeline)
+        finally:
+            try:
+                await cdp.detach()
+            except Exception:  # noqa: BLE001 — 会话回收尽力而为
+                pass
 
     async def _wait_param_or_fail(self, page: Page, timeout_ms: int) -> Dict:
         """轮询 param / fail / observer 判定，先到先得。"""

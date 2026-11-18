@@ -61,6 +61,10 @@ FIRST_TRY_ORDER = (ARCHETYPE_HUMAN,) + SYNTHETIC_ARCHETYPES
 #      同会话重拖无意义，换下一个家族/录制，绝不原路重放。
 _PACKET_MISS = -1
 _UPSTREAM_REJECT = -2
+# 公开别名（0.13.3）：aliyun_captcha_js provider 的 plan_factory 调用方
+# （zcode-hub slidex_runner 等）需要按 verdict 映射反馈码，不该 import 私有名。
+PACKET_MISS_CODE = _PACKET_MISS
+UPSTREAM_REJECT = _UPSTREAM_REJECT
 
 
 @dataclass
@@ -462,6 +466,8 @@ __all__ = [
     "FIRST_TRY_ORDER",
     "GesturePlan",
     "GestureSession",
+    "PACKET_MISS_CODE",
+    "UPSTREAM_REJECT",
     "SYNTHETIC_ARCHETYPES",
     "generate_archetype",
     "upgrade_points_to_cumulative",

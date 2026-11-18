@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.13.3] - 2026-11-18
+
+zcode-hub 活动套餐领取链实弹复盘（2026-11-18）：claim 链的 aliyun_captcha_js
+provider 从未接入 0.13.0 落地的拟人运动学内核——真实拖拽仍是手写三段匀速 +
+uniform 间隔抖动，恰是 `_humanize` 文档定义的"经典统计签名"（阿里云 F001 全拒）。
+
+### Added
+- **provider plan_factory 外置手势规划器**：`acquire_verify_param(plan_factory=...)`
+  接受与 solver 同源的 GesturePlan 工厂（GestureSession 由调用方持有，跨
+  attempt/跨 context 反馈）；gap 定位后调 factory 取 plan，经 CDP Input
+  流水线（build_drag_events / dispatch_drag_timeline，与 solver._do_slide
+  同管线）派发可信事件。返回 None = 家族耗尽 → 记 NO_PLAN 并停止重试
+  （R7：继续打只会给风控追加确认样本）。
+- **`_dispatch_plan_cdp`**：plan.points（相对按下原点）→ 绝对坐标 + ±2.5px
+  按下点抖动 → 完整事件序编译派发；DragDispatchError 不折成 packet-miss。
+- **`_gestures` 公开反馈码别名**：`PACKET_MISS_CODE` / `UPSTREAM_REJECT`
+  （调用方映射 verdict → -1/-2 不再 import 私有名）。
+
+### Changed
+- `perform_slide` 的内联 `_drag` import 收编到模块顶部。
+
 ## [0.13.2] - 2026-11-16
 
 0.13.1 生产 code review 四项发现根修。
