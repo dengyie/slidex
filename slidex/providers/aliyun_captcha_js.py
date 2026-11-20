@@ -54,6 +54,8 @@ from slidex._drag import (
 )
 from slidex._frames import iter_search_targets, wait_in_targets, query_in_targets
 from slidex._gestures import GesturePlan
+from slidex._behavior_prep import pre_slide_warmup, hover_slider
+from slidex._behavior_prep import WARMUP_ENABLED as _WARMUP_ENABLED
 from slidex._humanize import maybe_overshoot_points
 from slidex._image_match import AliyunJigsawMatcher, SliderImageMatcher
 from slidex._slide_geometry import aliyun_jigsaw_knob_for_piece, scale_recorded_points
@@ -760,16 +762,25 @@ class AliyunCaptchaJsProvider(CaptchaProvider):
         await page.wait_for_timeout(random.randint(20, 60))
         await page.mouse.down()
         await page.wait_for_timeout(int(random.uniform(600, 1200)))
-        # 慢-快-慢，总时长 ~2s（过快会 F001）
+        # 慢-快-慢，总时长 ~2s。0.14.0：步进间隔从 uniform 矩形直方图换成
+        # gamma(shape=2.2)（右偏长尾）——uniform 是经典统计签名（14 步等宽
+        # 矩形直方图一眼合成），且段内速度恒等于 step/dt（4 段匀速连段）。
+        # gamma 变异系数 ~0.67，间隔自然参差，无 ≥4 步等间隔连段。
+        from slidex._humanize import gamma_intervals as _gamma
         phases = [(0.35, target * 0.75, 3.0), (0.75, target, 5.0), (1.0, target, 4.0)]
         done = 0.0
+        n_moves = sum(
+            max(1, int((upto - done0) / step) + 1)
+            for done0, upto, step in [(0.0, target * 0.75, 3.0), (target * 0.75, target, 5.0)]
+        )
+        delays = iter(_gamma(n_moves, 24.0))
         for frac_lo, upto, step in phases:
             while done < upto - 0.5:
                 done = min(done + step, target)
                 await page.mouse.move(
                     start_x + done, start_y + random.uniform(-1.1, 1.1)
                 )
-                await page.wait_for_timeout(int(random.uniform(13, 37)))
+                await page.wait_for_timeout(int(max(8.0, next(delays))))
         if overshoot:
             await page.mouse.move(start_x + target + 2.0, start_y + random.uniform(-1.0, 1.0))
             await page.wait_for_timeout(random.randint(60, 110))
@@ -792,10 +803,25 @@ class AliyunCaptchaJsProvider(CaptchaProvider):
         浏览器 input 管线的可信事件。按下点带 ±2.5px 抖动（solver 同款）——
         精确中心点是统计签名。任何 send 失败 raise DragDispatchError，调用方
         不得折成 packet-miss（会锁死同一手势家族重试）。
+
+        0.14.0 指纹加固：派发前执行行为预热（微动鼠标/滚动），使事件序列带
+        「浏览 → 触达 → 按下」的人手上下文；失败静默，永不阻断求解。
+        0.14.1：开关读取收口到 _behavior_prep.WARMUP_ENABLED 单一事实源——
+        旧实现为读 SliderSolver.WARMUP_ENABLED 反向 import solver（函数内
+        import 掩盖的 provider→solver 环依赖），已删除。
         """
+        if _WARMUP_ENABLED:
+            await pre_slide_warmup(page, log_prefix="[aliyun-captcha-js] ")
         kb = geo["knobBox"]
         sx = kb[0] + kb[2] / 2 + random.uniform(-2.5, 2.5)
         sy = kb[1] + kb[3] / 2 + random.uniform(-2.5, 2.5)
+        # 0.14.0：滑块 hover 触达——真人按下前光标必然到过滑块（pointerover/
+        # mouseover 事件链），直接跳 bounding_box 按下是事件序列指纹。
+        try:
+            knob_el = await page.query_selector(_KNOB)
+            await hover_slider(page, knob_el)
+        except Exception as e:
+            logger.debug(f"[aliyun-captcha-js] pre-dispatch hover skipped: {e}")
         pts_abs = [
             (sx + float(dx), sy + float(dy), float(delay or 0.0))
             for (dx, dy, delay) in plan.points

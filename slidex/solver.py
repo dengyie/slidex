@@ -36,6 +36,14 @@ def _resolve_browser_channel() -> Optional[str]:
 
 from slidex._stealth_patch import STEALTH_LAUNCH_ARGS, STEALTH_INIT_SCRIPT, ENV_CONSISTENCY_LAUNCH_ARGS, MEMORY_GUARD_LAUNCH_ARGS
 from slidex._drag import DragDispatchError
+from slidex._behavior_prep import (
+    BEHAVIORAL_WARMUP_JS,
+    STEALTH_INIT_SCRIPT_V2,
+    STEALTH_V2_ENABLED,
+    WARMUP_ENABLED,
+    pre_slide_warmup,
+    hover_slider,
+)
 from slidex._env import env_bool, env_float
 from slidex._nav import is_nav_timeout
 from slidex._gestures import GestureSession, generate_archetype
@@ -116,6 +124,12 @@ class SliderSolver(ProviderSolverMixin):
     # CDP 模式人工等待期：自动拖动全部失败后，页面留在用户真实浏览器里，
     # 保持监听等人工拖过（真手通过率远高于合成轨迹）。须小于 solve 看门狗。
     MANUAL_VOUCHER_WAIT_S = env_float("SLIDEX_MANUAL_VOUCHER_WAIT", 300.0, minimum=0.0)
+    # 0.14.0 指纹加固：拖拽前行为预热开关（默认开）。预热在 _wait_slider 与
+    # _do_slide 之间插入一次页面内浏览行为（微动鼠标/滚动/滑块 hover）——
+    # 事件序列指纹不只在拖动本身，「零页内行为 + 即时精准抓取」是强信号。
+    # 0.14.1：env 读取收口到 _behavior_prep.WARMUP_ENABLED（provider 同源），
+    # 类属性只是再导出别名——既有 `SLIDEX_WARMUP=0` 语义与测试引用不变。
+    WARMUP_ENABLED = WARMUP_ENABLED
 
     # CDP 互斥：同一外部浏览器（同一 endpoint）同时只允许一个 solve。并发管理器
     # 只覆盖容器内浏览器路径（stealth），CDP 并发进入会互抢页面、互注账号 cookie
@@ -1110,6 +1124,41 @@ class SliderSolver(ProviderSolverMixin):
                     await self._export_human_drag_recording(verify_url)
                     self._emit_step("solve", "manual_wait", "ok")
                     return True, jar
+                # 拼图形态（jigsaw-captcha-js，z.ai 注册链 2026-11-19 实弹）成功
+                # 信号：浮窗消失/隐藏且页面不再出现验证文案。该形态没有 x5sec
+                # 票据与 bx voucher（成功只在页面 wrapper 打 console 🎉 参数），
+                # 既有收割面全部 miss —— 人拖通过或回执竞态（get_result 5s
+                # 超时先于 🎉 落地）都会把已通过的页面当失败白等 300s。
+                # 浮窗在进入 manual wait 前已确认存在，此刻消失即视为通过。
+                # 0.14.1：浮窗仍可见时短路跳过全页文案扫描（querySelectorAll
+                # 全 DOM 遍历是本 loop 唯一重活，1.5s 一次白扫 300s）——浮窗
+                # 在即未通过，无需问「页面还有没有验证文案」。
+                if self.page is not None and not self.page.is_closed():
+                    try:
+                        jigsaw_passed = await self.page.evaluate(
+                            "() => { const f = document.querySelector("
+                            "'#aliyunCaptcha-window-float, #aliyunCaptcha-window-popup');"
+                            " if (f && !f.classList.contains('aliyunCaptcha-hidden'))"
+                            " return false;"
+                            " const ask = [...document.querySelectorAll('div,span,p')].some("
+                            "e => { const s = (e.textContent || '').trim(); return"
+                            " s === 'Please complete security verification' ||"
+                            " s === 'Please drag the slider to complete the puzzle'; });"
+                            " return !ask; }"
+                        )
+                    except Exception:
+                        jigsaw_passed = False
+                    if jigsaw_passed:
+                        self._success_outcome = "manual_pass_wait"
+                        logger.success(
+                            f"[{self.pure_user_id}] pass! (jigsaw modal dismissed during manual wait)")
+                        await self._export_human_drag_recording(verify_url)
+                        self._emit_step("solve", "manual_wait", "ok")
+                        try:
+                            cookies = await self._get_cookies()
+                        except Exception:
+                            cookies = None
+                        return True, cookies
                 await asyncio.sleep(1.5)
             logger.warning(f"[{self.pure_user_id}] manual wait expired without a pass")
             self._emit_step("solve", "manual_wait", "failed", reason="no_manual_pass")
@@ -1494,7 +1543,13 @@ class SliderSolver(ProviderSolverMixin):
             self._browser_pid = pid
 
         if self.automation_backend != "patchright":
-            await self.page.add_init_script(STEALTH_INIT_SCRIPT)
+            # 0.14.0：注入 V2 反检测脚本（getter 链/toString/缺口探测加固版）。
+            # SLIDEX_STEALTH_V2=0 回退 legacy 注入（逃生口，预期 V2 稳定后收口）。
+            # 0.14.1：开关读取收口到 _behavior_prep.STEALTH_V2_ENABLED 单一事实源。
+            if STEALTH_V2_ENABLED:
+                await self.page.add_init_script(STEALTH_INIT_SCRIPT_V2)
+            else:
+                await self.page.add_init_script(STEALTH_INIT_SCRIPT)
         await self._inject_cookies()
         self.page.on("response", self._on_response)
         self.page.on("console", self._on_console)
@@ -2011,7 +2066,14 @@ class SliderSolver(ProviderSolverMixin):
         self.page = await self.context.new_page()
         self._cdp_owned_page = True
 
-        await self.page.add_init_script(STEALTH_INIT_SCRIPT)
+        # 0.14.0：CDP 模式同样注入 V2 脚本。外挂标签页跑在用户真实浏览器里，
+        # 环境指纹层面优于容器，但 addInitScript 的暴露面（document 改写痕迹、
+        # 事件分发路径上的预处理）与容器一致——统一收口到 V2 注入。
+        # SLIDEX_STEALTH_V2=0 回退 legacy 注入。开关单一事实源同上。
+        if STEALTH_V2_ENABLED:
+            await self.page.add_init_script(STEALTH_INIT_SCRIPT_V2)
+        else:
+            await self.page.add_init_script(STEALTH_INIT_SCRIPT)
         self.page.on("response", self._on_response)
         self.page.on("close", lambda: logger.warning(f"[{self.pure_user_id}] page closed (external browser)!"))
 
@@ -2171,6 +2233,15 @@ class SliderSolver(ProviderSolverMixin):
             self._slide_ok = None
             self._slide_upstream_code = None
             return
+
+        # 0.14.0 指纹加固：拖拽前行为预热（每 attempt 一次）。从 slider_wait
+        # 直接跳 bounding_box 按下的「零页内行为 + 即时精准抓取」是事件序列
+        # 指纹层（非轨迹形状层）的强信号。预热器自身失败静默降级，永不阻断
+        # 求解；CDP 真机模式（用户可见页面）也执行——可信事件路径无副作用，
+        # 只有光标会短暂移动。SLIDEX_WARMUP=0 可整体关闭。
+        if self.WARMUP_ENABLED:
+            await pre_slide_warmup(self.page, log_prefix=f"[{self.pure_user_id}] ")
+        await hover_slider(self.page, btn)
 
         sx = box["x"] + box["width"] / 2 + random.uniform(-2.5, 2.5)
         sy = box["y"] + box["height"] / 2 + random.uniform(-2.5, 2.5)

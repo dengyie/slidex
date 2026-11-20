@@ -25,7 +25,7 @@ from typing import List, Optional, Sequence, Set, Tuple
 
 from loguru import logger
 
-from slidex._humanize import apply_replay_noise, compose_human_points, replay_time_scale, skeleton_params
+from slidex._humanize import apply_replay_noise, compose_human_points, gamma_intervals, replay_time_scale, skeleton_params
 from slidex._slide_geometry import (
     RECORDED_GAP_MIN_MS,
     normalize_recorded_delays,
@@ -243,18 +243,24 @@ def _pause_hold(distance: float) -> List[Point]:
 
 
 def _tremor_dense(distance: float) -> List[Point]:
-    """28-40 dense steps with high-frequency y tremor."""
+    """28-40 dense steps with high-frequency y tremor.
+
+    0.14.0：步进间隔从 uniform(12,26) 换 gamma(2.2)+±15% 抖动。uniform 是
+    经典统计签名——间隔直方图是等宽矩形（变异系数 0.24 vs 人手 >0.6），且
+    28-40 步里频繁出现 ≥4 步等间隔连段。gamma 右偏长尾直方图 + 抖动打散
+    残余平顶（±1% 平顶率 ≤5/200，与 R1 契约对齐），震颤幅度/密度语义不变。
+    """
     steps = random.randint(28, 40)
     traj: List[Point] = [(0.0, 0.0, _press_hold_ms())]
-    for i in range(1, steps + 1):
+    delays = [max(8.0, d * random.uniform(0.85, 1.15)) for d in gamma_intervals(steps - 1, 19.0)]
+    for i in range(1, steps):
         tau = i / steps
         x = distance * tau
         if i < steps:
             x += random.uniform(-0.45, 0.45)
             x = min(max(x, 0.0), distance)
         y = 0.0 if i == steps else random.uniform(-2.4, 2.4)
-        delay = random.uniform(12.0, 26.0)
-        traj.append((x, y, delay))
+        traj.append((x, y, delays[i - 1]))
     last = traj[-1]
     traj[-1] = (distance, 0.0, last[2])
     return traj

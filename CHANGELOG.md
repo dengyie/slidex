@@ -1,5 +1,122 @@
 # Changelog
 
+## [0.14.1] - 2026-11-20
+
+0.14.0 指纹加固的工程质量复审轮：收口重复逻辑、消除新增指纹泄露、
+预热行为自身统计签名 gamma 化、manual wait jigsaw 判定短路。全量测试绿。
+
+### Added
+- `_behavior_prep` 开关单一事实源：`WARMUP_ENABLED` / `STEALTH_V2_ENABLED`
+  在本模块读 env（`SLIDEX_WARMUP` / `SLIDEX_STEALTH_V2`，默认开，语义与
+  0.14.0 一致）；solver 类属性 `WARMUP_ENABLED` 改为再导出别名。
+- 回归测试 5 条（`tests/test_fingerprint_hardening.py`）：开关单一事实源
+  （solver/provider 同源、solver 无散落 env 读取、provider 无反向 import）、
+  plugins native 方法 toString 白名单、预热段间隔非均匀（CV > 0.2、无 ±1%
+  平顶连段）、滚轮 1-3 步同向限幅、jigsaw 判定短路 + manual_pass_wait
+  红线钉住。
+
+### Fixed
+- **V2 plugins 伪装 toString 源码泄露**：`plugins` 数组的 `item`/`namedItem`/
+  `refresh` 在真 Chrome 是 native 函数，0.14.0 用裸 JS 函数实现——
+  `fn.toString()` 会返回源码体而非 `[native code]`，构成可探测缺口。
+  现注册进 toString WeakSet 白名单归一。
+- **provider `_dispatch_plan_cdp` 环依赖**：为读 `SliderSolver.WARMUP_ENABLED`
+  函数内反向 `import slidex.solver`（provider→solver 环），且预热门槛逻辑
+  在 solver/provider 两个入口各写一份。收口到 `_behavior_prep` 单一事实源。
+- **`SLIDEX_STEALTH_V2` 开关散落读取**：solver 两处注入点各自
+  `env_bool("SLIDEX_STEALTH_V2", True)`，收口到 `_behavior_prep.STEALTH_V2_ENABLED`。
+- **预热行为统计签名**：段间隔 `uniform(0.08, 0.25)` 矩形直方图、滚轮固定
+  单步 round-uniform 幅度——与 0.14.0 修掉的 `_tremor_dense` 同族签名。
+  段间隔换 gamma(shape=2.2)+±15% 抖动；滚轮 1-3 步（等概率）gamma 间隔、
+  总幅度限 ±60px 且单次动作不反向。
+- **manual wait jigsaw 判定短路**：浮窗仍可见时 JS 端直接返回 false，
+  不再每 1.5s 白跑一次 `querySelectorAll('div,span,p')` 全 DOM 遍历
+  （300s 预算下最多省 ~200 次全页扫描）；浮窗消失后才扫验证文案。
+- **V2 UA 块死代码**：`realGetter` 取了从不用（`void realGetter` 占位），
+  删除；测试死断言 `... or True` 恒真，改为有效断言。
+
+## [0.14.0] - 2026-11-20
+
+z.ai 注册链指纹加固专项。2026-11-19 实弹结论：三个会话、多次 attempt 全部
+F001——0.13.3 拟人运动学内核（轨迹几何/速度统计层）上线后自动拖拽仍 100%
+被拒，而人手拖同一环境同一滑块总能过。判定：风控已不在轨迹形状层，而是
+**环境指纹 + 事件序列指纹 + 行为上下文**层识别自动化。本版四层加固。
+
+### Added
+- **`_behavior_prep` 新模块**：指纹注入 V2 + 拖拽前行为预热，两个开关
+  （`SLIDEX_STEALTH_V2` / `SLIDEX_WARMUP`，均默认开）。
+- **STEALTH_INIT_SCRIPT_V2 注入重写**（solver 容器路径与 CDP 模式统一收口；
+  patchright 路径不动——本体自带反检测）：
+  - toString 归一改 WeakSet 白名单模式：伪装函数注册进 WeakSet，
+    `Function.prototype.toString` 覆盖实现对其直接返回原生码——旧版只有
+    `fn.toString()` 一条通道归一，`Function.prototype.toString.call(fn)`
+    直接泄露 hook 源码（本地 playwright 实测复现后修复）；未注册的真原生
+    函数零改动透传，自防御 hook 自身取源。
+  - getter 挂原型而非 own：`webdriver`/`languages` 走
+    `navigator.__proto__`——`getOwnPropertyDescriptor(navigator, ...)` own
+    链探测不再命中。
+  - plugins 5 插件白名单值域伪装 + `Plugin.prototype`/`PluginArray.prototype`
+    原样保留（headless 实测 plugins.length=0 是强信号；5 个插件名取自真
+    Chrome 分布）；`pdfViewerEnabled=true`（headless 缺口之一）。修复：
+    Chromium 里 `plugins` 是 Navigator.prototype 的 accessor（无 own
+    descriptor），旧式 own-only 探测会静默跳过覆盖——实测复现后补双层级。
+  - WebGL 只覆盖 UNMASKED_VENDOR/RENDERER（37445/37446），其余
+    `getParameter` 原样透传真内核——旧版整函数包裹、白名单外参数也过
+    伪装层，探测面反而更大。
+  - permissions.query notifications 联动 `Notification.permission`（旧版
+    硬编码 denied 是可探测缺口），其余 name 透传真实现。
+  - screen availWidth/availHeight 对齐 width/height、colorDepth/pixelDepth=24
+    （headless 任务栏缺失特征）；languages 对齐 `--lang=zh-CN` 启动参数；
+    chrome.runtime/loadTimes/csi/app 保留核；UA Headless 标记去除；
+    connection.rtt 伪装保留。旧版 Canvas toDataURL 像素扰动删除（对现代
+    风控是「噪声即指纹」）；注入完毕清理全部 `__slidex` 全局符号（net tap
+    的运行期符号不受影响——那是功能态）。
+- **拖拽前行为预热 `pre_slide_warmup`**（solver `_do_slide` 与 provider
+  `_dispatch_plan_cdp` 双入口，每 attempt 一次）：随机 150-600ms 停顿 →
+  3-6 段微动鼠标（可信事件路径，视口内落点）→ 60% 概率小幅滚轮 → 滑块
+  hover 触达（pointerover/mouseover 链——真人按下前光标必然到过滑块）。
+  「零页内行为 + 即时精准抓取 bounding_box」本身是事件序列指纹。预热
+  任何失败静默降级，永不阻断求解。
+- **回归测试 19 条**（`tests/test_fingerprint_hardening.py`）：V2 脚本静态
+  结构（无 Proxy、原型挂载、痕迹清理、chakra 探针 >1000 字符）；本地
+  playwright 真注入逐项断言（webdriver/languages/plugins=5/pdfViewer/
+  permissions/WebGL/screen/toString 双通道零泄露/无全局符号）；预热派发序
+  列与失败静默、`SLIDEX_WARMUP` 开关、`_do_slide` 派发前置顺序；事件序列
+  分布统计（tremor_dense ±1% 平顶率 ≤5/50、间隔 CV > 0.2、gamma 右偏）。
+
+### Fixed
+- **`_tremor_dense` uniform 间隔签名**：28-40 步的 delay 从 uniform(12,26)
+  换 gamma(shape=2.2)+±15% 抖动。uniform 矩形直方图（CV 0.24 vs 人手
+  >0.6）与 ≥4 步等间隔连段（30 seeds 中 8 个出现）是 0.13.0 内核统一时
+  漏掉的家族级签名——R1 验收线只覆盖了 minimum_jerk 母线家族。
+- **provider legacy `_drag_real` uniform 间隔**：同理换
+  `gamma_intervals`（右偏长尾，CV ~0.67），消除三段匀速的等宽矩形直方图。
+
+### Changed
+- solver `_init_browser` / `_connect_existing_browser` 注入点收口 V2；
+  `SLIDEX_STEALTH_V2=0` 回退 legacy 注入（逃生口，V2 稳定后收口删除）。
+
+### 未实测（待线上验证）
+- 以上注入与预热均通过本地 playwright + 统计自测闭环，但「自动拖拽能否
+  过 z.ai 注册风控」必须线上实弹（需人手拖对照组）。验证步骤见
+  deploy/README 或按 2026-11-19 同流程：容器跑 solve → 观察 fingerprint
+  audit 行与 attempt 结果；对照组同人同环境手拖一次。预期：F001 比例
+  显著下降或消失；若仍 100% F001，下一轮排查方向是 TLS/HTTP2 指纹层
+  （curl_cffi 类）与 SDK 域名侧的会话先验。
+
+## [0.13.4] - 2026-11-19
+
+z.ai 注册链实弹（2026-11-19 晚）：滑块①人拖通过（console 🎉「验证码滑动成功」
+回执 23:23:55 落地）但收割面全 miss——manual wait 只认 nc 形态的 x5sec 票据 /
+bx voucher，jigsaw 形态两者皆无；provider get_result 5s 超时又先于 🎉 落地时，
+已通过的页面被当失败白等 300s。
+
+### Fixed
+- **manual wait 拼图收割分支**：浮窗消失/隐藏且页面不再出现验证文案 → 判过
+  （`manual_pass_wait`）。同时覆盖两种通过来源：真人拖动与回执竞态。
+  nc 形态信号（x5sec/bx voucher）优先级不变，互不影响。
+
+
 ## [0.13.3] - 2026-11-18
 
 zcode-hub 活动套餐领取链实弹复盘（2026-11-18）：claim 链的 aliyun_captcha_js
