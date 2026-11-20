@@ -630,9 +630,13 @@ async def test_jigsaw_manual_wait_short_circuits_on_visible_float():
     from slidex.solver import SliderSolver
 
     src = inspect.getsource(SliderSolver)
-    # 短路行必须存在（浮窗可见 → return false，不进 ask 扫描）
-    assert "if (f && !f.classList.contains('aliyunCaptcha-hidden'))" in src
-    assert "return false;" in src.split("if (f && !f.classList")[1].split("const ask")[0]
+    # 短路行必须存在（浮窗可见 → return false，不进 ask 扫描）。
+    # 0.14.2：可见性判定改 getComputedStyle（display/visibility/offsetParent
+    # 三路兜底），不再单押 aliyunCaptcha-hidden 类名。
+    assert "if (f) { const cs = getComputedStyle(f);" in src
+    assert "cs.display !== 'none'" in src and "cs.visibility !== 'hidden'" in src
+    assert "!!f.offsetParent" in src
+    assert "if (shown) return false;" in src.split("const cs = getComputedStyle")[1].split("const ask")[0]
     # 0.13.4 收割分支红线：jigsaw 形态 manual_pass_wait 出口保留
     assert "jigsaw modal dismissed during manual wait" in src
     assert src.count('_success_outcome = "manual_pass_wait"') >= 2

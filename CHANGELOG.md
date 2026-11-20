@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.14.2] - 2026-11-21
+
+production-code-quality-review 修复轮（P1×1 + P2×2 + P3×2，全量 1316 passed）。
+
+### Fixed
+- **预热与取框顺序（P1）**：`_do_slide` 原先在 `bounding_box()` 之后才跑行为
+  预热——预热含 60% 概率滚轮（±60px），可滚动页上会真实改变布局，过期坐标
+  喂给拖拽起点会拖偏，且会污染 F001 实弹验证归因（拖偏被误记为指纹被拒）。
+  现预热/hover 在取 box 之前，最终坐标预热后重取。provider
+  `_dispatch_plan_cdp` 同构修复：`geo["knobBox"]` 是派发前快照，现在预热后
+  从 knob 元素重取（重取失败抛 DragDispatchError，按家族语义处理，不用
+  过期坐标硬拖）。
+- **CDP hover 的 iframe 盲区（P2）**：`_dispatch_plan_cdp` 原先
+  `page.query_selector(_KNOB)` 只查主文档，挑战在 iframe 时静默 miss。
+  改复用 `iter_search_targets` + `query_in_targets`（与 detect/locate 同源）。
+- **jigsaw 浮窗可见性判定（P2）**：manual wait 判定原单押
+  `aliyunCaptcha-hidden` 类名（全库仅此一处出现、无 SDK DOM 实证），类名
+  漂移会导致已通过页面白等满 300s。改 `getComputedStyle` display/visibility
+  + `offsetParent` 三路兜底，与类名实现解耦；字符串红线测试同步更新。
+- **清理（P3）**：删 solver 未使用的 `BEHAVIORAL_WARMUP_JS` 导入；provider
+  函数内 `from slidex._humanize import gamma_intervals` 上提模块头（与
+  0.14.1 收口主题一致）。
+
 ## [0.14.1] - 2026-11-20
 
 0.14.0 指纹加固的工程质量复审轮：收口重复逻辑、消除新增指纹泄露、

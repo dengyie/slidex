@@ -37,7 +37,6 @@ def _resolve_browser_channel() -> Optional[str]:
 from slidex._stealth_patch import STEALTH_LAUNCH_ARGS, STEALTH_INIT_SCRIPT, ENV_CONSISTENCY_LAUNCH_ARGS, MEMORY_GUARD_LAUNCH_ARGS
 from slidex._drag import DragDispatchError
 from slidex._behavior_prep import (
-    BEHAVIORAL_WARMUP_JS,
     STEALTH_INIT_SCRIPT_V2,
     STEALTH_V2_ENABLED,
     WARMUP_ENABLED,
@@ -1133,13 +1132,20 @@ class SliderSolver(ProviderSolverMixin):
                 # 0.14.1：浮窗仍可见时短路跳过全页文案扫描（querySelectorAll
                 # 全 DOM 遍历是本 loop 唯一重活，1.5s 一次白扫 300s）——浮窗
                 # 在即未通过，无需问「页面还有没有验证文案」。
+                # 0.14.2：可见性判定不再单押 `aliyunCaptcha-hidden` 类名
+                # （review P2：该类名仅在 solver 此一处出现，无 SDK DOM 实证
+                # 佐证；类名若漂移会导致浮窗已消失仍被判"在"，白等满 300s）。
+                # 改 getComputedStyle display/visibility + offsetParent 三路
+                # 兜底——任何一路判隐都算消失，与类名实现解耦。
                 if self.page is not None and not self.page.is_closed():
                     try:
                         jigsaw_passed = await self.page.evaluate(
                             "() => { const f = document.querySelector("
                             "'#aliyunCaptcha-window-float, #aliyunCaptcha-window-popup');"
-                            " if (f && !f.classList.contains('aliyunCaptcha-hidden'))"
-                            " return false;"
+                            " if (f) { const cs = getComputedStyle(f);"
+                            " const shown = cs.display !== 'none'"
+                            " && cs.visibility !== 'hidden' && !!f.offsetParent;"
+                            " if (shown) return false; }"
                             " const ask = [...document.querySelectorAll('div,span,p')].some("
                             "e => { const s = (e.textContent || '').trim(); return"
                             " s === 'Please complete security verification' ||"
@@ -2225,23 +2231,26 @@ class SliderSolver(ProviderSolverMixin):
             self._slide_upstream_code = None
             return
 
-        box = await btn.bounding_box()
-        if not box:
-            logger.warning(f"[{self.pure_user_id}] slider button box gone before slide")
-            self._result_event.clear()
-            self._slide_code = None
-            self._slide_ok = None
-            self._slide_upstream_code = None
-            return
-
         # 0.14.0 指纹加固：拖拽前行为预热（每 attempt 一次）。从 slider_wait
         # 直接跳 bounding_box 按下的「零页内行为 + 即时精准抓取」是事件序列
         # 指纹层（非轨迹形状层）的强信号。预热器自身失败静默降级，永不阻断
         # 求解；CDP 真机模式（用户可见页面）也执行——可信事件路径无副作用，
         # 只有光标会短暂移动。SLIDEX_WARMUP=0 可整体关闭。
+        # 0.14.2：预热必须在取 box **之前**——预热含 60% 概率滚轮（±60px），
+        # 可滚动页面上会真实改变布局；先取框后预热会把过期坐标喂给拖拽起点
+        # （review P1）。此处只做存在性预检（快速失败），最终坐标预热后重取。
         if self.WARMUP_ENABLED:
             await pre_slide_warmup(self.page, log_prefix=f"[{self.pure_user_id}] ")
         await hover_slider(self.page, btn)
+
+        box = await btn.bounding_box()
+        if not box:
+            logger.warning(f"[{self.pure_user_id}] slider button box gone after warmup")
+            self._result_event.clear()
+            self._slide_code = None
+            self._slide_ok = None
+            self._slide_upstream_code = None
+            return
 
         sx = box["x"] + box["width"] / 2 + random.uniform(-2.5, 2.5)
         sy = box["y"] + box["height"] / 2 + random.uniform(-2.5, 2.5)
